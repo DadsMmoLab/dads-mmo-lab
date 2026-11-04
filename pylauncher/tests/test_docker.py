@@ -2427,9 +2427,9 @@ def _remove_runner(
             return _completed(stdout="".join(n + "\n" for n in sorted(exists)))
         if cmd[:2] == ["docker", "ps"]:
             return _completed(stdout="".join(n + "\n" for n in sorted(live)))
-        if cmd[:3] == ["docker", "rm", "-f"]:
+        if cmd[:4] == ["docker", "rm", "-f", "-v"]:
             if rm_works:
-                exists.discard(cmd[3])
+                exists.discard(cmd[4])
             return _completed()
         return _completed()
 
@@ -2443,19 +2443,32 @@ def test_remove_staged_never_passes_a_flag_that_would_delete_a_volume(
 
     The database is a named volume (`ac-database:/var/lib/mysql`), so
     `compose down` keeps every character. `compose down -v` deletes them. There
-    is no legitimate reason for this argv to grow a `-v`, and a test is cheaper
-    than finding out.
+    is no legitimate reason for ANY `remove_staged` argv to grow a `-v`, and a
+    test is cheaper than finding out. The single exception is the by-name
+    `rm -f -v` fallback, whose `-v` takes only each container's OWN anonymous
+    volumes, never a named one (T846: `docker rm -f -v <name>` where <name> is
+    one of this install's census names).
     """
+    allowed = {SPEC.db, SPEC.auth, SPEC.world}
     calls: list[list[str]] = []
     monkeypatch.setattr(docker.runner, "run", _remove_runner(calls, present={SPEC.db, SPEC.world}))
     assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
 
+    assert calls, "nothing was asked of Docker"
     down = [cmd for cmd in calls if cmd[:3] == ["docker", "compose", "down"]]
     assert down, "nothing was taken down"
     assert "--remove-orphans" in down[0], down[0]
     for cmd in calls:
-        assert "-v" not in cmd, cmd
         assert "--volumes" not in cmd, cmd
+        assert "volume" not in cmd[1:2], cmd
+        if cmd[:3] == ["docker", "compose", "rm"]:
+            assert "-v" not in cmd, cmd
+            continue
+        if cmd[:2] == ["docker", "rm"]:
+            assert cmd[:4] == ["docker", "rm", "-f", "-v"], cmd
+            assert len(cmd) == 5 and cmd[4] in allowed, cmd
+            continue
+        assert "-v" not in cmd, cmd
 
 
 def test_remove_staged_asks_by_project_label_not_by_container_name(
@@ -2530,7 +2543,7 @@ def test_remove_staged_finishes_the_job_when_compose_down_removed_nothing(
         _remove_runner(calls, present={SPEC.db, SPEC.world}, down_removes=False),
     )
     assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
-    removed = {c[3] for c in calls if c[:3] == ["docker", "rm", "-f"]}
+    removed = {c[4] for c in calls if c[:4] == ["docker", "rm", "-f", "-v"]}
     assert removed == {SPEC.db, SPEC.world}
 
 
@@ -3130,7 +3143,7 @@ def test_the_teardown_gives_a_populated_server_the_same_grace_a_stop_does(
 def test_the_teardowns_by_name_fallback_stops_before_it_removes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`docker rm -f` is a SIGKILL with no grace at all.
+    """`docker rm -f -v` is a SIGKILL with no grace at all.
 
     Putting the grace on `compose down` alone left a hard-kill path reachable
     from the same button, in exactly the case that reaches it: a moved install
@@ -3146,11 +3159,13 @@ def test_the_teardowns_by_name_fallback_stops_before_it_removes(
     assert docker.remove_staged(SPEC, Path("/tmp/wow")) is True
 
     order = [
-        cmd for cmd in calls if cmd[:2] == ["docker", "stop"] or cmd[:3] == ["docker", "rm", "-f"]
+        cmd
+        for cmd in calls
+        if cmd[:2] == ["docker", "stop"] or cmd[:4] == ["docker", "rm", "-f", "-v"]
     ]
     for name in (SPEC.db, SPEC.world):
         stopped = order.index(["docker", "stop", "-t", _GRACE, name])
-        removed = order.index(["docker", "rm", "-f", name])
+        removed = order.index(["docker", "rm", "-f", "-v", name])
         assert stopped < removed, f"{name} was removed before it was stopped: {order}"
 
 
@@ -5725,7 +5740,7 @@ def test_copy_from_image_creates_copies_and_removes_in_that_order(
         # ENTRYPOINT nor a CMD, and nothing is ever started.
         ["docker", "create", "--entrypoint", "true", "yulon.local/x:t"],
         ["docker", "cp", "0123456789abcdef:/opt/etc", str(tmp_path / "etc")],
-        ["docker", "rm", "-f", "0123456789abcdef"],
+        ["docker", "rm", "-f", "-v", "0123456789abcdef"],
     ]
 
 
@@ -5746,7 +5761,7 @@ def test_the_container_id_is_the_last_stdout_line_not_the_whole_of_it(
     monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
     docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
     assert calls[1] == ["docker", "cp", "abc123def456:/opt/etc", str(tmp_path / "etc")]
-    assert _rm_calls(calls) == [["docker", "rm", "-f", "abc123def456"]]
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "-v", "abc123def456"]]
 
 
 def test_a_failed_copy_still_removes_the_container_it_created(
@@ -5758,7 +5773,7 @@ def test_a_failed_copy_still_removes_the_container_it_created(
     monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
     with pytest.raises(docker.DockerCommandError, match="No such container:path"):
         docker.copy_from_image("yulon.local/x:t", "/nope", tmp_path / "nope")
-    assert calls[-1] == ["docker", "rm", "-f", "0123456789abcdef"]
+    assert calls[-1] == ["docker", "rm", "-f", "-v", "0123456789abcdef"]
 
 
 def test_a_create_that_prints_no_id_is_an_error_and_removes_nothing(
@@ -5778,7 +5793,7 @@ def test_a_create_that_fails_outright_removes_nothing_and_names_the_image(
 ) -> None:
     """No container was made, so a removal would be the only mistake left to make.
 
-    `docker rm -f ""` is not harmless noise: it exits non-zero, and the warning
+    `docker rm -f -v ""` is not harmless noise: it exits non-zero, and the warning
     it produces would blame the removal for an image that was never pulled.
     """
     calls: list[list[str]] = []
@@ -5811,7 +5826,7 @@ def test_an_interrupted_copy_still_removes_the_container(
     monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
     with pytest.raises(KeyboardInterrupt):
         docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
-    assert _rm_calls(calls) == [["docker", "rm", "-f", "0123456789abcdef"]]
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "-v", "0123456789abcdef"]]
 
 
 def test_an_unexpected_error_during_the_copy_is_not_dressed_up_as_a_copy_failure(
@@ -5824,7 +5839,7 @@ def test_an_unexpected_error_during_the_copy_is_not_dressed_up_as_a_copy_failure
     monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
     with pytest.raises(MemoryError):
         docker.copy_from_image("yulon.local/x:t", "/opt/etc", tmp_path / "etc")
-    assert _rm_calls(calls) == [["docker", "rm", "-f", "0123456789abcdef"]]
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "-v", "0123456789abcdef"]]
 
 
 def test_a_removal_that_fails_is_logged_and_does_not_replace_the_copys_error(
@@ -5838,7 +5853,7 @@ def test_a_removal_that_fails_is_logged_and_does_not_replace_the_copys_error(
     with caplog.at_level("WARNING"):
         with pytest.raises(docker.DockerCommandError, match="No such container:path"):
             docker.copy_from_image("yulon.local/x:t", "/nope", tmp_path / "nope")
-    assert _rm_calls(calls) == [["docker", "rm", "-f", "0123456789abcdef"]]
+    assert _rm_calls(calls) == [["docker", "rm", "-f", "-v", "0123456789abcdef"]]
     assert "removal already in progress" in caplog.text
     assert "0123456789ab" in caplog.text
 
@@ -7295,6 +7310,111 @@ def test_remove_image_reports_an_image_in_use_as_a_warning_not_a_failure(
     assert "in use" in docker.remove_image("yulon.local/ac-wotlk-authserver:native-1")
 
 
+# -- T864-E: the finished one-shot containers that keep an old image alive ---------
+
+
+def test_remove_finished_container_sends_a_plain_rm_of_the_id_and_never_a_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T864-E: by the id the listing gave, never `-f` and never `-v`.
+
+    Mutation: pass the name through (or add `-f`) and this argv changes; a
+    running holder would then be killed instead of refused.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        calls.append(cmd)
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.remove_finished_container("a1b2c3d4e5f6") == ""
+    assert calls == [["docker", "rm", "a1b2c3d4e5f6"]]
+    for cmd in calls:
+        for flag in ("-f", "--force", "-v", "--volumes"):
+            assert flag not in cmd, cmd
+
+
+def test_remove_finished_container_says_what_docker_said_when_it_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A container that will not go answers a non-empty sentence, never `""`."""
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(
+            1,
+            "",
+            "Error response from daemon: You cannot remove a running container abc",
+        ),
+    )
+    said = docker.remove_finished_container("a1b2c3d4e5f6")
+    assert said and "running container" in said
+
+
+def test_containers_on_lists_running_and_exited_with_id_state_and_both_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T864-E: one image, EVERY container on it, and the fields the rules need.
+
+    Mutation guards, each pinned by a sibling test: a `status=` filter here
+    hides a RUNNING holder (the running+exited test removes the image then),
+    and the caller cannot apply any rule to a field this argv does not ask for.
+    """
+    calls: list[list[str]] = []
+    stdout = (
+        "a1b2c3d4e5f6\tac-db-import\texited\tyulon-wow-coa-af665b68\tac-db-import\n"
+        "b2c3d4e5f6a1\tac-worldserver\trunning\tyulon-wow-coa-af665b68\tac-worldserver\n"
+    )
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        calls.append(cmd)
+        return _completed(0, stdout, "")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    refs = docker.containers_on("sha256:aaa")
+    assert calls[0][:2] == ["docker", "ps"]
+    assert "ancestor=sha256:aaa" in calls[0], calls[0]
+    assert not any(arg.startswith("status=") for arg in calls[0]), calls[0]
+    fmt = calls[0][calls[0].index("--format") + 1]
+    for field in (
+        "{{.ID}}",
+        "{{.Names}}",
+        "{{.State}}",
+        '{{.Label "com.docker.compose.project"}}',
+        '{{.Label "com.docker.compose.service"}}',
+    ):
+        assert field in fmt, (field, fmt)
+    assert refs == (
+        docker.ContainerRef(
+            id="a1b2c3d4e5f6",
+            name="ac-db-import",
+            state="exited",
+            project="yulon-wow-coa-af665b68",
+            service="ac-db-import",
+        ),
+        docker.ContainerRef(
+            id="b2c3d4e5f6a1",
+            name="ac-worldserver",
+            state="running",
+            project="yulon-wow-coa-af665b68",
+            service="ac-worldserver",
+        ),
+    )
+
+
+def test_containers_on_answers_none_when_the_listing_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """None, never `()`: "would not answer" must not read as "nothing holds it"."""
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(1, "", "daemon hung up"),
+    )
+    assert docker.containers_on("sha256:aaa") is None
+
+
 def test_tag_image_gives_one_ref_a_second_name_and_touches_nothing_else(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7330,7 +7450,9 @@ def test_tag_image_reports_a_missing_source_in_the_daemons_own_words(
 
 
 def test_nothing_in_this_module_ever_prunes_the_daemon() -> None:
-    """`image prune`, `builder prune` and `system prune` reach every project on the box.
+    """`image prune` and `system prune` reach every project on the box; the one `builder
+    prune` here (T864) runs only when the player ticks Docker's build cache in Free Docker
+    space…, under the maintenance lease, refused while a build press runs.
 
     `alpine/git` shows on a real install as `<none>`-tagged - it LOOKS dangling
     - and it is the sha256-pinned image every install's clone stage depends on.
@@ -7338,7 +7460,8 @@ def test_nothing_in_this_module_ever_prunes_the_daemon() -> None:
     source = (Path(__file__).resolve().parents[1] / "yulon" / "docker.py").read_text(
         encoding="utf-8"
     )
-    assert '"prune"' not in source
+    assert source.count('"prune"') == 1, "a second prune reached the module"
+    assert '"builder", "prune", "-f"' in source, "the one prune is not the ticked cache prune"
     assert '"--rmi"' not in source
 
 

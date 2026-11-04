@@ -54,6 +54,7 @@ from yulon.catalog.installer import (
     InstallStopped,
     OneShotLeftRunning,
     ReadyWaitStopped,
+    UpdateRefused,
 )
 from yulon.catalog.native import (
     DOWNLOAD_CANCEL_NOTE,
@@ -672,26 +673,63 @@ class AzerothCoreInstaller(StagedInstaller):
         if written:
             yield "The extracted game data is left out of the build context."
 
+    def _ale_compile_patches(self, server_dir: Path) -> tuple[ale_playerbots.CompilePatch, ...]:
+        """Yu'lon's own mod-ale fixes for this compile, read from the catalog's files (T867).
+
+        Empty, and the patch file is not even read, when this server has no
+        `modules/mod-ale` (D3) or the entry carries none: a server without the
+        module never sees a sentence about it. The files are read on every
+        compile, never remembered: a patch laid for one compile is taken back
+        out after it, so there is no "already applied" state to trust.
+        """
+        specs = self._block().module_patches
+        if not specs or not (server_dir / ale_playerbots.ALE).is_dir():
+            return ()
+        return tuple(
+            ale_playerbots.CompilePatch(
+                spec.file,
+                carried.patch_text(self.entry.name, self.installers_root, spec),
+                spec.reason,
+            )
+            for spec in specs
+            if spec.module == ale_playerbots.MODULE
+        )
+
     def stage_build(self, ctx: StageContext) -> Iterator[str]:
         """The spine's compile, with mod-ale's Playerbots names bridged for it alone (T645).
 
         Every press that compiles comes through here: the install's `build` stage,
         `rebuild()`'s (Rebuild, "Update the server to latest…", "Return to the tested
         pin…", a moved-in server's rebuild). `ale_playerbots.bridge()` is a no-op unless
-        mod-ale and mod-playerbots disagree on a config name; whatever it rewrote is put
-        back once the compile returns, fails or is stopped, so no git question outside
-        the compile ever sees it. Not yielded from the `finally`: a generator closed
-        mid-compile must not yield, so there the lines go to the log.
+        mod-ale and mod-playerbots disagree on a config name or the entry carries a
+        `ModulePatch` for it (T867); whatever it rewrote or laid is put back once the
+        compile returns, fails or is stopped, so no git question outside the compile
+        ever sees it. Not yielded from the `finally`: a generator closed mid-compile
+        must not yield, so there the lines go to the log.
 
         The bridge runs INSIDE the `try` and returns its lines only once every write is
         done (cold review of db5da4df): a press closed at one of those lines (GeneratorExit)
         still reaches the put-back.
 
+        T867: the entry's module patches go in with the bridge and come out with it, in
+        the same record; `_ale_compile_patches()` reads none for a server without
+        mod-ale, so that server's build is exactly what it was.
+
         Also before the update route's dirty-tree guard: `_refuse_unless_updatable()`.
         """
         finished = False
+
+        def has_build() -> bool:
+            """Only asked when a refusal's sentence needs it (T867-D D3)."""
+            return ctx.state.has("build") or self.built_images(ctx) is True
+
         try:
-            yield from ale_playerbots.bridge(ctx.server_dir)
+            yield from ale_playerbots.bridge(
+                ctx.server_dir,
+                self._ale_compile_patches(ctx.server_dir),
+                server=self.entry.name,
+                has_build=has_build,
+            )
             yield from super().stage_build(ctx)
             finished = True
         finally:
@@ -995,6 +1033,9 @@ class AzerothCoreInstaller(StagedInstaller):
     ) -> Generator[str, None, object]:
         """Refuse a Return onto databases that hold updates the tested commit lacks (T630).
 
+        The forward half is T862: a move that changes the world baseline file is
+        refused, since the world would need building again.
+
         Asked by the update route right after the move and before anything is built,
         stopped or copied; a refusal puts every source back. Only for "Return to the
         tested pin…": an update moves forward, where its own updates are what it brings.
@@ -1012,6 +1053,7 @@ class AzerothCoreInstaller(StagedInstaller):
         """
         yield from ()
         if not to_pin:
+            self._refuse_a_new_world_baseline(moved)
             return None
         lacked = self._updates_the_target_lacks(moved)
         if not lacked:
@@ -1054,6 +1096,44 @@ class AzerothCoreInstaller(StagedInstaller):
             "None of them was applied, so the tested commit's server can start on your databases."
         )
         return None
+
+    def _refuse_a_new_world_baseline(
+        self, moved: Sequence[tuple[EmulatorSource, Path, str]]
+    ) -> None:
+        """T862: a move that changes the world baseline file is refused: a new one needs a build."""
+        path = self._block().world_baseline
+        if not path:
+            return
+        for source, dest, old in moved:
+            if source.dest != ".":
+                continue
+            new = self._seams.head_sha(dest)
+            if new is None:
+                raise InstallerError(
+                    f"Yu'lon could not read whether the newest code for {self.entry.name} "
+                    f"changes its world baseline ({path}): git did not say. Nothing was built; "
+                    "try again."
+                )
+            if new == old:
+                continue
+            before = self._seams.blob_id(dest, old, path)
+            after = self._seams.blob_id(dest, new, path)
+            if before is None or after is None:
+                raise InstallerError(
+                    f"Yu'lon could not read whether the newest code for {self.entry.name} "
+                    f"changes its world baseline ({path}): git did not say. Nothing was built; "
+                    "try again."
+                )
+            if before != after:
+                raise UpdateRefused(
+                    f"The newest code for {self.entry.name} brings a new world baseline ({path} "
+                    f"changed between {old[:7]} and {new[:7]}). An existing world cannot take a "
+                    "new baseline through an update: the world has to be built again, which this "
+                    "press does not do. Nothing was built; wait for a Yu'lon release that moves "
+                    f"{self.entry.name} onto it.",
+                    repo=source.repo,
+                    commit=new,
+                )
 
     def _database_was_up(self, container: str) -> bool | None:
         """Whether the database container ran before the check asked it; None = unknown."""
@@ -1752,7 +1832,22 @@ class AzerothCoreInstaller(StagedInstaller):
             if row.verdict == "refuse":
                 raise InstallerError(row.sentence())
             yield f"{row.detail[:1].upper()}{row.detail[1:]}."
-        plan = surgical.effective_plan(self._block(), tools_bin, client_dir)
+        # T840: on Docker Desktop `data/` is a bind into a Windows or macOS
+        # folder where small-file writes are ~10x slower than in the container's
+        # own layer, so there each tool writes inside its container and only the
+        # finished folders are copied into `data/`. Linux passes nothing and
+        # keeps today's argv, mounts, workdir and env byte for byte. The switch
+        # is decided here, not in the catalog: the evidence hashes the plan, and
+        # a new field would make every install everywhere extract again.
+        scratch_off_bind = self._seams.platform_id() in ("windows", "macos")
+        # T849: the map 936 side run keeps its scratch off the top of `data/` there
+        # too, where the tools' user may not create anything.
+        plan = surgical.effective_plan(
+            self._block(),
+            tools_bin,
+            client_dir,
+            scratch_root=surgical.SCRATCH_ROOT if scratch_off_bind else surgical.BIND_ROOT,
+        )
         data_dir = self._data_dir(ctx)
         # T836: v0.9.20's side run died on the launcher's client before its own
         # cleanup and left its scratch (1.9 GB, a farm of links into the client
@@ -1771,14 +1866,6 @@ class AzerothCoreInstaller(StagedInstaller):
                 logger.warning(f"the scratch in {left} could not be removed: {exc}")
         image_ref = self._image_ref(ctx, plan_block.extract.image)
         user_args = self._user_args()
-        # T840: on Docker Desktop `data/` is a bind into a Windows or macOS
-        # folder where small-file writes are ~10x slower than in the container's
-        # own layer, so there each tool writes inside its container and only the
-        # finished folders are copied into `data/`. Linux passes nothing and
-        # keeps today's argv, mounts, workdir and env byte for byte. The switch
-        # is decided here, not in the catalog: the evidence hashes the plan, and
-        # a new field would make every install everywhere extract again.
-        scratch_off_bind = self._seams.platform_id() in ("windows", "macos")
         yield f"Extracting server data from {client_dir} into {data_dir} (the client is read-only)."
         # T837: say so before the hash is taken, because reading the archive is
         # the first thing that takes a while and nothing has been run yet.

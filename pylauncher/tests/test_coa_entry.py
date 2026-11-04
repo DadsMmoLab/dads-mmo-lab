@@ -27,14 +27,14 @@ PATCH_DIR = (
 
 COA_ID = "wow-coa"
 CORE_REPO = "pjerra/azerothcore-wotlk-coa"
-CORE_BRANCH = "coa-bots-2.8"
-CORE_REV = "98570f248b6095a23ef14bbbfac6731ac4c20d66"
+CORE_BRANCH = "coa-bots-2.9.1"
+CORE_REV = "a1e8c99ecf2b5c088cc342188478db4891a07c47"
 BOTS_REPO = "pjerra/mod-playerbots-coa"
 BOTS_BRANCH = "coa"
-BOTS_REV = "2b7a4f6547b2e4b35a4ec3a89374e41e5c6e5272"
-"""The two pins. The core branch `coa-bots-2.8` is `98570f24…` and the bots tag
-`v2.8` is `2b7a4f65…`, both verified with `git ls-remote` 2026-10-27; the bots
-commit sits on branch `coa` (mirror clone, `branch -r --contains`)."""
+BOTS_REV = "79c5437a84bb0b9593011c261b1bd9afa558427e"
+"""The two pins. The core branch `coa-bots-2.9.1` is `a1e8c99e…` and the bots commit
+`79c5437a…` is the `v2.9.1` tag on branch `coa` (verified with `git ls-remote`
+2026-11-03; no `src/` change past the tag)."""
 
 COA_PATCH = "01-vmap4-extractor-name-lists.patch"
 
@@ -58,6 +58,11 @@ def test_the_entry_is_in_the_catalog_as_a_beta_server_of_its_own() -> None:
     assert entry.has_manifests
 
 
+CORE_VERSION = "2.9.1"
+"""The CoA Bots release both pins come from: the core branch is `coa-bots-<version>`
+at the rev `git ls-remote` gives for it, and the bots rev is the tag `v<version>`."""
+
+
 def test_it_builds_the_coa_core_and_bots_at_their_pins() -> None:
     sources = {s.dest: s for s in coa().emulator.sources}
     assert set(sources) == {".", "modules/mod-playerbots"}
@@ -65,6 +70,15 @@ def test_it_builds_the_coa_core_and_bots_at_their_pins() -> None:
     assert (core.repo, core.branch, core.rev) == (CORE_REPO, CORE_BRANCH, CORE_REV)
     assert core.depth is None
     assert (bots.repo, bots.branch, bots.rev) == (BOTS_REPO, BOTS_BRANCH, BOTS_REV)
+
+
+def test_the_core_branch_and_rev_agree_on_the_release() -> None:
+    """A branch bump with the old rev (or a rev bump on the old branch) turns red here."""
+    sources = {s.dest: s for s in coa().emulator.sources}
+    core = sources["."]
+    assert core.branch == CORE_BRANCH == f"coa-bots-{CORE_VERSION}"
+    assert core.rev == CORE_REV
+    assert core.rev.startswith("a1e8c99e")
 
 
 def test_it_has_its_own_containers_ports_and_soap() -> None:
@@ -103,10 +117,24 @@ def test_it_installs_on_linux_and_windows_with_the_coa_floors() -> None:
     assert native is not None
     assert (native.min_ram_gb, native.warn_ram_gb) == (8, 12)
     assert (native.min_server_dir_gb, native.warn_server_dir_gb) == (25, 40)
-    assert native.update_to_latest is False
+    assert native.update_to_latest is True
     assert native.templates == "wow-coa/native"
     assert list(native.images) == ["worldserver", "authserver", "db-import", "tools"]
     assert entry.install.requires_client_dir is True
+
+
+def test_coa_follows_its_newest_release_branch_and_paired_bots_tag() -> None:
+    """T862: the core follows coa-bots-<version> branches, the bots the v<version> tag."""
+    from yulon.catalog import upstream
+
+    sources = {s.dest: s for s in coa().emulator.sources}
+    core, bots = sources["."], sources["modules/mod-playerbots"]
+    assert (core.follow, core.release_prefix) == ("release_branches", "coa-bots-")
+    assert (bots.follow, bots.release_prefix) == ("release_tag", "v")
+    assert upstream.release_version(core.branch or "", "coa-bots-") is not None
+    block = coa().install.native
+    assert block is not None and block.azerothcore is not None
+    assert block.azerothcore.world_baseline == "data/coa-world/baseline.json"
 
 
 def test_its_database_password_plan_is_generated_with_a_coa_prefix() -> None:

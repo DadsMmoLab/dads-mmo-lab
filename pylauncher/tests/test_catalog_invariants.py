@@ -1184,8 +1184,8 @@ def test_every_value_the_catalog_writes_about_a_tree_says_where_it_came_from() -
     # would go red on a number instead of on the sentence naming what to do
     # about it. It still earns its place. A field added AND marked in the same
     # commit is a deliberate act and reads the count as its receipt.
-    assert len(values) == 74, (
-        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 74; "
+    assert len(values) == 86, (
+        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 86; "
         f"if that is intended, move the number: {sorted(values)}"
     )
 
@@ -1280,6 +1280,18 @@ def test_a_read_from_source_provenance_cites_a_line_and_not_a_sentence() -> None
                 "accounts.level.level_column",
                 "accounts.level.max_level",
                 "accounts.scheme",
+            )
+        ),
+        # MoP's four: read at LoA-Pandaria-Playerbots e135742e in the upstream copies
+        # `.notes/mop/upstream/` (T850). Its play columns and its level CEILING are
+        # `inherited` instead -- no MoP characters.sql or Common.h has been read.
+        *(
+            f"wow-mop:{path}"
+            for path in (
+                "accounts.scheme",
+                "accounts.level.table",
+                "accounts.level.account_column",
+                "accounts.level.level_column",
             )
         ),
     ], predictions

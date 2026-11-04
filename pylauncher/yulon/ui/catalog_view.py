@@ -430,7 +430,8 @@ def _identify(entry: CatalogEntry, server_dir: Path) -> Identification:
         `server_dir` into `wotlk_modules.applier()` when `entry.has_manifests`,
         and `apply.Applier.__init__` keeps it as `self.server_dir`;
       - `apply.Applier.install()` clones into
-        `server_dir / CLONE_DIRS[type] / id`, and `git.RunnerGit.clone()`
+        `server_dir / CLONE_DIRS[type] / clone_folder(manifest)` (the id, or the
+        manifest's `folder` when it names one), and `git.RunnerGit.clone()`
         `shutil.rmtree()`s that destination BEFORE the first git invocation.
 
     The precondition on the deletion, which the earlier note left out: it fires
@@ -503,6 +504,15 @@ _CAMPAIGN_PRESENTATION: dict[str, _CampaignPresentation] = {
         glyph="🛡️",
         subtitle="Level-60 PvP with bots",
         software="Centurion, a TrinityCore with its own playerbots",
+    ),
+    # T850: the same family's second entry, and the same borrowed shield glyph for it.
+    # "with bots", not "with playerbots": the tile's tooltip may not spell the entry's
+    # branch, which upstream calls `playerbot` (test_catalog_view.py), and the substring
+    # is inside the longer word.
+    "wow-mop": _CampaignPresentation(
+        glyph="🛡️",
+        subtitle="Mists of Pandaria",
+        software="LoA Pandaria 5.4.8 with bots",
     ),
     "ddon": _CampaignPresentation(
         glyph="🐉",

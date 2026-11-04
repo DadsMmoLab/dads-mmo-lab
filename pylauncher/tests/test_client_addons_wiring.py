@@ -31,6 +31,7 @@ def test_every_game_yulon_runs_takes_add_ons() -> None:
         "wow-unbound": 30300,
         "wow-coa": 30300,
         "wow-centurion": 30300,
+        "wow-mop": 50400,
         "wow-tbc": 20400,
         "wow-vanilla": 11200,
         "wow-tortoise": 11200,
@@ -117,6 +118,35 @@ def test_the_route_knows_the_add_ons_the_game_ships_by_folder_name(tmp_path: Pat
     shipped = {name.casefold() for name in services.client_addons.shipped}
     assert {"tortoisebotsmanager", "tortoisegmmanager"} <= shipped
     assert "tortoise-bots-manager" in services.client_addons.shipped_ids
+
+
+def test_coas_route_treats_the_shipped_consoleport_id_as_shipped(tmp_path: Path) -> None:
+    """M1 (braces): the CoA route's `shipped_ids` carry the merged mod list, so a
+    hand-written record naming `yulon-consoleport` refuses at the press and at
+    the write — the slug guard alone would not stop an id arriving by hand."""
+    from yulon import module_source
+
+    services = ControllerServices.for_entry(CATALOG.get("wow-coa"), tmp_path / "s")
+
+    assert services.client_addons is not None
+    assert "yulon-consoleport" in services.client_addons.shipped_ids
+
+    from yulon.manifest import parse_manifest
+
+    forged = parse_manifest(
+        {
+            "id": "yulon-consoleport",
+            "name": "ConsolePortLK",
+            "type": "mod",
+            "game": "wow-coa",
+            "origin": {"kind": "folder", "path": "/x", "added": "2026-11-02"},
+            "client": [{"src": ".", "dest": "addons", "name": "ConsolePort"}],
+        }
+    )
+    with pytest.raises(module_source.DeriveError, match="already ships"):
+        module_source.persist(
+            tmp_path / "u", forged, shipped_ids=services.client_addons.shipped_ids
+        )
 
 
 @pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-centurion"])

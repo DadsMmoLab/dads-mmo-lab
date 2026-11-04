@@ -32,7 +32,7 @@ from pydantic import (
 
 from yulon import server_build_presses
 from yulon.docker import BotSavesSkippable, ContainerSpec, SaveFirst
-from yulon.manifest import ALLOWED_REPO_HOSTS, Db, Source, check_repo
+from yulon.manifest import ALLOWED_REPO_HOSTS, Db, Follow, Source, check_repo
 from yulon.platform import PlatformId
 
 CATALOG_FILE = Path(__file__).resolve().with_name("catalog.json")
@@ -64,6 +64,23 @@ class EmulatorSource(Source):
     server dir IS the checkout, as it is for AzerothCore.
     """
 
+    follow: Follow = Field(
+        default="branch",
+        description=(
+            "`release_branches` = latest is the tip of the highest `<release_prefix><version>` "
+            "branch (version compared as numbers); `release_tag` = latest is the tag "
+            "`<release_prefix><version>`, where version is this entry's release_branches "
+            "source's, and nothing moves while that tag is missing (T862)."
+        ),
+    )
+    release_prefix: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9._-]+$",
+        description=(
+            "T862: the prefix the release version hangs off (`coa-bots-`, `v`). "
+            "Only read with follow: release_branches or release_tag."
+        ),
+    )
     dest: str = Field(
         min_length=1,
         description="Clone target relative to the server dir; '.' means the server dir itself.",
@@ -85,12 +102,63 @@ class EmulatorSource(Source):
         """`Source`'s rule over the catalog's wider host list (`CATALOG_REPO_HOSTS`)."""
         return check_repo(value, CATALOG_REPO_HOSTS)
 
+    @model_validator(mode="after")
+    def _releases_are_githubs(self) -> EmulatorSource:
+        """`Source` refuses the two release modes; the catalog reads them, so allow them here."""
+        follow = self.follow
+        repo = self.repo
+        if follow == "releases" and "://" in repo:
+            if (urlsplit(repo).hostname or "").lower() != "github.com":
+                raise ValueError(f"follow: releases needs a GitHub repository, got {repo!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _release_follow_is_whole(self) -> EmulatorSource:
+        """The two new follow modes need a prefix, a GitHub repo and a release pin (T862)."""
+        follow = self.follow
+        prefix = self.release_prefix
+        repo = self.repo
+        if follow in ("release_branches", "release_tag"):
+            if prefix is None:
+                raise ValueError(f"follow: {follow} needs release_prefix")
+            from yulon.catalog import upstream as _upstream
+
+            if _upstream.github_slug(repo) is None:
+                raise ValueError(f"follow: {follow} needs a GitHub repository, got {repo!r}")
+            if (
+                follow == "release_branches"
+                and _upstream.release_version(self.branch or "", prefix) is None
+            ):
+                raise ValueError(
+                    "follow: release_branches pins a release branch, and "
+                    f"{self.branch!r} is not {prefix}<version>"
+                )
+        elif prefix is not None:
+            raise ValueError(
+                "release_prefix is only read with follow: release_branches or release_tag"
+            )
+        return self
+
 
 class Emulator(_Strict):
     """The open-source emulator: a display name and the repos the installer clones."""
 
     name: str = Field(min_length=1)
     sources: tuple[EmulatorSource, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _release_tags_have_a_release(self) -> Emulator:
+        """A release_tag source pairs with the entry's one release_branches source (T862)."""
+        branches = [s for s in self.sources if s.follow == "release_branches"]
+        if len(branches) > 1:
+            raise ValueError("at most one source may follow release_branches")
+        for source in self.sources:
+            if source.follow == "release_tag" and not branches:
+                raise ValueError(
+                    f"{source.repo} follows release_tag, and no source of this emulator "
+                    "follows release_branches"
+                )
+        return self
 
 
 INSTALL_RECORD = ".yulon-install.json"
@@ -524,6 +592,13 @@ class AzerothCoreData(_Strict):
             "then the stage is not in its tuple at all."
         ),
     )
+    module_patches: tuple[ModulePatch, ...] = Field(
+        default=(),
+        description=(
+            "Unified diffs laid into a Modules-tab module's own clone for one compile and "
+            "taken back out after it (T867). Empty for an entry whose modules need none."
+        ),
+    )
     lua_scripts: tuple[LuaScripts, ...] = Field(
         default=(),
         description="Lua scripts the install lays into mod-ale's script folder (T553).",
@@ -634,6 +709,15 @@ class AzerothCoreData(_Strict):
             "(T812). None: the entry has no bootstrap stage."
         ),
     )
+    world_baseline: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "T862: a file in the core checkout whose blob must not change when the "
+            "sources move to a newer release: a new world baseline needs the world "
+            "built again, which an update does not do. None: not checked."
+        ),
+    )
     realm_types: tuple[AcRealmType, ...] = Field(
         default=(),
         description=(
@@ -657,7 +741,7 @@ class AzerothCoreData(_Strict):
         description=(
             "Folders under `modules/` whose `data/sql/` the core's own importer always applies, "
             "so Yu'lon never names them in `AC_UPDATES_ALLOWED_MODULES` (T812 D14). The CoA "
-            "fork's `src/tools/dbimport/Main.cpp:119-120` (pin 98570f24) prepends "
+            "fork's `src/tools/dbimport/Main.cpp:119-120` (pin a1e8c99e) prepends "
             "`COA_DATABASE_MODULE_LIST` (`mod-ascension,`) to whatever list it is given, and "
             "`UpdateFetcher.cpp` walks a folder once per time its module is named, so a second "
             "`mod-ascension` made the importer abort on `Duplicate filename`. Empty: "
@@ -712,6 +796,19 @@ class AzerothCoreData(_Strict):
                     f"realm type {realm.id!r} repeats world_env keys {repeated}: one key "
                     "has one owner, the block's or the type's, never both"
                 )
+        return self
+
+    @field_validator("world_baseline")
+    @classmethod
+    def _world_baseline_stays_inside_the_checkout(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _below(value, "world_baseline", "the checkout")
+
+    @model_validator(mode="after")
+    def _world_baseline_needs_a_bootstrap(self) -> AzerothCoreData:
+        if self.world_baseline is not None and self.world_bootstrap_service is None:
+            raise ValueError("world_baseline needs world_bootstrap_service")
         return self
 
     @field_validator("world_data_dirs")
@@ -1354,6 +1451,21 @@ class SqlPlan(_Strict):
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+def _installers_path(value: str) -> str:
+    """A patch file's path: relative, POSIX, and inside `catalog/installers/`.
+
+    One rule for both patch kinds -- `SourcePatch` (applied to a checkout) and
+    `ModulePatch` (laid into a module for one compile) -- so neither can name a
+    file this build does not ship beside the catalog (`carried.patch_text()`).
+    """
+    path = PurePosixPath(value)
+    if "\\" in value or path.is_absolute() or ".." in path.parts:
+        raise ValueError(
+            f"file must be a relative POSIX path under catalog/installers/, got {value!r}"
+        )
+    return value
+
+
 class SourcePatch(_Strict):
     """One unified diff applied to one cloned source after `clone-sources` (`patch-sources`).
 
@@ -1405,12 +1517,45 @@ class SourcePatch(_Strict):
     @field_validator("file")
     @classmethod
     def _file_stays_inside_installers(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if "\\" in value or path.is_absolute() or ".." in path.parts:
-            raise ValueError(
-                f"file must be a relative POSIX path under catalog/installers/, got {value!r}"
-            )
-        return value
+        return _installers_path(value)
+
+
+class ModulePatch(_Strict):
+    """A unified diff laid into a Modules-tab module's clone for one compile, then taken out (T867).
+
+    Conquest of Azeroth's core moved hooks and menus that no mod-ale release
+    follows (`UnitScript::DealDamage` gained a fifth parameter, `PlayerMenu` is
+    no longer copyable), so mod-ale compiles there only with a small fix. The
+    fix cannot stay on disk -- the Modules tab's Update refuses a clone with
+    edited tracked files (T44/T47) -- and it cannot be a `SourcePatch`: that
+    must name an emulator `dest`, and its hunks are written into a checkout and
+    left there. So the diff is laid by `ale_playerbots.bridge()` for the compile
+    alone, recorded with the bridge's own record, and put back when the compile
+    ends; the clone is upstream's again for every git question asked outside it.
+    """
+
+    file: str = Field(
+        min_length=1,
+        description=(
+            "The patch, relative to catalog/installers/; its paths are relative to the "
+            "module's own folder."
+        ),
+    )
+    module: Literal["mod-ale"] = Field(
+        description=(
+            "The Modules-tab module it is for; the patch is laid only when modules/<module> "
+            "is there."
+        ),
+    )
+    reason: str = Field(
+        min_length=1,
+        description="One sentence the build log says when the patch is laid: what it fixes.",
+    )
+
+    @field_validator("file")
+    @classmethod
+    def _file_stays_inside_installers(cls, value: str) -> str:
+        return _installers_path(value)
 
 
 class RerunnableModule(_Strict):
@@ -1548,11 +1693,14 @@ class TrinityCoreExtractPlan(ExtractPlan):
     copies differ from the server's in places.
     """
 
-    dbc_overlay_from: str = Field(
+    dbc_overlay_from: str | None = Field(
+        default=None,
         min_length=1,
         description=(
             "Directory inside the checkout (relative to `TrinityCoreData.checkout`) whose files "
-            "are copied over the extracted `data/dbc` after the extractors ran."
+            "are copied over the extracted `data/dbc` after the extractors ran. `None` when the "
+            "tree ships no DBCs of its own to lay over the extractor's, which are then used as "
+            "they were written (MoP: the core's DBCs come from the client)."
         ),
     )
 
@@ -1569,8 +1717,8 @@ class TrinityCoreExtractPlan(ExtractPlan):
 
     @field_validator("dbc_overlay_from")
     @classmethod
-    def _inside_the_checkout(cls, value: str) -> str:
-        return _below(value, "dbc_overlay_from", "the checkout")
+    def _inside_the_checkout(cls, value: str | None) -> str | None:
+        return None if value is None else _below(value, "dbc_overlay_from", "the checkout")
 
     client_archives: tuple[str, ...] = Field(
         min_length=1,
@@ -1685,6 +1833,21 @@ class TrinityCoreMmaps(MmapPlan):
     )
 
 
+class BotCountKeys(_Strict):
+    """The two keys a core's bot conf keeps its random-bot count in.
+
+    Centurion's `playerbots.conf` spells them `Playerbot.RandomPopulation.TargetMin`/
+    `TargetMax` (`bot_count.TC_MIN_KEY`/`TC_MAX_KEY`); TrinityCore 5.x/MoP keeps
+    AzerothCore's `AiPlayerbot.MinRandomBots`/`MaxRandomBots` (`bot_count.MIN_KEY`/
+    `MAX_KEY`). The count carry-over (`trinitycore._conf`) and the Bots tab
+    (`bot_population._count_conf`) both read this pair, so a tree that spells
+    them another way needs no code.
+    """
+
+    min: str = Field(min_length=1)
+    max: str = Field(min_length=1)
+
+
 class TrinityCoreConf(ConfPatchTable):
     """The conf table, the world server's conf in it, and the file that must sit beside it."""
 
@@ -1712,6 +1875,15 @@ class TrinityCoreConf(ConfPatchTable):
             "README.md:203-204), which the world server finds in its own conf's folder "
             "(AutoBalanceConfig.cpp:177-213, 761). Never patched and never one of `files`; "
             "Reset to default copies it from the checkout again."
+        ),
+    )
+    bot_count_keys: BotCountKeys | None = Field(
+        default=None,
+        description=(
+            "The two keys this core's bot conf keeps its random-bot count in, or `None` for "
+            "Centurion's `Playerbot.RandomPopulation.TargetMin`/`TargetMax`. The count is carried "
+            "over from the player's conf and read and written by the Bots tab (T117, T179 Task 5); "
+            "both sites read this pair."
         ),
     )
 
@@ -1895,13 +2067,112 @@ class TrinityCoreUpdates(_Strict):
         return value
 
 
+MapNames = Literal["mmmyyxx", "mmmm_yy_xx"]
+"""How a core names its map, vmap and mmap files: `mmmyyxx` is Centurion/AC/CMaNGOS's
+`maps/MMMYYXX.map`, `mmmm_yy_xx` is TrinityCore 5.x/MoP's `maps/MMMM_YY_XX.map`."""
+
+
+GITHUB_RELEASE_HOSTS: frozenset[str] = frozenset(
+    {"objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+)
+"""The two hosts GitHub serves a release asset's bytes FROM (it answers github.com with a redirect).
+
+Named here for the server side, the way a client pack names them in its own
+`redirect_hosts` (T809): a download that follows GitHub's redirect lands on one of
+these, so anything that bounds a download's hosts has to be told both.
+"""
+
+
+RELEASE_HOSTS: frozenset[str] = frozenset({"github.com"}) | GITHUB_RELEASE_HOSTS
+"""Every host a release-asset download may go to: github.com, and the two it redirects to.
+
+Fixed data, never derived from an asset's own url (T850-B, review round 1): a fence
+built from the addresses it is meant to bound can refuse nothing. `ReleaseAsset`'s
+validator keeps every asset url on `github.com`, and a redirect off `github.com` may
+land only on the two hosts above -- never a wildcard, and never a host nobody named.
+"""
+
+
+class ReleaseAsset(_Strict):
+    """One zip a release page serves, used only at exactly this size and sha256 (T850-B).
+
+    Some trees do not ship their databases in the checkout at all: MoP's come from a
+    GitHub release asset whose zip is laid out FLAT -- four `.sql` files at the root,
+    no folder (GAP §0). So this model names the members rather than a folder to keep
+    (`VerifiedArchive.root`): the unpack writes exactly `members` and nothing else
+    the zip happens to hold, and `dest` says where they land.
+    """
+
+    url: str = Field(min_length=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size: int = Field(gt=0, description="Bytes; a download of any other size is refused unread.")
+    dest: str = Field(
+        min_length=1,
+        description=(
+            "The folder under the server dir the members are unpacked into; relative, POSIX, "
+            "and inside the server dir by `GoToolchain.dest`'s rule."
+        ),
+    )
+    members: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "The zip's root-level files to unpack, by name. Each is a plain file name -- no "
+            "`/`, `\\`, `..` or `:` -- and no name is listed twice: this list is the whole of "
+            "what is written to the disk."
+        ),
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_https_on_github(cls, value: str) -> str:
+        """An https url on `github.com`, the only host `RELEASE_HOSTS` fetches these from.
+
+        A release asset is pinned by size and sha256 as well, so a wrong host is not
+        a way to install something else -- but it is a url this app would fetch from
+        and this catalog never chose, so it is refused where it is written down.
+        """
+        value = _https_url(value, "release asset url")
+        host = urlsplit(value).hostname
+        if host != "github.com":
+            raise ValueError(f"release asset url must be on github.com, got {host!r} in {value!r}")
+        return value
+
+    @field_validator("dest")
+    @classmethod
+    def _dest_stays_inside_the_server_dir(cls, value: str) -> str:
+        return _inside(value, "release asset dest", names_a_file=True)
+
+    @field_validator("members")
+    @classmethod
+    def _members_are_plain_file_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for name in value:
+            rel = PurePosixPath(name)
+            if (
+                not name
+                or "\\" in name
+                or ":" in name
+                or rel.is_absolute()
+                or ".." in rel.parts
+                or len(rel.parts) != 1
+            ):
+                raise ValueError(
+                    "release asset members must be plain file names at the zip's root, got "
+                    f"{name!r}"
+                )
+        if len(set(value)) != len(value):
+            raise ValueError(f"release asset members repeat a name: {list(value)}")
+        return value
+
+
 class TrinityCoreData(_Strict):
     """Everything the TrinityCore family needs that differs per game (T179).
 
     Shaped after `CmangosData`, with what Centurion (a TrinityCore 3.3.5 fork)
-    adds: a sparse checkout, CMake defines, a DBC overlay from the checkout, mmaps
-    in the background, a `playerbots.conf` beside `worldserver.conf`, renames in
-    the import, and the maps the start check requires. The facts are in
+    adds: a sparse checkout, CMake defines, a DBC overlay from the checkout (when
+    the tree ships one), mmaps in the background, a `playerbots.conf` beside
+    `worldserver.conf`, renames in the import, the maps the start check requires
+    and how the tree names them (`map_names`), and the keys its bot conf keeps the
+    random-bot count in (`conf.bot_count_keys`). The facts are in
     `.notes/tickets/T179-centurion-facts.md` (CENTURION @ faac5fc9).
     """
 
@@ -1940,6 +2211,18 @@ class TrinityCoreData(_Strict):
             "6c6472c3, read 2026-10-07, facts §3) -- 0 and 1, and 530 with `Expansion = 2`."
         ),
     )
+    map_names: MapNames = Field(
+        default="mmmyyxx",
+        description=(
+            "How the core names its map, vmap and mmap files, which the start check reads. "
+            "`mmmyyxx`: `maps/MMMYYXX.map`, a 3-digit map id then the two grid numbers with no "
+            "separator, and `vmaps/MMM.vmtree` -- Centurion/AC/CMaNGOS, e.g. `maps/0003248.map`, "
+            "`vmaps/000.vmtree`. `mmmm_yy_xx`: `maps/MMMM_YY_XX.map`, a 4-digit map id, `_YY_XX`, "
+            "and `vmaps/MMMM.vmtree` -- TrinityCore 5.x/MoP, e.g. `maps/0000_32_48.map`, "
+            "`vmaps/0000.vmtree`. The mmaps generator follows the same id width: "
+            "`mmaps/MMMM.mmap` and `mmaps/MMMM_YY_XX.mmtile`."
+        ),
+    )
     world_data_dirs: tuple[Annotated[str, Field(pattern=r"^[A-Za-z0-9_]+$")], ...] = Field(
         default=(),
         description=(
@@ -1973,6 +2256,15 @@ class TrinityCoreData(_Strict):
             "What an update to the latest code, or a return to the tested pin, does with a "
             "change to the SQL snapshot (T179 Task 6). Required when the entry offers "
             "`update_to_latest`."
+        ),
+    )
+    release_assets: tuple[ReleaseAsset, ...] = Field(
+        default=(),
+        description=(
+            "Zips this entry's install downloads from a release page, for a tree whose "
+            "databases are not in its checkout (T850-B). Empty -- every entry today but "
+            "MoP's -- means the family has no `fetch-release` stage at all, so an entry "
+            "that names none behaves exactly as it did before the stage existed."
         ),
     )
 
@@ -2753,7 +3045,10 @@ class AccountLevel(_Strict):
 class Accounts(_Strict):
     """Whether this app can create an account on this core by writing the row itself.
 
-    Three shapes, one per core family. AzerothCore uses `salt`/`verifier` with
+    Four shapes across five schemes: the trinitycore family carries two. The
+    credential and the GM level are independent halves, and exactly one scheme
+    mixes them — which is why `scheme` names a core's row shape rather than a
+    family. AzerothCore uses `salt`/`verifier` with
     the level in `account_access`. Tortoise uses `sha_pass_hash` with the level
     in `account.rank` — measured against a live server on 2026-08-26, where the
     core logged its own INSERT and `SHA1(UPPER(user):UPPER(pass))` matched it
@@ -2762,13 +3057,18 @@ class Accounts(_Strict):
     real clients (8.3b, 8.3c): `x = SHA1(reverse(s) + SHA1(UPPER(user:pass)))`
     little-endian, `v = 7^x mod N`, recomputed by hand and matching the row.
     This paragraph said "has not been measured, so it is declared unsupported"
-    for a day after it was (audit, 2026-09-08).
+    for a day after it was (audit, 2026-09-08). `trinitycore_sha` (T850-C) is
+    the TrinityCore family's Mists of Pandaria line: `mangos_sha`'s one
+    `sha_pass_hash` column (folded the same way, so the same recipe) with
+    `azerothcore`'s `account_access(id, gmlevel, RealmID)` for the level.
 
     Getting this wrong does not fail loudly — it inserts a row that looks
     correct and can never log in.
     """
 
-    scheme: Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore"] | None = Field(
+    scheme: (
+        Literal["azerothcore", "mangos_sha", "mangos_srp6", "trinitycore", "trinitycore_sha"] | None
+    ) = Field(
         default="azerothcore",
         description=(
             "How this core stores an account: `azerothcore` is SRP6 in binary salt/verifier "
@@ -2776,7 +3076,10 @@ class Accounts(_Strict):
             "in account.rank; `mangos_srp6` is the same SRP6 as AzerothCore stored as hex "
             "text in v/s with the level in account.gmlevel; `trinitycore` is TrinityCore's "
             "salt/verifier with the level in account_access(AccountID, SecurityLevel, RealmID) "
-            "with RealmID -1 (T179). None means this app does not "
+            "with RealmID -1 (T179); `trinitycore_sha` (T850-C) is that family's other shape, "
+            "which its Mists of Pandaria line writes: sha_pass_hash with v/s left '' for the "
+            "authserver to derive, and the level in account_access(id, gmlevel, RealmID). "
+            "None means this app does not "
             "write accounts for this core and "
             "the Accounts tab points at `console_command` instead. Never defaulted onto a "
             "core that has not been measured — a wrong scheme inserts a row that looks "
@@ -3026,7 +3329,8 @@ class HelpPlace(_Strict):
 
 
 class PackSource(_Strict):
-    """Where one client pack's zip comes from: the server's own checkout, or a URL.
+    """Where one client pack's zip comes from: the server's own checkout, a URL,
+    or a GitHub repo's latest release.
 
     One shape for all so a pack is one list entry either way; `kind` says
     which half is filled, and the validator holds the halves apart so a
@@ -3037,9 +3341,33 @@ class PackSource(_Strict):
     them. Each file is proved against that list and packed into a zip in the
     cache (`client_packs.fetch_checkout_folder`), so everything after the fetch
     is the zip path every other pack takes.
+
+    `github_release` (T853) is a GitHub release asset kept at the repo's
+    latest: `repo` is `owner/name`, `asset` its file name. The fetch reads
+    the release's `tag_name` (its version) through `_checked_version` and
+    proves the asset against the release's own `digest` (`sha256:<hex>`),
+    so the pack needs no pinned checksum and no `version_url`.
     """
 
-    kind: Literal["checkout", "checkout_folder", "url"]
+    REPO_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+    """A GitHub `owner/name`: exactly one slash, each side a plain name."""
+
+    kind: Literal["checkout", "checkout_folder", "url", "github_release"]
+    repo: str | None = Field(
+        default=None,
+        description=(
+            "The GitHub repo (`owner/name`) whose latest release holds the zip. "
+            "github_release packs only."
+        ),
+    )
+    asset: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The release asset's file name (`ConsolePortLK-Enhanced.zip`). "
+            "github_release packs only."
+        ),
+    )
     path: str | None = Field(
         default=None,
         min_length=1,
@@ -3070,12 +3398,46 @@ class PackSource(_Strict):
     def _urls_are_https(cls, value: str | None) -> str | None:
         return value if value is None else _https_url(value, "source url")
 
+    @field_validator("repo")
+    @classmethod
+    def _repo_is_owner_slash_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not PackSource.REPO_PATTERN.match(value):
+            raise ValueError(f"source.repo must be an owner and a name (owner/name), got {value!r}")
+        return value
+
+    @field_validator("asset")
+    @classmethod
+    def _asset_is_a_plain_file_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value in (".", "..") or PurePosixPath(value).parts != (value,):
+            raise ValueError(f"source.asset must be a plain file name, got {value!r}")
+        return value
+
     @model_validator(mode="after")
     def _kind_matches_the_half_that_is_filled(self) -> PackSource:
         if self.from_checkout and (
             self.path is None or self.url is not None or self.version_url is not None
         ):
             raise ValueError(f"a {self.kind} source names a path, and no url or version_url")
+        if self.kind == "github_release" and (
+            self.repo is None
+            or self.asset is None
+            or self.path is not None
+            or self.url is not None
+            or self.version_url is not None
+        ):
+            raise ValueError(
+                "a github_release source names a repo and an asset, "
+                "and no path, url or version_url"
+            )
+        if self.kind != "github_release" and (self.repo is not None or self.asset is not None):
+            raise ValueError(
+                f"a {self.kind} source names no repo or asset: those are a "
+                "github_release source's"
+            )
         if self.kind == "url" and (self.url is None or self.path is not None):
             raise ValueError("a url source names a url, and no path")
         return self
@@ -3398,7 +3760,13 @@ class ClientPack(_Strict):
                     f"pack {self.id!r}: its zip {self.source.path!r} must be inside the folder of "
                     f"its md5_file {self.md5_file!r}, whose lines name files relative to it"
                 )
-        if self.source.kind == "checkout" and all(item is None for item in given):
+        if self.source.kind == "github_release":
+            if any(item is not None for item in given):
+                raise ValueError(
+                    f"pack {self.id!r}: a github_release pack takes no pinned checksum: "
+                    "its checksum is the release's own digest"
+                )
+        elif self.source.kind == "checkout" and all(item is None for item in given):
             raise ValueError(
                 f"pack {self.id!r}: a checkout pack needs a checksum: exactly one of sha256, "
                 "md5 and md5_file"
@@ -3578,10 +3946,22 @@ class ConfigWtf(_Strict):
     `always` is set at every Play (where the server is); `seed` only where
     the key is absent (a first-run preference the player may change after).
     A key in both would be a seed that is never a seed, so it is refused.
+    `remove` names keys whose lines are taken out of the file first, for a
+    client whose shipped `Config.wtf` sends it somewhere this server is not
+    (`portal`); a key that is also set or seeded is refused.
     """
 
     always: dict[WtfKey, WtfValue] = Field(default_factory=dict)
     seed: dict[WtfKey, WtfValue] = Field(default_factory=dict)
+    remove: tuple[WtfKey, ...] = Field(
+        default=(),
+        description=(
+            "Keys whose `SET` lines are taken out of the ready-to-play client's Config.wtf "
+            "before the merge, whatever they hold (MoP's shipped `portal`). Passed to "
+            "`client_config.merge_config_wtf(..., remove=...)` beside the launcher's own "
+            "removals. A key in both this and `always`/`seed` is refused."
+        ),
+    )
     remove_locale_realmlists: bool = Field(
         default=False,
         description=(
@@ -3595,6 +3975,15 @@ class ConfigWtf(_Strict):
         both = sorted(key for key in self.seed if key.casefold() in always)
         if both:
             raise ValueError(f"Config.wtf keys {both} are in both always and seed")
+        return self
+
+    @model_validator(mode="after")
+    def _a_key_is_never_both_set_and_removed(self) -> ConfigWtf:
+        """A key the merge removes and then sets (or seeds) would come back: refuse it."""
+        set_or_seeded = {key.casefold() for key in (*self.always, *self.seed)}
+        both = sorted(key for key in self.remove if key.casefold() in set_or_seeded)
+        if both:
+            raise ValueError(f"Config.wtf keys {both} are in remove and also in always or seed")
         return self
 
 
@@ -3807,13 +4196,43 @@ class Client(_Strict):
                     )
         return self
 
+    GITHUB_RELEASE_HOSTS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "api.github.com",
+            "github.com",
+            "release-assets.githubusercontent.com",
+            "objects.githubusercontent.com",
+        }
+    )
+    """Hosts a github_release pack's own fetch may reach (T853 review 1, G4).
+
+    The release answer (`api.github.com`), the asset's own address
+    (`github.com`, which redirects to an asset host), and the two asset
+    hosts. Carried by the KIND, never widening the whole entry's fence:
+    `hosts()` stays what it was before T853, and only a github_release
+    pack's own fetch is opened to these (`pack_hosts()`).
+    """
+
+    def pack_hosts(self, pack: ClientPack) -> frozenset[str]:
+        """The hosts one pack's fetch may reach: the entry's fence, plus the kind's own (T853 G4).
+
+        A github_release pack's release answer and asset live on hosts no url
+        of the entry names, so its own fetch — and only its own fetch — is
+        opened to `GITHUB_RELEASE_HOSTS`. Every other pack (and download) is
+        held to exactly what `hosts()` names, as before T853.
+        """
+        if pack.source.kind != "github_release":
+            return self.hosts()
+        return self.hosts() | Client.GITHUB_RELEASE_HOSTS
+
     def hosts(self) -> frozenset[str]:
         """Every host a download for this client may reach: packs and clean exe sources.
 
         Packs add their urls' hosts plus `redirect_hosts`: a redirect target
         (GitHub's release-asset hosts) the catalog names so the engine does
         not refuse it. Not `fallback_page`: that is a page a person
-        is sent to, never fetched.
+        is sent to, never fetched. Never the github_release hosts: those are
+        the kind's own (`pack_hosts()`), used only for that pack's fetch.
         """
         urls: list[str | None] = []
         extra: list[str] = []
@@ -4253,8 +4672,9 @@ class CatalogEntry(_Strict):
         `databases` would point the dumps' triggers and procedures at somebody
         else's database (import.sh:41-43). And `accounts.scheme` defaults to
         AzerothCore's, whose `account_access(id, gmlevel)` is not TrinityCore's
-        `(AccountID, SecurityLevel)` (facts §5), so the entry must declare
-        `trinitycore` or no scheme at all.
+        `(AccountID, SecurityLevel)` (facts §5), so the entry must declare one
+        of this family's own schemes -- `trinitycore` (TrinityCore112/Centurion)
+        or `trinitycore_sha` (the MoP line, T850-C) -- or no scheme at all.
         """
         native = self.install.native
         block = native.trinitycore if native is not None else None
@@ -4266,9 +4686,10 @@ class CatalogEntry(_Strict):
                 f"trinitycore.checkout is {block.checkout!r}, which is not a dest of any of "
                 f"this entry's sources {sorted(dests)}"
             )
-        if self.accounts.scheme not in ("trinitycore", None):
+        if self.accounts.scheme not in ("trinitycore", "trinitycore_sha", None):
             raise ValueError(
-                f"a trinitycore entry's accounts.scheme must be 'trinitycore' or null, got "
+                f"a trinitycore entry's accounts.scheme must be 'trinitycore' or "
+                f"'trinitycore_sha' or null, got "
                 f"{self.accounts.scheme!r}: another core's columns write rows that look right "
                 "and grant nothing (an omitted accounts block inherits 'azerothcore')"
             )

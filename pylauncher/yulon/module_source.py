@@ -33,6 +33,7 @@ Remove, update-check and SQL routes all take and a folder-copied module has no
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -43,13 +44,14 @@ from datetime import date
 from pathlib import Path
 from typing import Protocol
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from yulon import folder_swap, links
 from yulon.apply import updater_folder_dbs
 from yulon.log import get_logger
 from yulon.manifest import (
     ALLOWED_REPO_HOSTS,
+    ID_MAX,
     Build,
     ConfFile,
     Db,
@@ -57,22 +59,31 @@ from yulon.manifest import (
     Manifest,
     ManifestType,
     Origin,
-    Slug,
     Source,
     SqlStep,
+    folder_refusal,
     is_inside_path,
     parse_manifest,
+)
+
+# Re-exported for this module's public surface (T861): the ONE id derivation lives in
+# `manifest` so `Manifest`'s own validator can hold every item to it, and the per-game
+# layouts read it from here.
+from yulon.manifest import (
+    id_for_folder as id_for_folder,
 )
 from yulon.manifest_store import FAMILY_FILES
 
 logger = get_logger(__name__)
 
-_SLUG: TypeAdapter[str] = TypeAdapter(Slug)
-"""`manifest.Slug`'s own pattern, asked directly rather than respelled here.
+_NAMES_FOR_TWO_FAMILIES = frozenset({"wow-tortoise"})
+"""Games whose custom route recorded one thing under two families (T861, cold note 8).
 
-The id has to pass BOTH this and `_CUSTOM_ID`, and re-typing the kebab-case rule
-in this module is the duplicate style-guide §4 forbids — a widened `Slug` must
-widen what a custom module may be called, in one edit."""
+Tortoise's custom route called an add-on or database package a legacy `mod` before
+T861 and calls it a `module` now, so one id can be recorded in either family. Every
+other game's two families are two different things (`module` vs `mod`), so the
+record check stays inside the item's own family there.
+"""
 
 LINK_DESCRIPTION = "Custom module (cloned from a URL you provided)."
 """Verbatim from `RUST crates/dml-wow/src/modules.rs:38` (itself from `90-main.sh:5394`).
@@ -89,17 +100,6 @@ _NOTHING_CHANGED = "Nothing on this machine was changed."
 
 NOTHING_CHANGED = _NOTHING_CHANGED
 """The same clause for a per-game `Layout`, whose refusals end the same way (T596)."""
-
-_CUSTOM_ID = re.compile(r"^mod-[a-z0-9-]{1,64}$")
-"""`_valid_cpp_key` (`RUST modules.rs:40-50`), ported exactly.
-
-Why `mod-*` and not any slug: AzerothCore's `modules/` directory holds
-`CMakeLists.txt`, `ModulesLoader.cpp.in.cmake` and friends BESIDE the modules, and
-the derived id is also the name of the folder that lands there. The rule is the
-one thing that keeps a pasted `https://github.com/you/Tools.git` from putting a
-folder called `tools` next to the build system's own files. All 21 shipped
-`wow-wotlk` module ids start `mod-` too.
-"""
 
 _MODULE_MARKERS = ("src", "conf", "data")
 """What a folder must hold at least one of to be taken as a module.
@@ -169,6 +169,10 @@ class Layout(Protocol):
         """`(type, id, name)` for a repository or folder basename, or a `DeriveError`."""
         ...
 
+    def kind_for_folder(self, path: Path) -> ManifestType:
+        """What the folder at `path` is, read from what it holds rather than its name (T861)."""
+        ...
+
     def refuse_folder(self, path: Path, name: str) -> str | None:
         """Why the folder at `path` cannot be installed, read before any copy; None if it can."""
         ...
@@ -232,13 +236,14 @@ def derive_link(
             f"on {', '.join(ALLOWED_REPO_HOSTS)}, or owner/name for github.com. "
             f"{_NOTHING_CHANGED}"
         ) from exc
+    basename = text.rstrip("/").rsplit("/", 1)[-1]
+    item_id, folder = _names_from(basename, game, what="repository")
+    author_name = basename[: -len(".git")] if basename.endswith(".git") else basename
     if layout is not None:
-        kind, laid_id, name = layout.identify(
-            _basename(text.rstrip("/").rsplit("/", 1)[-1]), folder=False
-        )
-        _refuse_shipped(laid_id, shipped_ids)
+        kind, _laid_id, name = layout.identify(author_name, folder=False)
+        _refuse_shipped(item_id, shipped_ids)
         return _manifest(
-            laid_id,
+            item_id,
             game,
             description=layout.link_description,
             source=source,
@@ -247,15 +252,8 @@ def derive_link(
             today=today,
             kind=kind,
             name=name,
+            folder=folder,
             build=layout.build(kind),
-        )
-    item_id = _id_from(text.rstrip("/").rsplit("/", 1)[-1])
-    if item_id is None:
-        raise DeriveError(
-            f"The repository is named {text.rstrip('/').rsplit('/', 1)[-1]!r}, and a "
-            f"custom module must be named mod-<something> in lowercase letters, "
-            f"digits and hyphens — for example https://github.com/you/mod-my-thing. "
-            f"{_NOTHING_CHANGED}"
         )
     _refuse_shipped(item_id, shipped_ids)
     return _manifest(
@@ -266,6 +264,7 @@ def derive_link(
         origin=Origin(kind="link", added=today.isoformat()),
         came_from=text,
         today=today,
+        folder=folder,
     )
 
 
@@ -286,14 +285,17 @@ def derive_folder(
     """
     if not path.is_dir():
         raise DeriveError(f"{path} is not a folder this app can read. {_NOTHING_CHANGED}")
+    item_id, folder = _names_from(path.name, game, what="folder")
+    author_name = path.name[: -len(".git")] if path.name.endswith(".git") else path.name
     if layout is not None:
-        kind, laid_id, name = layout.identify(path.name, folder=True)
+        _laid_kind, _laid_id, name = layout.identify(author_name, folder=True)
+        kind = layout.kind_for_folder(path)
         refusal = layout.refuse_folder(path, name)
         if refusal:
             raise DeriveError(f"{refusal} {_NOTHING_CHANGED}")
-        _refuse_shipped(laid_id, shipped_ids)
+        _refuse_shipped(item_id, shipped_ids)
         return _manifest(
-            laid_id,
+            item_id,
             game,
             description=layout.folder_description,
             source=None,
@@ -302,14 +304,8 @@ def derive_folder(
             today=today,
             kind=kind,
             name=name,
+            folder=folder,
             build=layout.build(kind),
-        )
-    item_id = _id_from(path.name)
-    if item_id is None:
-        raise DeriveError(
-            f"The folder is named {path.name!r}, and a custom module must be named "
-            f"mod-<something> in lowercase letters, digits and hyphens — rename the "
-            f"folder and choose it again. {_NOTHING_CHANGED}"
         )
     if not any((path / marker).is_dir() for marker in _MODULE_MARKERS):
         raise DeriveError(
@@ -326,6 +322,7 @@ def derive_folder(
         origin=Origin(kind="folder", path=str(path), added=today.isoformat()),
         came_from=str(path),
         today=today,
+        folder=folder,
     )
 
 
@@ -453,7 +450,7 @@ def _unapplied(clone: Path) -> tuple[str, ...]:
 
 _DERIVED_FIELDS = frozenset(
     {"schema_version", "id", "name", "type", "game", "description", "source", "origin"}
-    | {"build", "notes", "conf", "sql"}
+    | {"build", "notes", "conf", "sql", "folder"}
 )
 """The fields a derivation (`_manifest()`) and its completion (`complete()`) ever set."""
 _CONF_STEM = re.compile(r"[A-Za-z0-9_.-]{1,100}")
@@ -505,32 +502,32 @@ def beyond_derived_shape(manifest: Manifest) -> str | None:
     return None
 
 
-def _basename(text: str) -> str:
-    """A repository basename with `.git` stripped once, case kept (a layout decides case)."""
-    return text[: -len(".git")] if text.endswith(".git") else text
+def _names_from(basename: str, game: str, *, what: str) -> tuple[str, str | None]:
+    """`(id, folder)` for a repository or folder basename, or a whole refusal (T861).
 
+    The folder keeps the author's name EXACTLY, capitals included: AzerothCore and
+    Tortoise both find a module's code by `Add<folder>Scripts`, so a renamed folder
+    no longer links. `folder` is `None` when the name already IS the id, which
+    keeps every existing manifest and derivation unchanged.
 
-def _id_from(basename: str) -> str | None:
-    """The module id a repository or folder basename yields, or `None` if it yields none.
-
-    `.git` stripped ONCE and lower-cased, `RUST modmgr.rs:198-207`. Checked against
-    `_CUSTOM_ID` **and** `manifest.Slug`, which is not redundant: `_CUSTOM_ID`
-    admits `mod-x-` and `mod--x`, `Slug` forbids a trailing or doubled hyphen, and
-    without the second check those two arrive at the user as a pydantic
-    `ValidationError` instead of a sentence. (The design page asserted `_CUSTOM_ID`
-    was a subset of `Slug`; it is not.)
+    The folder rule itself is `manifest.folder_refusal()`'s, the same one a persisted
+    manifest is held to, so the two cannot drift; the id beside it is
+    `manifest.id_for_folder()`, which `Manifest` requires of every folder.
     """
-    candidate = basename
-    if candidate.endswith(".git"):
-        candidate = candidate[: -len(".git")]
-    candidate = candidate.lower()
-    if not _CUSTOM_ID.match(candidate):
-        return None
-    try:
-        _SLUG.validate_python(candidate)
-    except ValidationError:
-        return None
-    return candidate
+    name = basename[: -len(".git")] if basename.endswith(".git") else basename
+    # A derivation makes a `module` and asks the module rule: a name the core keeps in
+    # `modules/` would land on the build's own file. `Manifest` asks the same question
+    # with the item's own type, which is where a `mod` is let off that clause (T861).
+    refusal = folder_refusal(name, game, kind="module")
+    if refusal is not None:
+        raise DeriveError(f"The {what} is named {name!r}, and {refusal}. {_NOTHING_CHANGED}")
+    item_id = id_for_folder(name)
+    if not item_id:
+        raise DeriveError(
+            f"The {what} is named {name!r}, which gives Yu'lon no name to keep it under: "
+            f"an id needs a letter or a digit, at most {ID_MAX}. {_NOTHING_CHANGED}"
+        )
+    return item_id, (name if name != item_id else None)
 
 
 def _manifest(
@@ -544,6 +541,7 @@ def _manifest(
     today: date,
     kind: ManifestType = "module",
     name: str | None = None,
+    folder: str | None = None,
     build: Build | None = None,
 ) -> Manifest:
     """The fields a derivation can honestly fill in, and nothing beyond them.
@@ -564,6 +562,7 @@ def _manifest(
         description=description,
         source=source,
         origin=origin,
+        folder=folder,
         build=build if build is not None else Build(rebuild=True),
         notes=(
             f"Derived by Yu'lon from {came_from} on {today.isoformat()}; "
@@ -623,6 +622,65 @@ def persist(user_root: Path, manifest: Manifest, *, shipped_ids: Container[str])
 def recorded(user_root: Path, manifest: Manifest) -> bool:
     """Whether the user layer holds a record of `manifest`'s item (T596)."""
     return (_items_dir(user_root, manifest.game, manifest.type) / f"{manifest.id}.json").is_file()
+
+
+def refuse_if_recorded(user_root: Path, manifest: Manifest) -> None:
+    """Refuse a derivation the user layer already records as an installed item (T861).
+
+    Two refusals, and the second is the reason both families are read:
+
+    * The same id recorded under a DIFFERENT folder spelling. Two spellings of one
+      folder (`Mod-X` and `mod-x`) give the same id, and a Windows folder ignores case,
+      so a second record of that id would be two items for one folder. Only the item's
+      OWN family is read for this: a record with this id AND this folder falls through
+      to the behaviour before T861, since re-picking an edited folder (T47's replace
+      question) and adding the same link on a second server are legitimate presses.
+    * Tortoise's OTHER family (`_NAMES_FOR_TWO_FAMILIES`): a legacy `mod` before T861
+      and a `module` now are ONE add-on, so a record of the same id in the other family
+      is refused whatever the spelling, and the sentence names what it is installed as
+      (T861, review round 2).
+
+    A record that will not parse cannot answer which folder it names, so it is refused
+    for the first reason: something is at that id's name and this app may not overwrite
+    it blind.
+    """
+    wanted = manifest.folder or manifest.id
+    other: ManifestType | None = None
+    if manifest.game in _NAMES_FOR_TWO_FAMILIES and manifest.type in ("module", "mod"):
+        other = "mod" if manifest.type == "module" else "module"
+    for kind in (manifest.type, other) if other is not None else (manifest.type,):
+        present, folder = _recorded_folder(user_root, manifest.game, kind, manifest.id)
+        if not present:
+            continue
+        if kind == other:
+            raise DeriveError(
+                f"{manifest.id} is already installed as {folder or manifest.id} — find it "
+                f"on the Modules tab, or Remove it first. {_NOTHING_CHANGED}"
+            )
+        if folder != wanted:
+            raise DeriveError(
+                f"{manifest.id} is already installed — find it on the Modules tab, or "
+                f"Remove it first. {_NOTHING_CHANGED}"
+            )
+
+
+def _recorded_folder(
+    user_root: Path, game: str, kind: ManifestType, item_id: str
+) -> tuple[bool, str | None]:
+    """`(is there a record, the folder it names)`, the folder `None` when it cannot be read.
+
+    A file at the id's name that does not parse still answers `True`: something is
+    recorded there and `refuse_if_recorded()` refuses rather than guessing which
+    folder it belongs to.
+    """
+    item = _items_dir(user_root, game, kind) / f"{item_id}.json"
+    if not item.is_file():
+        return (False, None)
+    try:
+        record = parse_manifest(json.loads(item.read_text(encoding="utf-8")))
+    except (OSError, ValueError, ValidationError):
+        return (True, None)
+    return (True, record.folder or record.id)
 
 
 def forget(user_root: Path, manifest: Manifest) -> bool:

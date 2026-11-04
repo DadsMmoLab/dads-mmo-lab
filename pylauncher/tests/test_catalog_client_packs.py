@@ -92,6 +92,22 @@ def _client() -> dict[str, Any]:
                 "sha256_file": "modules/mod-unbound/MANIFEST.sha256",
                 "install": [{"member": "*", "to_dir": "Interface/AddOns"}],
             },
+            {
+                # A GitHub repo's latest release (T853): the ConsolePort controller
+                # add-on, kept at whatever the makers published last. No pinned
+                # checksum: the release's own digest proves the asset.
+                "id": "consoleport",
+                "label": "Controller support (ConsolePort)",
+                "source": {
+                    "kind": "github_release",
+                    "repo": "SuttonX/ConsolePortLK-Enhanced",
+                    "asset": "ConsolePortLK-Enhanced.zip",
+                },
+                "install": [{"member": "*", "to_dir": "Interface/AddOns"}],
+                "optional": True,
+                "default": False,
+                "size_hint": 13646207,
+            },
         ],
         "exe_patch": {
             "expect_sha256": "a" * 64,
@@ -123,6 +139,7 @@ def _client() -> dict[str, Any]:
         "config_wtf": {
             "always": {"realmList": "127.0.0.1", "realmName": "Centurion"},
             "seed": {"gxWindow": "1"},
+            "remove": ["portal"],
             "remove_locale_realmlists": True,
         },
     }
@@ -137,12 +154,27 @@ def test_the_fixture_every_refusal_below_is_cut_from_loads() -> None:
         "client-tweaks",
         "hd-creatures",
         "unbound-addons",
+        "consoleport",
     ]
     assert client.packs[3].source.version_url is not None
     folder = client.packs[4]
     assert folder.source.kind == "checkout_folder" and folder.source.from_checkout
     assert folder.sha256_file == "modules/mod-unbound/MANIFEST.sha256"
-    assert [pack.source.from_checkout for pack in client.packs] == [True, True, True, False, True]
+    assert [pack.source.from_checkout for pack in client.packs] == [
+        True,
+        True,
+        True,
+        False,
+        True,
+        False,
+    ]
+    release = client.packs[5]
+    assert (release.source.kind, release.source.repo, release.source.asset) == (
+        "github_release",
+        "SuttonX/ConsolePortLK-Enhanced",
+        "ConsolePortLK-Enhanced.zip",
+    )
+    assert (release.source.url, release.source.version_url) == (None, None)
     assert client.exe_patch is not None
     assert client.exe_patch.options["borderless"].default is True
     assert client.exe_patch.writes[1].length == 11
@@ -155,15 +187,34 @@ def test_the_fixture_every_refusal_below_is_cut_from_loads() -> None:
 
 
 def test_hosts_names_every_host_a_download_may_reach_and_nothing_else() -> None:
-    """Packs' url and version_url, and the clean-exe sources; never the fallback page.
+    """Packs' url and version_url, plus the clean-exe sources; never the fallback page.
 
     The fallback page is a page a PERSON is sent to in a refusal, so it is not a
     host Yu'lon fetches from and must not widen the allow-list later tasks check.
-    Hostnames compare lowercased, as DNS does.
+    A github_release pack's own hosts ride on its fetch (`pack_hosts`), never on
+    the whole entry's fence. Hostnames compare lowercased, as DNS does.
     """
     assert Client.model_validate(_client()).hosts() == frozenset(
         {"packs.example.org", "clean.example.org"}
     )
+
+
+def test_a_version_url_packs_fetch_is_not_given_github() -> None:
+    """T853 G4: the release hosts stay on the github_release pack's own fetch."""
+    client = Client.model_validate(_client())
+    release = next(pack for pack in client.packs if pack.source.kind == "github_release")
+    assert "api.github.com" not in client.hosts()
+    assert "github.com" not in client.hosts()
+    assert {
+        "packs.example.org",
+        "clean.example.org",
+        "api.github.com",
+        "github.com",
+        "release-assets.githubusercontent.com",
+        "objects.githubusercontent.com",
+    } <= client.pack_hosts(release)
+    url_pack = next(pack for pack in client.packs if pack.source.kind == "url")
+    assert client.pack_hosts(url_pack) == client.hosts()
 
 
 def test_a_client_without_the_new_fields_names_no_host() -> None:
@@ -176,8 +227,11 @@ def test_a_client_without_the_new_fields_names_no_host() -> None:
 
 def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound() -> None:
     """T809 W2: wow-wotlk and wow-unbound carry the Lumenveil ClientPack; Centurion does not.
-    WoW Unbound (T555) keeps its required addons pack beside it; WoW Conquest of Azeroth (T812)
-    carries its own client fields and no packs; every other entry behaves exactly as before
+    T853 adds the ConsolePort controller add-on (a github_release pack, kept at the
+    repo's latest release) beside it on all three 30300 entries. WoW Unbound (T555)
+    keeps its required addons pack beside it; WoW Conquest of Azeroth (T812)
+    carries its own client fields and no packs; Mists of Pandaria (T850) carries an `exe_names`
+    and a `config_wtf` and no packs; every other entry behaves exactly as before
     (its own tests: test_catalog_centurion, test_unbound_entry, test_coa_entry)."""
     raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     for entry in raw["games"]:
@@ -198,6 +252,19 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
                 "notes",
             }, sorted(set(entry["client"]))
             continue
+        if entry["id"] == "wow-mop":
+            # T850: exactly these, and no pack or patch of any kind -- the Recall client
+            # logs in as shipped, so there is nothing to lay down at Play.
+            assert set(entry["client"]) == {
+                "version",
+                "build",
+                "required_build",
+                "addon_interface",
+                "exe_names",
+                "notes",
+                "config_wtf",
+            }, sorted(set(entry["client"]))
+            continue
         assert set(entry["client"]) <= {
             "version",
             "build",
@@ -212,7 +279,7 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
         # T828: the HD patches choice is CoA's alone.
         assert (game.client.hd_patches is not None) == (game.id == "wow-coa"), game.id
         if game.id == "wow-wotlk":
-            assert [pack.id for pack in game.client.packs] == ["lumenveil"]
+            assert [pack.id for pack in game.client.packs] == ["lumenveil", "consoleport"]
             assert game.client.exe_patch is None
             assert game.client.config_wtf is None
             assert game.client.hosts() == frozenset(
@@ -222,13 +289,40 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
                     "objects.githubusercontent.com",
                 }
             )
+            release = next(pack for pack in game.client.packs if pack.id == "consoleport")
+            assert game.client.pack_hosts(release) == frozenset(
+                {
+                    "github.com",
+                    "api.github.com",
+                    "release-assets.githubusercontent.com",
+                    "objects.githubusercontent.com",
+                }
+            )
+            url_pack = next(pack for pack in game.client.packs if pack.id == "lumenveil")
+            assert game.client.pack_hosts(url_pack) == game.client.hosts()
             continue
         if game.id == "wow-centurion":
             assert game.client.packs and game.client.exe_patch and game.client.config_wtf
+            assert [pack.id for pack in game.client.packs][-1] == "consoleport"
             assert game.client.hosts() == frozenset({"centurionpvp.com", "wow.baerthe.com"})
+            release = next(pack for pack in game.client.packs if pack.id == "consoleport")
+            assert game.client.pack_hosts(release) == frozenset(
+                {
+                    "centurionpvp.com",
+                    "wow.baerthe.com",
+                    "api.github.com",
+                    "github.com",
+                    "release-assets.githubusercontent.com",
+                    "objects.githubusercontent.com",
+                }
+            )
             continue
         if game.id == "wow-unbound":
-            assert [pack.id for pack in game.client.packs] == ["unbound-addons", "lumenveil"]
+            assert [pack.id for pack in game.client.packs] == [
+                "unbound-addons",
+                "lumenveil",
+                "consoleport",
+            ]
             assert game.client.config_wtf
             assert game.client.exe_patch is None
             assert game.client.hosts() == frozenset(
@@ -238,6 +332,8 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
                     "objects.githubusercontent.com",
                 }
             )
+            release = next(pack for pack in game.client.packs if pack.id == "consoleport")
+            assert "api.github.com" in game.client.pack_hosts(release)
             continue
         if game.id == "wow-coa":
             assert game.client.exe_names == ("ascension.exe",)
@@ -250,6 +346,19 @@ def test_the_shipped_catalog_uses_the_new_fields_on_wotlk_centurion_and_unbound(
             # T828: the CoA launcher's "Enable HD patches" off is exactly `-hd 0`.
             assert game.client.hd_patches is not None
             assert game.client.hd_patches.args_when_off == ("-hd", "0")
+            continue
+        if game.id == "wow-mop":
+            assert game.client.packs == ()
+            assert game.client.exe_patch is None
+            assert game.client.exe_names == ("_wow-64.exe",)
+            # T850: `portal` is taken out of the ready-to-play Config.wtf -- a `SET portal`
+            # line sends this client to Battle.net's :1119 -- and realmList/locale are set
+            # on every Play, so the copy dials this server whatever the player's own said.
+            assert game.client.config_wtf is not None
+            assert game.client.config_wtf.remove == ("portal",)
+            assert game.client.config_wtf.always["realmList"] == "127.0.0.1"
+            assert game.client.config_wtf.remove_locale_realmlists is True
+            assert game.client.hosts() == frozenset()
             continue
         assert game.client.packs == ()
         assert game.client.exe_patch is None
@@ -351,6 +460,41 @@ def test_the_lumenveil_pack_is_pinned_identical_and_windows_only() -> None:
         assert pack.setup.timeout_seconds == 1800
         assert pack.credit.startswith("Lumenveil") and "GPL-2.0" in pack.credit
         assert "CoAVolFog" in pack.credit
+
+
+CONSOLEPORT_REPO = "SuttonX/ConsolePortLK-Enhanced"
+CONSOLEPORT_ASSET = "ConsolePortLK-Enhanced.zip"
+CONSOLEPORT_SIZE = 13646207
+
+
+def _consoleport_of(game_id: str) -> ClientPack:
+    """The shipped ConsolePort pack on one entry, failing loudly when it is missing."""
+    packs = {pack.id: pack for pack in load_catalog().get(game_id).client.packs}
+    assert "consoleport" in packs, f"{game_id} lost its ConsolePort pack"
+    return packs["consoleport"]
+
+
+def test_the_consoleport_pack_is_a_latest_release_extra_on_all_three_entries() -> None:
+    """T853: github_release source, star-installed into Interface/AddOns, every platform."""
+    for game_id in ("wow-wotlk", "wow-unbound", "wow-centurion"):
+        pack = _consoleport_of(game_id)
+        assert pack.label == "Controller support (ConsolePort)"
+        assert (pack.source.kind, pack.source.repo, pack.source.asset) == (
+            "github_release",
+            CONSOLEPORT_REPO,
+            CONSOLEPORT_ASSET,
+        )
+        assert (pack.source.url, pack.source.version_url) == (None, None)
+        assert (pack.sha256, pack.md5, pack.md5_file, pack.sha256_file) == (None, None, None, None)
+        assert pack.optional is True and pack.default is False, "opt-in extra, off until chosen"
+        assert pack.size_hint == CONSOLEPORT_SIZE
+        assert pack.platforms == (), "a pure addons zip: offered on every platform"
+        assert pack.setup is None
+        assert [(rule.member, rule.to_dir) for rule in pack.install] == [("*", "Interface/AddOns")]
+        assert "SuttonX" in pack.credit and "Artistic" in pack.credit
+    assert "consoleport" not in {
+        pack.id for pack in load_catalog().get("wow-coa").client.packs
+    }, "CoA's Ascension client loading is unverified"
 
 
 def test_the_lumenveil_pin_names_its_release() -> None:
@@ -515,6 +659,42 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
     ),
     "pack that installs nothing": (_set("packs.0.install", []), "at least 1 item"),
     # Pack source shape.
+    "github_release source with a url": (
+        _set("packs.5.source.url", "https://packs.example.org/p.zip"),
+        "a github_release source names a repo and an asset",
+    ),
+    "github_release source with a path": (
+        _set("packs.5.source.path", "centurion/patches/p.zip"),
+        "a github_release source names a repo and an asset",
+    ),
+    "github_release source with a version url": (
+        _set("packs.5.source.version_url", "https://packs.example.org/p.version"),
+        "a github_release source names a repo and an asset",
+    ),
+    "github_release source with no repo": (
+        _drop("packs.5.source.repo"),
+        "a github_release source names a repo and an asset",
+    ),
+    "github_release source with no asset": (
+        _drop("packs.5.source.asset"),
+        "a github_release source names a repo and an asset",
+    ),
+    "github_release repo with two slashes": (
+        _set("packs.5.source.repo", "SuttonX/extra/ConsolePortLK-Enhanced"),
+        "owner and a name",
+    ),
+    "github_release repo with no slash": (
+        _set("packs.5.source.repo", "SuttonX"),
+        "owner and a name",
+    ),
+    "github_release asset with a slash": (
+        _set("packs.5.source.asset", "files/ConsolePortLK-Enhanced.zip"),
+        "plain file name",
+    ),
+    "url source with a repo": (
+        _set("packs.3.source.repo", "SuttonX/ConsolePortLK-Enhanced"),
+        "names no repo or asset",
+    ),
     "checkout source with a url": (
         _both(
             _drop("packs.0.source.path"),
@@ -534,6 +714,10 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
     "checkout pack with no checksum": (
         _drop("packs.0.md5"),
         "a checkout pack needs a checksum",
+    ),
+    "github_release pack with a pinned checksum": (
+        _set("packs.5.sha256", "3" * 64),
+        "takes no pinned checksum",
     ),
     "url pack with no checksum and no version_url": (
         _drop("packs.3.source.version_url"),
@@ -713,6 +897,18 @@ REFUSALS: dict[str, tuple[Mutation, str]] = {
     ),
     "a key with a space": (
         _set("config_wtf.seed.gx Window", "1"),
+        "String should match pattern",
+    ),
+    "a key both removed and set": (
+        _set("config_wtf.remove", ["realmName"]),
+        "in remove and also in always or seed",
+    ),
+    "a key both removed and seeded": (
+        _set("config_wtf.remove", ["gxWindow"]),
+        "in remove and also in always or seed",
+    ),
+    "a removed key that is not a key": (
+        _set("config_wtf.remove", ["not a key"]),
         "String should match pattern",
     ),
     # T809 W1: the new optional pack fields.
@@ -913,6 +1109,21 @@ def test_a_pack_with_the_new_fields_parses_and_names_its_redirect_hosts() -> Non
     assert "github.com" in client.hosts()
 
 
+def test_a_github_release_pack_names_the_release_and_asset_hosts() -> None:
+    """The kind carries its own fence: the API host and the asset hosts, no redirect_hosts."""
+    client = Client.model_validate(_client())
+    pack = next(item for item in client.packs if item.id == "consoleport")
+    assert pack.source.kind == "github_release"
+    assert pack.redirect_hosts == ()
+    assert "api.github.com" not in client.hosts()
+    assert {
+        "api.github.com",
+        "github.com",
+        "release-assets.githubusercontent.com",
+        "objects.githubusercontent.com",
+    } <= client.pack_hosts(pack)
+
+
 def test_redirect_hosts_compare_case_insensitively() -> None:
     """Hostnames are DNS names: the catalog stores them lowered, matching `hosts()` of urls."""
     data = _client()
@@ -976,6 +1187,8 @@ def test_write_and_model_types_are_importable_for_the_engine() -> None:
     write = ExeWrite(offset=0, bytes="eb")
     assert write.length == 1 and write.payload() == b"\xeb"
     assert ConfigWtf().always == {} and ConfigWtf().seed == {}
+    assert ConfigWtf().remove == ()
+    assert ConfigWtf(remove=("portal",)).remove == ("portal",)
     assert ExePatch.model_fields["options"].default_factory is dict
     assert ClientPack.model_fields["optional"].default is False
     assert ClientPack.model_fields["platforms"].default == ()

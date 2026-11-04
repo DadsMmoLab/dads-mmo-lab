@@ -9,8 +9,10 @@ proved by size and SHA-256, the old file moved into a backup, and the new one
 renamed into place. Nothing unproved ever wears a client file's name.
 
 **What is never written.** Logs (`*.log`), `realmlist.wtf`, the `WTF/`,
-`Cache/`, `Errors/` and `Logs/` folders and `Interface/AddOns/CoaBotUI/` (our
-own add-on's place). The player's own settings and graphics wrappers
+`Cache/`, `Errors/` and `Logs/` folders, `Interface/AddOns/CoaBotUI/` (our
+own add-on's place), the eight `Interface/AddOns/ConsolePort*/` trees (T855's opt-in
+controller add-on) and `Interface/AddOns/SquidBotsLite/` (T870's default add-on).
+The player's own settings and graphics wrappers
 (`d3d8/d3d9/d3d10core/d3d11/dxgi.dll`, `dxvk.conf`, every `*.ini/*.conf/*.cfg/*.wtf`)
 are only created when missing, never replaced. A differing file is replaced only
 when Yu'lon recorded it and the player has not changed it since; any other (every
@@ -93,7 +95,20 @@ _WINDOWS_DEVICES = client_packs._WINDOWS_DEVICES
 _EXCLUDED_FOLDERS = frozenset({"wtf", "cache", "errors", "logs"})
 _EXCLUDED_NAMES = frozenset({"realmlist.wtf"})
 _EXCLUDED_SUFFIXES = frozenset({".log"})
-_EXCLUDED_TREES = (("interface", "addons", "coabotui"),)
+_EXCLUDED_TREES = (
+    ("interface", "addons", "coabotui"),
+    ("interface", "addons", "consoleport"),
+    ("interface", "addons", "consoleportadvanced"),
+    ("interface", "addons", "consoleportbar"),
+    ("interface", "addons", "consoleporthelp"),
+    ("interface", "addons", "consoleportkeyboard"),
+    ("interface", "addons", "consoleportloader"),
+    ("interface", "addons", "consoleportui_loot"),
+    ("interface", "addons", "consoleportui_menu"),
+    ("interface", "addons", "squidbotslite"),
+)
+"""Never written by Update client: our own add-on, the opt-in ConsolePort trees (T855) and
+SquidBots Lite (T870)."""
 _PLAYER_NAMES = frozenset(
     {"d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll", "dxvk.conf"}
 )

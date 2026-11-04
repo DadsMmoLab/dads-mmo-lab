@@ -34,6 +34,15 @@ had it (T589: the record of the build, not the checkout, which an update moves h
 compile ends). A server made before the pin moved is still the crashing build, and pressing
 Revive there would take its world down, so it keeps the sentence that says to update the
 server first.
+
+**Two ids, two trees (T850).** This module serves every entry whose controller is
+`controller_view`'s `_for_centurion` -- Centurion and, since T850, Mists of Pandaria
+(`wow-mop`, 1LineAtaTime/LoA-Pandaria-Playerbots @ e135742e). The verbs are NOT shared:
+`CONFIRMED_LIVE_BY_GAME` names, per id, the ones watched on a live server of that game, and
+MoP's row is empty because nothing has been tried on a live LoA Pandaria server (GAP §2,
+"Characters tab"). So MoP draws no verb, each with the "checked against a live server"
+sentence -- including Revive, whose crash sentences are Centurion's alone
+(`REVIVE_CRASH_IS_CENTURIONS`). Fill MoP's row in after its first live check.
 """
 
 from __future__ import annotations
@@ -62,15 +71,37 @@ REVIVE_FIXED_PINS: Final[frozenset[str]] = frozenset(
         "4948d1a9290cb1046eede1dbf289789200ea050e",
         "25d3e6efbee97c3cb38830003e2460d98e235f46",
         "351950fb9a5579edfb96a301eb846f13e65aeda6",
+        "0f7e3f5992620e02edd6238a790fee9827af60ec",
     }
 )
-"""Catalog pins whose build answers a console or SOAP `revive` (T218).
+"""Centurion pins whose build answers a console or SOAP `revive` (T218).
 
 CENTURION 4948d1a9 and 25d3e6ef hold #1767 (`cs_misc.cpp`: `!session || session->HasPermission`);
-T824 read the same line at 351950fb (`cs_misc.cpp:798`, `HandleReviveCommand`). A later pin is
+T824 read the same line at 351950fb (`cs_misc.cpp:798`, `HandleReviveCommand`), and T860 at
+0f7e3f59 (`cs_misc.cpp:797-798`, same fix, declaration one line up). A later pin is
 added here by whoever moves it, after reading that the fix is still in it:
 `test_the_shipped_pin_carries_the_revive_fix` fails until they do, and until then Revive is
 withheld again rather than offered on a build nobody has looked at."""
+
+REVIVE_CRASH_IS_CENTURIONS: Final[frozenset[str]] = frozenset({"wow-centurion"})
+"""The ids the crash above was measured on, and the only ones owed its two sentences.
+
+`cs_misc.cpp:795`'s null-session dereference is this fork's at CENTURION faac5fc9, and #1767
+fixed it there. Another id this package serves (T850's `wow-mop`) has never been tried at all,
+so its Revive gets the plain "not checked yet" sentence: claiming a crash nobody saw, on
+another fork's console, is exactly the inherited fact this module exists to refuse."""
+
+CONFIRMED_LIVE_BY_GAME: Final[Mapping[str, frozenset[str]]] = {
+    # T850: no Characters verb has been run against a live LoA Pandaria server yet
+    # (GAP §2, "Characters tab"), so MoP draws none of them and says why.
+    "wow-mop": frozenset(),
+}
+"""Per id, the OVERRIDE of `CONFIRMED_LIVE` -- an id with no row uses it, Centurion's.
+
+Per tree and never inherited: Centurion's five are T208's, on Centurion's own box and its own
+bot module, and are not evidence about another core. A table of overrides rather than a table
+of every id, so `CONFIRMED_LIVE` is still read at CALL time: `test_centurion_view` swaps it
+out to prove the tab draws exactly the verbs it names."""
 
 REVIVE_CRASHED = (
     "it crashed the world server when it was tried, so it stays off until that is fixed"
@@ -155,18 +186,28 @@ def revive_is_fixed(entry: CatalogEntry, server_dir: Path | None) -> bool:
     return head == built and built_carries_pin(built, pin, state.rev_for(repo))
 
 
+def confirmed_live(entry: CatalogEntry) -> frozenset[str]:
+    """The verbs watched to work on a live server of THIS entry (`CONFIRMED_LIVE_BY_GAME`)."""
+    return CONFIRMED_LIVE_BY_GAME.get(entry.id, CONFIRMED_LIVE)
+
+
 def withheld(entry: CatalogEntry, server_dir: Path | None = None) -> Mapping[str, str]:
-    """Verb -> why it is not offered, for every verb `CONFIRMED_LIVE` does not name.
+    """Verb -> why it is not offered, for every verb this entry has no live check for.
 
     Revive is also named when this server's build (`server_dir`) may still be the one that
-    crashes on it (`revive_is_fixed()`); a call without a folder withholds it.
+    crashes on it (`revive_is_fixed()`); a call without a folder withholds it. That arm is
+    Centurion's fork and its own #1767 (`REVIVE_CRASH_IS_CENTURIONS`), so another id this
+    package serves keeps the plain "not checked yet" sentence for Revive instead of a claim
+    about a crash nobody watched there (T850, MoP).
     """
     untried = NOT_CONFIRMED.format(game=entry.name)
-    core = _core_source(entry)
-    pin_fixed = core is not None and core[2] in REVIVE_FIXED_PINS
-    reasons = {
-        verb: untried for verb in play.VERBS if verb not in CONFIRMED_LIVE and verb != "revive"
-    }
-    if "revive" not in CONFIRMED_LIVE and not (pin_fixed and revive_is_fixed(entry, server_dir)):
-        reasons["revive"] = REVIVE_NEEDS_UPDATE if pin_fixed else REVIVE_CRASHED
+    live = confirmed_live(entry)
+    reasons = {verb: untried for verb in play.VERBS if verb not in live}
+    if "revive" in reasons and entry.id in REVIVE_CRASH_IS_CENTURIONS:
+        core = _core_source(entry)
+        pin_fixed = core is not None and core[2] in REVIVE_FIXED_PINS
+        if pin_fixed and revive_is_fixed(entry, server_dir):
+            del reasons["revive"]
+        else:
+            reasons["revive"] = REVIVE_NEEDS_UPDATE if pin_fixed else REVIVE_CRASHED
     return {verb: reasons[verb] for verb in play.VERBS if verb in reasons}

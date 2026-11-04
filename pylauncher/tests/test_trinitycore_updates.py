@@ -1290,7 +1290,7 @@ def test_a_stopped_reextract_starts_no_tool_after_the_stop_ends_its_container_an
         else:
             assert len(runs) == 1, "a further tool was started after the Stop"
             name = runs[0].split()[runs[0].split().index("--name") + 1]
-            assert f"rm -f {name}" in fake_calls(state)
+            assert f"rm -f -v {name}" in fake_calls(state)
         assert fake_containers(state) == [], "a tool container is still running"
         assert seen_at_put_back == [[]], "the old data came back while a tool could still write"
         assert data_files(box) == before, "the old map data, its record and the movement maps"
@@ -3177,7 +3177,7 @@ def test_the_refusal_names_where_this_platform_removes_the_container(
 
         said = str(refused.value)
         assert ("Docker Desktop's Containers list" in said) is desktop, said
-        assert (f"docker rm -f {name}" in said) is not desktop, said
+        assert (f"docker rm -f -v {name}" in said) is not desktop, said
     finally:
         end_fake_containers(state)
 
@@ -3367,7 +3367,7 @@ def test_a_reextract_with_no_claim_of_its_own_stops_before_anything_moves(
             assert said.startswith(f"Yu'lon could not reserve {data} for this extraction"), said
         else:
             assert said.startswith("An earlier run of this Yu'lon left its reservation"), said
-            assert said.splitlines()[-1] == f"docker rm -f {name}", said
+            assert said.splitlines()[-1] == f"docker rm -f -v {name}", said
             assert not [call for call in fake_calls(state) if call.startswith("rm ")]
         assert "Nothing was changed." in said, said
         assert not [call for call in fake_calls(state) if call.startswith("create ")]

@@ -13,9 +13,10 @@ name: ci
 # printed 41 minutes in, and the remaining 910 of the 982 printed in the 22
 # seconds after it.
 #
-# So the fast checks no longer wait behind Docker. `lint-type-test` deselects
-# the marker and answers in about 80 seconds; `integration` runs the same 16
-# tests it always did, in parallel, on its own runner.
+# So the fast checks no longer wait behind Docker. The test matrix deselects
+# the marker; its slowest leg takes about 15 minutes (2026-11-04, fork run on
+# #36). `integration` runs the same 16 tests it always did, in parallel, on its
+# own runner.
 #
 # The 41 minutes turned out not to be inherent to those tests either - it was
 # four of them waiting out a stop grace, fixed in tests/integration/conftest.py.
@@ -80,7 +81,63 @@ defaults:
     working-directory: pylauncher
 
 jobs:
-  lint-type-test:
+  # The checkers, on both release Pythons and one runner. They used to run on shard 0
+  # only, which made that shard the longest job of the eight: 23 minutes on
+  # 2026-11-02/03, against 11-20 for the others, and the slowest leg hit 27. Here they
+  # do not depend on the shard, so no test matrix is needed - but the two Pythons stay,
+  # because mypy checks per-interpreter: it reads the running Python's version and its
+  # `sys.version_info` branches, and the release ships 3.11. Eighteen jobs in total (12
+  # test + 2 lint-type + 2 platform-smoke + discord-scripts + integration), still under
+  # the free 20-concurrent-job limit.
+  lint-type:
+    name: lint-type (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          # `defaults.run.working-directory` applies to `run:` steps only, never
+          # to an action's inputs, so this path is from the repository root.
+          cache: pip
+          # BOTH files. requirements-dev.txt opens with `-r requirements.txt`,
+          # so a key hashed over the dev file alone would keep serving a cache
+          # built before a runtime pin changed - the one failure mode that makes
+          # a caching bug look like a code bug.
+          cache-dependency-path: |
+            pylauncher/requirements-dev.txt
+            pylauncher/requirements.txt
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: ruff (lint)
+        run: python -m ruff check .
+
+      - name: black (format check)
+        run: python -m black --check .
+
+      # Three platforms, because a POSIX-only or Windows-only import is red on
+      # whichever platform it was not written for, and one run can only ever
+      # see one of them. `pwd` shipped twice in one day - once needing a
+      # `type: ignore` (green on the Windows box it was written on, red here)
+      # and once without one (green here, red for every Windows developer).
+      # Neither could be caught by a checker that runs Linux only.
+      - name: mypy (types, this platform)
+        run: python -m mypy yulon main.py
+
+      - name: mypy (types, as Windows)
+        run: python -m mypy --platform win32 yulon main.py
+
+      - name: mypy (types, as macOS)
+        run: python -m mypy --platform darwin yulon main.py
+
+  test:
     runs-on: ubuntu-latest
     # Measured 2026-09-29 over 19 runs: each leg took 10-15 minutes, most of
     # them over 13, and two were cancelled by the old 15-minute limit, one
@@ -103,19 +160,20 @@ jobs:
     # than the middle: 3.11 is the floor we promise, 3.13 is what a developer
     # actually has installed.
     #
-    # FOUR SHARDS per version (eight jobs): pytest alone took 19 min on 3.13 and 31 min on
+    # SIX SHARDS per version (twelve jobs): pytest alone took 19 min on 3.13 and 31 min on
     # 3.11 with `-n auto` on four cores, and the setup is about 40 s, so caching is not the
-    # lever and more jobs are. Shard N runs the tests whose node id hashes to N mod 4
+    # lever and more jobs are. Shard N runs the tests whose node id hashes to N mod 6
     # (`tests/conftest.py`, `--shard-id` / `--num-shards`; the node id, not the file, so the
-    # big files spread). Together the four run every test exactly once
-    # (`tests/test_ci_shards.py`). The checkers run on shard 0 only: they do not depend on
-    # the shard, and four copies would only spend the minutes the split saves.
-    name: lint-type-test (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/4)
+    # big files spread). Together the six run every test exactly once
+    # (`tests/test_ci_shards.py`). Six rather than four because shard 0 hit 23 minutes and
+    # the slowest leg 27 on 2026-11-02/03, and the checkers that made shard 0 the longest
+    # now run in `lint-type` instead.
+    name: test (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.13"]
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
 
@@ -138,32 +196,6 @@ jobs:
 
       - run: pip install -r requirements-dev.txt
 
-      - name: ruff (lint)
-        if: matrix.shard == 0
-        run: python -m ruff check .
-
-      - name: black (format check)
-        if: matrix.shard == 0
-        run: python -m black --check .
-
-      # Three platforms, because a POSIX-only or Windows-only import is red on
-      # whichever platform it was not written for, and one run can only ever
-      # see one of them. `pwd` shipped twice in one day - once needing a
-      # `type: ignore` (green on the Windows box it was written on, red here)
-      # and once without one (green here, red for every Windows developer).
-      # Neither could be caught by a checker that runs Linux only.
-      - name: mypy (types, this platform)
-        if: matrix.shard == 0
-        run: python -m mypy yulon main.py
-
-      - name: mypy (types, as Windows)
-        if: matrix.shard == 0
-        run: python -m mypy --platform win32 yulon main.py
-
-      - name: mypy (types, as macOS)
-        if: matrix.shard == 0
-        run: python -m mypy --platform darwin yulon main.py
-
       # `not integration` is the whole point of the split - see the header.
       #
       # `-n auto` (pytest-xdist, T229): one worker per core - four on a
@@ -174,18 +206,19 @@ jobs:
       # changes. `loadfile` is not used: it pins a whole file to one worker,
       # and the biggest file alone is a large share of the suite.
       #
-      # `--shard-id`/`--num-shards` (T-shards, `tests/conftest.py`): this job's quarter of the
-      # suite. Every test still runs in both legs; the four shards of a leg run all of it.
+      # `--shard-id`/`--num-shards` (T-shards, `tests/conftest.py`): this job's sixth of the
+      # suite. Every test still runs in both legs; the six shards of a leg run all of it.
       - name: pytest (tests)
-        run: python -m pytest -q -m "not integration" -n auto --shard-id ${{ matrix.shard }} --num-shards 4
+        run: python -m pytest -q -m "not integration" -n auto --shard-id ${{ matrix.shard }} --num-shards 6
 
-  # T687: THE OTHER TWO PLATFORMS THE RELEASE SHIPS. `lint-type-test` runs on
+  # T687: THE OTHER TWO PLATFORMS THE RELEASE SHIPS. The test matrix runs on
   # Linux only, so until this job the Windows zip and the macOS dmg went out
   # with no test ever run on either OS - Windows behaviour was covered only by
-  # fakes on Linux (test_winacl, test_winjob), and the mypy passes above can
-  # only SIMULATE the other platforms' imports. Not the whole suite: most of it
-  # drives POSIX paths, shells and Docker fakes written on Linux and was never
-  # meant to run elsewhere. What runs is the code that branches on the OS
+  # fakes on Linux (test_winacl, test_winjob), and the mypy passes in
+  # `lint-type` can only SIMULATE the other platforms' imports. Not the whole
+  # suite: most of it drives POSIX paths, shells and Docker fakes written on
+  # Linux and was never meant to run elsewhere. What runs is the code that
+  # branches on the OS
   # (paths, ACLs, Job objects, self-update, autostart, the single-instance
   # lock) plus an import of every module on the real interpreter.
   #
@@ -315,7 +348,7 @@ jobs:
       # The daemon must be REACHED, not assumed. Every test in this job skips
       # itself when `docker info` fails, so a runner image that dropped Docker
       # would turn this job into a green no-op - which is exactly the silence
-      # that let the suite run unnoticed inside `lint-type-test` for weeks.
+      # that let the suite run unnoticed inside the test job for weeks.
       - name: A daemon has to be there for this job to mean anything
         run: docker info > /dev/null
 

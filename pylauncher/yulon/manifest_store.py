@@ -49,24 +49,29 @@ class ManifestError(RuntimeError):
 
 
 class ManifestStore:
-    """Read-only view of one game's manifest tree: indexes + per-item files.
+    """Read-only view of one game's manifest tree: borrowed indexes + own items + user items.
 
-    Optionally TWO trees. `root` is what the app ships (or the refreshed cache
-    over it); `user_root`, when given, is a second tree under the app's own
-    config directory holding manifests this app DERIVED from a link or a folder
-    the user chose (`yulon.module_source`). Its layout is byte-for-byte this
-    class's own — `<user_root>/<game>/<family>.json` plus
-    `<user_root>/<game>/<family>/<id>.json` — so the user layer is read by the
-    class that already exists rather than by a second parser.
+    Up to THREE trees. `root/<game>/` is the tree this store's indexes come
+    from. An entry that keeps its own items beside a borrowed list (CoA: its
+    own `manifests/wow-coa/` plus WotLK's `manifests/wow-wotlk/`) names the
+    borrowed tree as `game` and its own as `own_game`: every index is the
+    borrowed list followed by the own list's items, and an own item with the
+    same id as a borrowed one replaces it. Item files are looked up in the own
+    tree first, then the borrowed one. `user_root`, when given, is a third tree
+    under the app's own config directory holding manifests this app DERIVED
+    from a link or a folder the user chose (`yulon.module_source`). Its layout
+    is byte-for-byte this class's own — `<user_root>/<game>/<family>.json`
+    plus `<user_root>/<game>/<family>/<id>.json` — so the user layer is read
+    by the class that already exists rather than by a second parser.
 
-    **A user file can never shadow a shipped id.** The bundled layer comes first
-    in `load_all()` and wins in `load()`, and a user file naming a shipped id is
-    skipped with a warning that names the path. A shipped manifest is reviewed —
-    its repo passed README §3a, its conf keys and SQL steps were written by hand;
-    a derived one was built from a repository basename. Letting the second
-    replace the first would be a way to substitute an arbitrary repo for a
-    catalogued module by dropping a file into a directory, and the file can
-    arrive by hand as easily as by a press.
+    **A user file can never shadow a shipped id.** The bundled layers come
+    first in `load_all()` and win in `load()`, and a user file naming a
+    shipped id is skipped with a warning that names the path. A shipped
+    manifest is reviewed — its repo passed README §3a, its conf keys and SQL
+    steps were written by hand; a derived one was built from a repository
+    basename. Letting the third replace the first would be a way to substitute
+    an arbitrary repo for a catalogued module by dropping a file into a
+    directory, and the file can arrive by hand as easily as by a press.
     """
 
     def __init__(
@@ -77,6 +82,7 @@ class ManifestStore:
         *,
         user_game: str | None = None,
         shipped: bool = True,
+        own_game: str | None = None,
     ) -> None:
         self.root = root
         self.game = game
@@ -85,6 +91,10 @@ class ManifestStore:
         # for a reader of the user layer alone (`client_addons`): the bundled
         # indexes then read as empty instead of "manifest file missing".
         self.shipped = shipped
+        # T855-B: an entry that keeps its own items beside a borrowed list
+        # names its own tree here; `None` (every other store) reads exactly
+        # what it always read, byte for byte.
+        self.own_game = own_game
         # The user layer's game, `game` unless a caller names its own. A server
         # that offers another game's SHIPPED manifests keeps the modules the user
         # added to it under its own id (T554: WoW Unbound shows WotLK's catalog,
@@ -95,6 +105,64 @@ class ManifestStore:
     def game_dir(self) -> Path:
         """`<root>/<game>/`."""
         return self.root / self.game
+
+    @property
+    def own_game_dir(self) -> Path | None:
+        """`<root>/<own_game>/`, or None when this store borrows alone."""
+        return self.root / self.own_game if self.own_game is not None else None
+
+    @property
+    def has_own_tree(self) -> bool:
+        """Whether this store layers an own tree over the borrowed one."""
+        return self.own_game is not None
+
+    def _own_index_at(self, kind: ManifestType) -> Index:
+        own_dir = self.own_game_dir
+        assert own_dir is not None
+        return self._index_at(own_dir / f"{FAMILY_FILES[kind]}.json", kind, self.own_game)
+
+    def _own_index_missing(self, kind: ManifestType) -> bool:
+        own_dir = self.own_game_dir
+        assert own_dir is not None
+        return not (own_dir / f"{FAMILY_FILES[kind]}.json").is_file()
+
+    def _merged_entries(self, kind: ManifestType) -> list[tuple[str, str]]:
+        """`(id, declaring tree)` in load order: borrowed first, own replaces in place."""
+        borrowed = [
+            (item_id, self.game) for item_id in self._index_at(self.index_path(kind), kind).items
+        ]
+        placed = {item_id: at for at, (item_id, _tree) in enumerate(borrowed)}
+        own_game = self.own_game
+        assert own_game is not None
+        for item_id in self._own_index_at(kind).items:
+            at = placed.get(item_id)
+            if at is None:
+                placed[item_id] = len(borrowed)
+                borrowed.append((item_id, own_game))
+            else:
+                borrowed[at] = (item_id, own_game)
+        return borrowed
+
+    def _merged_index(self, kind: ManifestType) -> Index:
+        """Borrowed ids followed by own ids; an own id that collides replaces in place."""
+        return Index(
+            game=self.game,
+            type=kind,
+            items=tuple(item_id for item_id, _tree in self._merged_entries(kind)),
+        )
+
+    def _load_merged(self, kind: ManifestType, item_id: str) -> Manifest:
+        """The own file when the own index lists it, else the borrowed file."""
+        own_dir = self.own_game_dir
+        assert own_dir is not None
+        if item_id in self._own_index_at(kind).items:
+            return self._load_at(
+                own_dir / FAMILY_FILES[kind] / f"{item_id}.json",
+                kind,
+                item_id,
+                self.own_game,
+            )
+        return self._load_at(self.item_path(kind, item_id), kind, item_id)
 
     def index_path(self, kind: ManifestType) -> Path:
         """`<root>/<game>/<family>.json`."""
@@ -122,10 +190,19 @@ class ManifestStore:
         """Parse the family index; raises `ManifestError` if missing/invalid.
 
         A store made with `shipped=False` has no bundled tree: every index is empty.
+        With an own tree (CoA, T855-B) the index is the borrowed list followed
+        by the own list's items; an own item with the same id as a borrowed
+        one replaces it in its borrowed place, so the merged list never names
+        an id twice. A family with no own index file reads exactly the
+        borrowed list — the loader never needs a file per index.
         """
         if not self.shipped:
             return Index(game=self.game, type=kind)
-        return self._index_at(self.index_path(kind), kind)
+        if not self.has_own_tree:
+            return self._index_at(self.index_path(kind), kind)
+        if self._own_index_missing(kind):
+            return self._index_at(self.index_path(kind), kind)
+        return self._merged_index(kind)
 
     def _index_at(self, path: Path, kind: ManifestType, game: str | None = None) -> Index:
         expected = game or self.game
@@ -157,10 +234,14 @@ class ManifestStore:
         """Parse one item; raises `ManifestError` if missing/invalid or mismatched.
 
         The bundled file when the bundled index lists the id, the user file
-        otherwise. With no user layer this is what it always was, byte for byte.
+        otherwise. With an own tree (CoA, T855-B) the own file wins over the
+        borrowed one. With no user layer and no own tree this is what it
+        always was, byte for byte.
         """
         if self.user_root is not None and item_id not in self.load_index(kind).items:
             return self._load_at(self.user_item_path(kind, item_id), kind, item_id, self.user_game)
+        if self.has_own_tree and not self._own_index_missing(kind):
+            return self._load_merged(kind, item_id)
         return self._load_at(self.item_path(kind, item_id), kind, item_id)
 
     def _load_at(
@@ -198,10 +279,22 @@ class ManifestStore:
         answering "absent" for a file that IS there would hide a custom module
         the user believes in.
         """
-        bundled = self.load_index(kind).items
-        for item_id in bundled:
-            yield self._load_at(self.item_path(kind, item_id), kind, item_id)
-        shipped = set(bundled)
+        if self.has_own_tree and not self._own_index_missing(kind):
+            entries = self._merged_entries(kind)
+            for item_id, tree in entries:
+                tree_dir = self.own_game_dir if tree == self.own_game else self.game_dir
+                assert tree_dir is not None
+                yield self._load_at(
+                    tree_dir / FAMILY_FILES[kind] / f"{item_id}.json",
+                    kind,
+                    item_id,
+                    tree,
+                )
+        else:
+            bundled = self.load_index(kind).items
+            for item_id in bundled:
+                yield self._load_at(self.item_path(kind, item_id), kind, item_id)
+        shipped = set(self.load_index(kind).items)
         for item_id in self.user_index_items(kind):
             if item_id in shipped:
                 logger.warning(
@@ -219,7 +312,26 @@ class ManifestStore:
                     skipped.append(USER_ITEM_SKIPPED.format(item_id=item_id, reason=reason))
 
     def relative_files(self, kind: ManifestType) -> list[str]:
-        """Paths (relative to `<root>`) the fetcher must mirror for a family."""
+        """Paths (relative to `<root>`) the fetcher must mirror for a family.
+
+        With an own tree (CoA, T855-B): both index files, every borrowed item
+        file, and every own item file — including an own id that collides with
+        a borrowed one. The colliding borrowed file stays (the borrowed tree
+        needs it), and the own file is listed too (it is the one
+        `load`/`load_all` read: own wins).
+        """
+        if self.has_own_tree and not self._own_index_missing(kind):
+            own_game = self.own_game
+            assert own_game is not None
+            borrowed = list(self._index_at(self.index_path(kind), kind).items)
+            own = list(self._own_index_at(kind).items)
+            files = [
+                f"{self.game}/{FAMILY_FILES[kind]}.json",
+                f"{own_game}/{FAMILY_FILES[kind]}.json",
+            ]
+            files.extend(f"{self.game}/{FAMILY_FILES[kind]}/{item_id}.json" for item_id in borrowed)
+            files.extend(f"{own_game}/{FAMILY_FILES[kind]}/{item_id}.json" for item_id in own)
+            return files
         index = self.load_index(kind)
         files = [f"{self.game}/{FAMILY_FILES[kind]}.json"]
         files.extend(f"{self.game}/{FAMILY_FILES[kind]}/{item_id}.json" for item_id in index.items)

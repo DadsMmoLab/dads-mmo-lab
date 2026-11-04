@@ -133,13 +133,14 @@ def test_its_database_password_plan_is_generated_like_wotlks_and_the_gate_reads_
     assert probe is not None and reset is not None
 
 
-CORE_REV = "3f2969ddb0da42b48b4fca050c02b19163ba1e20"
-PLAYERBOTS_REV = "e88cc4099e69f35126b28942a412ca702d20453b"
+CORE_REV = "93333d6a9eb00fdf0179adde30da3c17618207d6"
+PLAYERBOTS_REV = "05a1f6fceb8a32aa879b13f5f48934c6e46a774c"
 """Unbound's own core and bots pins. Unbound shipped on 7f12e89e / 7bae1b5c; T580 (2026-10-09)
 moved it to the pair T389 proved for wow-wotlk (f19a1879 / 037c0141), and T655 (2026-10-10) to the
 two test-staging merges of 2026-10-09 (core #264, module #2903), v0.9.18 (2026-10-17) to the
-newest tips (core 8a4e76ea, module d750b4b3), and T824 (2026-10-28) to the next newest (core
-3f2969dd, module e88cc409, not live-tested). They are literals, not read from
+newest tips (core 8a4e76ea, module d750b4b3), T824 (2026-10-28) to the next newest (core
+3f2969dd, module e88cc409, not live-tested), and T860 (2026-11-02) to the newest (core
+93333d6a, module 05a1f6f, not live-tested). They are literals, not read from
 wow-wotlk, and no test asserts the two entries agree: they move separately on purpose. A move of
 Unbound's core or mod-ale re-checks its five core patches and the module's Lua against the new
 revisions (T580 found mod-ale #391 changed what the Mentor's `SetSkill` call grants), so a WotLK
@@ -168,6 +169,10 @@ BOT_SESSION_CALL: dict[tuple[str, str], str] = {
     # `IsBot()`; Playerbots.cpp:148, :370 and :382 call it.
     ("mod-playerbots/azerothcore-wotlk", "3f2969ddb0da42b48b4fca050c02b19163ba1e20"): "IsHeadless",
     ("mod-playerbots/mod-playerbots", "e88cc4099e69f35126b28942a412ca702d20453b"): "IsHeadless",
+    # T860, read on GitHub 2026-11-02: WorldSession.h:1234 still declares `IsHeadless()` and no
+    # `IsBot()`; the name is unchanged at the new pair.
+    ("mod-playerbots/azerothcore-wotlk", "93333d6a9eb00fdf0179adde30da3c17618207d6"): "IsHeadless",
+    ("mod-playerbots/mod-playerbots", "05a1f6fceb8a32aa879b13f5f48934c6e46a774c"): "IsHeadless",
 }
 """The name of the core's "is this session a bot" call, as each source has it at a revision.
 
@@ -222,6 +227,8 @@ CORE_SET_SKILL_PARAMS: dict[str, tuple[str, str, str, str]] = {
     "8a4e76eac8c4ccebf547113afe7b51d6c3e91641": ("id", "step", "currVal", "maxVal"),
     # T824: Player.h:2109 at 3f2969dd, read on GitHub 2026-10-28, same declaration.
     "3f2969ddb0da42b48b4fca050c02b19163ba1e20": ("id", "step", "currVal", "maxVal"),
+    # T860: Player.h:2109 at 93333d6a, read on GitHub 2026-11-02, same declaration.
+    "93333d6a9eb00fdf0179adde30da3c17618207d6": ("id", "step", "currVal", "maxVal"),
 }
 """The core's `Player::SetSkill` parameters, per core revision: the other half of what
 `ALE_SET_SKILL_SLOTS` assumes (step, value, max after the id). 7f12e89e and f19a1879 as T580 read
@@ -330,6 +337,11 @@ PLAYERBOTS_CONFIG_MEMBERS: dict[tuple[str, str], tuple[str, ...]] = {
         "SightDistance",
         "ReactDistance",
     ),
+    # T860: PlayerbotAIConfig.h:115 at 05a1f6f, read on GitHub 2026-11-02, same members.
+    ("mod-playerbots/mod-playerbots", "05a1f6fceb8a32aa879b13f5f48934c6e46a774c"): (
+        "SightDistance",
+        "ReactDistance",
+    ),
     # mod-ale: every `sPlayerbotAIConfig.<name>` in src (PlayerBotAIMethods.h:515, :528)
     ("azerothcore/mod-ale", "cead0cb2e58ec0f73676ba578eff26cddb79fc01"): (
         "sightDistance",
@@ -425,7 +437,7 @@ def test_the_install_checks_what_the_unbound_sql_must_have_made() -> None:
 
 def test_the_client_carries_the_modules_addon_folder_as_one_required_pack() -> None:
     client = unbound().client
-    assert [p.id for p in client.packs] == ["unbound-addons", "lumenveil"]
+    assert [p.id for p in client.packs] == ["unbound-addons", "lumenveil", "consoleport"]
     pack = client.packs[0]
     assert pack.label == "Unbound addons"
     assert (pack.source.kind, pack.source.path) == (
@@ -474,9 +486,21 @@ def test_wotlks_client_carries_lumenveil_and_no_config_wtf() -> None:
     from tests.test_catalog_client_packs import LUMENVEIL_SHA256
 
     client = load_catalog().get("wow-wotlk").client
-    assert [pack.id for pack in client.packs] == ["lumenveil"]
+    assert [pack.id for pack in client.packs] == ["lumenveil", "consoleport"]
     assert client.packs[0].sha256 == LUMENVEIL_SHA256
     assert client.config_wtf is None and client.exe_patch is None
+
+
+def test_the_client_offers_consoleport_as_an_optional_latest_release_extra() -> None:
+    """T853: the ConsolePort controller add-on follows SuttonX's latest release."""
+    pack = unbound().client.packs[2]
+    assert pack.id == "consoleport"
+    assert (pack.source.kind, pack.source.repo, pack.source.asset) == (
+        "github_release",
+        "SuttonX/ConsolePortLK-Enhanced",
+        "ConsolePortLK-Enhanced.zip",
+    )
+    assert pack.optional is True and pack.default is False
 
 
 def test_the_installer_runs_the_patch_and_lua_stages_and_wotlks_tuple_is_unchanged() -> None:

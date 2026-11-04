@@ -269,7 +269,8 @@ def test_the_database_image_is_no_familys_to_remove_and_this_ones_is_shared(
         "wow-centurion",
         "wow-unbound",
         "wow-coa",
-    }  # T554: Unbound runs WotLK's database image too; T812: CoA (mysql:8.4) too
+        "wow-mop",
+    }  # T554: Unbound runs WotLK's database image too; T812: CoA (mysql:8.4) too; T850: MoP too
 
 
 def test_only_the_cmangos_tree_makes_the_record_name_a_folder_outside_the_install(

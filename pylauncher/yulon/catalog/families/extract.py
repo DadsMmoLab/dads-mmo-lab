@@ -53,7 +53,7 @@ from typing import Any, Protocol
 
 from yulon import client_names, container_end, docker, platform, rmtree, server_build_presses
 from yulon.after_stop import TrueAfterStop
-from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
+from yulon.catalog.catalog import ExtractPlan, ExtractTool, MapNames, MmapPlan, RetrySpec
 from yulon.catalog.installer import InstallerError, InstallStopped
 from yulon.log import get_logger
 
@@ -1079,7 +1079,19 @@ SCRATCH_SCRIPT = (
     '{ echo "yulon: the scratch folder inside the container could not be made"; exit 93; }; '
     "for entry in /out/*; do "
     'name=${entry#/out/}; case " $YULON_OUT_DIRS " in *" $name "*) continue;; esac; '
-    '[ -e "$entry" ] && ln -s "$entry" "$name"; '
+    '[ -e "$entry" ] || continue; '
+    'copy=""; for arg in "$@"; do [ "$arg" = "$name" ] && copy=1; done; '
+    'if [ -n "$copy" ] && [ -d "$entry" ]; then '
+    'if cp -r -- "$entry" ".yulon-in-$name" && mv -- ".yulon-in-$name" "$name"; then :; else '
+    'chmod -R u+w -- ".yulon-in-$name" 2>/dev/null; rm -rf -- ".yulon-in-$name"; '
+    'echo "yulon: copying $name into the container failed; '
+    'the tool reads it from data/ instead (slower)."; '
+    'ln -s -- "$entry" "$name" && [ -L "$name" ] || '
+    '{ echo "yulon: the scratch folder inside the container could not be made"; exit 93; }; '
+    "fi; "
+    'else ln -s -- "$entry" "$name" && [ -L "$name" ] || '
+    '{ echo "yulon: the scratch folder inside the container could not be made"; exit 93; }; '
+    "fi; "
     "done; "
     'for name in $YULON_OUT_DIRS; do mkdir -p "$name"; done; '
     '"$@"; status=$?; '
@@ -1109,11 +1121,20 @@ Six details are load-bearing:
 * **The link loop.** A tool that reads an earlier tool's output (`vmap assemble`
   reads `Buildings`) opens it by a relative name in its cwd, and the cwd is
   now the scratch folder, which starts empty. Every entry of `/out` that the
-  tool does NOT itself produce is linked in under its own name, so the earlier
-  output is read through the bind and nothing is copied in. The `case` skip is
-  what keeps a STALE `vmaps/` from an earlier run from being linked where this
-  run is about to write: without it the tool would write through the link
-  straight into `/out`, and the copy-back would then meet a dangling link.
+  tool does NOT itself produce is linked in under its own name — except an
+  entry the tool names on its own argv (`vmap4_assembler Buildings vmaps`
+  names `Buildings`), which is copied in when it is a directory, so the tool
+  reads it from the container's own layer instead of through the bind (S1
+  4e/4f: the assembler takes 55-65 s there but ~4h25m through the bind in W6;
+  T847). The `case` skip is what keeps a STALE `vmaps/` from an earlier run
+  from being linked where this run is about to write: without it the tool
+  would write through the link straight into `/out`, and the copy-back would
+  then meet a dangling link. The copy lands under `.yulon-in-<name>` and is
+  renamed to `<name>` only once it is whole, so the tool never sees a partial
+  tree (Codex, T847). A copy that fails is not fatal: the partial copy is made
+  writable and removed, the entry is linked after all, with a line saying so,
+  and the tool's own status is what the run reports; if even that link cannot
+  be made the tool is not run (`SCRATCH_FAILED_RETURNCODE` with its marker).
 * **The produces folders are made in scratch before the tool runs.** Not every
   tool creates its own output folder: CMaNGOS's `vmap_assembler Buildings vmaps`
   opens `vmaps/000.vmtree` for writing and fails on a missing `vmaps/`
@@ -1687,6 +1708,14 @@ def run_plan(
     for tool in plan.tools:
         if tool_satisfied(tool, data_dir, current, expected):
             continue
+        if scratch_off_bind:
+            # T856-B: no `blocking_output()` refusal here. On the bind the tool's cwd is
+            # `data/`, so a leftover `Buildings/dir_bin` would meet the real extractor and
+            # refuse to start. Off the bind the tool starts in an empty scratch `Buildings/`
+            # (`SCRATCH_SCRIPT` makes every `produces` folder fresh and links nothing under
+            # a produced name in), and `promote_copies()` replaces the old folder with the
+            # finished one — so the leftover cannot reach the tool and never survives the run.
+            continue
         blocked = blocking_output(tool, data_dir)
         if blocked is not None:
             raise InstallerError(blocked_message(tool, blocked))
@@ -2043,7 +2072,8 @@ Read out of the pinned sources on m910q, 2026-09-05, at the two revisions
 `catalog.json` named then -- `cmangos/mangos-classic` 8ec338a1
 (`contrib/vmap_extractor/vmapextract/vmapexport.cpp:472-483`) and
 `cmangos/mangos-tbc` f82e7d67 (the same file, :522-533); `contrib/` is byte-identical at
-the current pins 57312491 and 37767e95 (T824's GitHub compare). Re-read at both
+the current pins af6b4885 and ff13624a (T860's GitHub compare; T824's at 57312491 and
+37767e95). Re-read at both
 revisions on yulon-fedora 2026-09-05 (`~/probe10`, `git init` + `git fetch
 --depth 1` BY SHA): the twelve lines are byte-identical at the two revisions,
 and the condition is an OR over exactly these two paths -- quoted whole,
@@ -3404,10 +3434,15 @@ def overlaid(source: Path, target: Path) -> bool:
 
 
 _GRID_SUFFIX = re.compile(r"\d{4}\.map")
-"""What follows the map id in a map file's name: `{gx:02}{gy:02}.map`."""
+"""What follows the map id in a Centurion/AC/CMaNGOS map file's name: `{gx:02}{gy:02}.map`."""
+
+_GRID_SUFFIX_UNDERSCORED = re.compile(r"\d{2}_\d{2}\.map")
+"""What follows `MMMM_` in a TrinityCore 5.x/MoP map file's name: `{gy:02}_{gx:02}.map`."""
 
 
-def missing_map_data(data_dir: Path, map_ids: Iterable[int]) -> tuple[str, ...]:
+def missing_map_data(
+    data_dir: Path, map_ids: Iterable[int], *, map_names: MapNames = "mmmyyxx"
+) -> tuple[str, ...]:
     """What the world server's start check would not find, one phrase each; `()` when all is there.
 
     The worldserver exits "Unable to load critical files" unless map AND vmap
@@ -3416,6 +3451,11 @@ def missing_map_data(data_dir: Path, map_ids: Iterable[int]) -> tuple[str, ...]:
     asks the coarser question the stage can answer without the grid maths: for each map, at
     least one `.map` file named after it under `maps/`, and its `.vmtree`
     under `vmaps/`. A listing that fails reads as missing, never as there.
+
+    `map_names` is the core's naming (catalog's `TrinityCoreData.map_names`): the
+    default `mmmyyxx` is `maps/MMMYYXX.map` and `vmaps/MMM.vmtree` (Centurion/AC/
+    CMaNGOS), `mmmm_yy_xx` is `maps/MMMM_YY_XX.map` and `vmaps/MMMM.vmtree`
+    (TrinityCore 5.x/MoP). The phrase names the pattern it looked for.
     """
     try:
         names = [entry.name for entry in (data_dir / MAPS_DIR).iterdir()]
@@ -3423,11 +3463,22 @@ def missing_map_data(data_dir: Path, map_ids: Iterable[int]) -> tuple[str, ...]:
         names = []
     missing: list[str] = []
     for map_id in map_ids:
-        key = f"{map_id:03}"
-        if not any(
-            name.startswith(key) and _GRID_SUFFIX.fullmatch(name[len(key) :]) for name in names
-        ):
-            missing.append(f"map {map_id}: no {MAPS_DIR}/{key}????.map")
+        if map_names == "mmmm_yy_xx":
+            key = f"{map_id:04}"
+            pattern = f"{MAPS_DIR}/{key}_??_??.map"
+            found = any(
+                name.startswith(f"{key}_")
+                and _GRID_SUFFIX_UNDERSCORED.fullmatch(name[len(key) + 1 :])
+                for name in names
+            )
+        else:
+            key = f"{map_id:03}"
+            pattern = f"{MAPS_DIR}/{key}????.map"
+            found = any(
+                name.startswith(key) and _GRID_SUFFIX.fullmatch(name[len(key) :]) for name in names
+            )
+        if not found:
+            missing.append(f"map {map_id}: no {pattern}")
         if not (data_dir / VMAPS_DIR / f"{key}.vmtree").is_file():
             missing.append(f"map {map_id}: no {VMAPS_DIR}/{key}.vmtree")
     return tuple(missing)

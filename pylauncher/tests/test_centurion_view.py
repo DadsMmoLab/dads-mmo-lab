@@ -539,7 +539,11 @@ def test_the_shipped_centurion_entry_withholds_only_revive(tmp_path: Path) -> No
 def test_the_other_games_characters_tabs_withhold_nothing(qapp: object, tmp_path: Path) -> None:
     from yulon.catalog.catalog import load_catalog
 
-    others = [entry for entry in load_catalog().games if entry.id != "wow-centurion"]
+    # Centurion's own withholding is the test above. Mists of Pandaria (T850) withholds
+    # everything as well, for its own reason (the test below): nothing has been run
+    # against a live LoA Pandaria server, so it is out of this walk too.
+    held_back = ("wow-centurion", "wow-mop")
+    others = [entry for entry in load_catalog().games if entry.id not in held_back]
     assert {entry.id for entry in others} >= {"wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"}
     for entry in others:
         services = ControllerServices.for_entry(entry, tmp_path / entry.id)
@@ -550,6 +554,27 @@ def test_the_other_games_characters_tabs_withhold_nothing(qapp: object, tmp_path
         if entry.play is not None:
             assert view.revive_button in view.character_buttons(), entry.id
             assert view.teleport_button in view.character_buttons(), entry.id
+
+
+def test_mop_offers_no_verb_until_its_own_live_check(qapp: object, tmp_path: Path) -> None:
+    """T850: no Characters verb has been run against a live LoA Pandaria server yet.
+
+    Not one inherited from Centurion's 2026-10-04 check on another core, another
+    fork's console and another bot module: every verb is held back with the one
+    sentence, and Revive is NOT the "it crashed the world server" one, which was
+    measured on Centurion's fork alone (GAP §2, "Characters tab").
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    entry = load_catalog().get("wow-mop")
+    services = ControllerServices.for_entry(entry, _server(tmp_path))
+    assert set(services.characters_withheld) == set(play_module.VERBS)
+    untried = centurion_characters.NOT_CONFIRMED.format(game=entry.name)
+    assert set(services.characters_withheld.values()) == {untried}
+    view = ControllerView(entry, services, status_poll_ms=0, job_runner=run_inline)
+    assert view.character_buttons() == ()
+    assert not view.characters_withheld_label.isHidden()
+    assert view.characters_withheld_label.text() != ""
 
 
 def test_a_confirmed_verb_is_drawn_and_the_rest_stay_out(

@@ -113,7 +113,11 @@ def shipped_ids(kind: ManifestType = "module") -> tuple[str, ...]:
 
 
 def store(
-    root: Path = BUNDLED_MANIFESTS_DIR, user_root: Path | None = None, *, user_game: str = GAME
+    root: Path = BUNDLED_MANIFESTS_DIR,
+    user_root: Path | None = None,
+    *,
+    user_game: str = GAME,
+    own: str | None = None,
 ) -> ManifestStore:
     """The WotLK manifest store over `root`, with the user layer over it.
 
@@ -127,13 +131,16 @@ def store(
 
     `user_game` is the server whose user layer is read: another AzerothCore
     server that offers WotLK's shipped manifests (WoW Unbound) keeps the modules
-    added to it under its own game id, never under WotLK's (T554).
+    added to it under its own game id, never under WotLK's (T554). `own` layers
+    that server's own tree over the borrowed one (T855-B: CoA passes its own
+    id; every other caller leaves it absent and reads exactly what it always did).
     """
     return ManifestStore(
         root,
         GAME,
         user_root if user_root is not None else user_manifests_dir(),
         user_game=user_game,
+        own_game=own,
     )
 
 
@@ -143,7 +150,9 @@ def derive_link(text: str, game: str = GAME) -> Manifest:
     Minimal: what a link can be known to say before it is cloned. `complete()`
     below is the other half, run once the clone is on disk.
     """
-    return module_source.derive_link(text, game, today=date.today(), shipped_ids=shipped_ids())
+    derived = module_source.derive_link(text, game, today=date.today(), shipped_ids=shipped_ids())
+    module_source.refuse_if_recorded(user_manifests_dir(), derived)
+    return derived
 
 
 def derive_folder(path: Path, game: str = GAME) -> Manifest:
@@ -151,7 +160,9 @@ def derive_folder(path: Path, game: str = GAME) -> Manifest:
 
     `game` is the server it is added to, which is also where `complete()` keeps it.
     """
-    return module_source.derive_folder(path, game, today=date.today(), shipped_ids=shipped_ids())
+    derived = module_source.derive_folder(path, game, today=date.today(), shipped_ids=shipped_ids())
+    module_source.refuse_if_recorded(user_manifests_dir(), derived)
+    return derived
 
 
 def complete(manifest: Manifest, clone: Path) -> Manifest:
@@ -313,6 +324,7 @@ def applier(
     dbc: DbcCopier | None = None,
     db_root_password: str | None = None,
     db_container: str = docker_ctl.SPEC.db,
+    user_game: str = GAME,
 ) -> Applier:
     """An `Applier` for the AzerothCore install at `server_dir`.
 
@@ -350,7 +362,7 @@ def applier(
             except DbPasswordUnknown as exc:
                 raise ApplyRefusal(str(exc)) from exc
         runner = DockerSql(db_container, password, client=docker_ctl.DB_CLIENT)
-    return Applier(
+    applier = Applier(
         server_dir,
         git=git,
         sql=runner,
@@ -361,6 +373,10 @@ def applier(
         hold_server=hold_server,
         before_direct_sql=_no_bot_accounts_in_the_roster_s_way(server_dir, db_container),
     )
+    # T861: an ID alone (a conflict's other item, a build ledger key) has to find the
+    # folder its manifest names. The store is per game, so the applier asks this lobby's.
+    applier.manifest_by_id = store(user_game=user_game).load
+    return applier
 
 
 def _no_bot_accounts_in_the_roster_s_way(
@@ -437,8 +453,10 @@ def module_updates(
     # T789: and the container where the PC has no git at all -- host git unconditionally
     # failed this press with a raw [WinError 2]. `_default_git()` is Install's choice (T58).
     reader: BehindReader = git if git is not None else _default_git(server_dir)  # type: ignore[assignment]
-    branches, releases = _follows(user_game)
-    return apply_updates(server_dir, git=reader, branches=branches, releases=releases)
+    branches, releases, manifests = _follows(user_game)
+    return apply_updates(
+        server_dir, git=reader, branches=branches, releases=releases, manifests=manifests
+    )
 
 
 def refresh_module_updates(
@@ -455,7 +473,7 @@ def refresh_module_updates(
     day in the file Tortoise's rows already use (`apply.MODULE_UPDATES_FILE`), which is what
     makes it once a day and lets a restart show yesterday's counts without a fetch.
     """
-    branches, releases = _follows(user_game)
+    branches, releases, manifests = _follows(user_game)
     return refresh_cached(
         server_dir,
         kind="module",
@@ -464,11 +482,15 @@ def refresh_module_updates(
         branches=branches,
         releases=releases,
         now=now,
+        manifests=manifests,
     )
 
 
-def _follows(user_game: str) -> tuple[dict[str, str | None], dict[str, str]]:
-    """Each module's branch, and the GitHub slug of each that follows its releases (T126)."""
+def _follows(
+    user_game: str,
+) -> tuple[dict[str, str | None], dict[str, str], list[Manifest]]:
+    """Each module's branch and release slug, and the manifests themselves (T126, T861)."""
+    manifests: list[Manifest] = []
     branches: dict[str, str | None] = {}
     # T126: the modules whose manifest follows its releases, by GitHub slug.
     releases: dict[str, str] = {}
@@ -478,6 +500,7 @@ def _follows(user_game: str) -> tuple[dict[str, str | None], dict[str, str]]:
         # keep their branch. What still reaches the `except` is this app's own
         # catalog and either index -- the cases that are app bugs, not user data.
         for manifest in store(user_game=user_game).load_all("module"):
+            manifests.append(manifest)
             branches[manifest.id] = manifest.source.branch if manifest.source else None
             if manifest.source is not None and manifest.source.follow == "releases":
                 slug = github_slug(manifest.source.repo)
@@ -485,7 +508,7 @@ def _follows(user_game: str) -> tuple[dict[str, str | None], dict[str, str]]:
                     releases[manifest.id] = slug
     except Exception as exc:  # boundary: a broken manifest tree must not stop the count
         logger.warning(f"could not read the wow-wotlk manifests for their branches: {exc}")
-    return branches, releases
+    return branches, releases, manifests
 
 
 def apply_module(
@@ -669,7 +692,7 @@ def importer_module_dirs(server_dir: Path, user_game: str = GAME) -> list[str] |
 
     `docker.module_dir_names()` minus the entry's `core_sql_modules` (T812 D14). The CoA
     core's importer prepends `mod-ascension,` to every `Updates.AllowedModules` it is
-    given (`src/tools/dbimport/Main.cpp:119-120` at 98570f24), and `UpdateFetcher` walks a
+    given (`src/tools/dbimport/Main.cpp:119-120` at a1e8c99e), and `UpdateFetcher` walks a
     module's `data/sql/db-*` once per time the name appears, so handing it the folder again
     made every file in it a "Duplicate filename" and the import aborted on the
     first database it reached with any (`acore_characters`, measured on yulon-ubuntu2

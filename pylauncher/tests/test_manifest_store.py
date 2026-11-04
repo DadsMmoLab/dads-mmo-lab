@@ -455,3 +455,113 @@ def test_a_bad_user_manifest_no_longer_costs_the_branches_after_it(
     # loop and `mod-zzz-good` was counted against `origin HEAD` instead of `wotlk`.
     assert ("mod-zzz-good", "wotlk") in git.asked
     assert ("mod-shipped", None) in git.asked
+
+
+# -- the own tree (CoA layers its own items over the borrowed tree, T855-B) ----
+
+
+def _write_family(root: Path, game: str, kind: str, items: dict[str, str]) -> None:
+    """A manifest tree at `root/<game>/`: the family index plus one file per id.
+
+    `items` is id -> name; every file carries a `source.repo` so the schema
+    accepts it. `kind` is the family name as the files spell it (`mods`,
+    `modules`); the borrowed/own game ids differ, which is the CoA shape.
+    """
+    from yulon.manifest_store import FAMILY_FILES
+
+    family = {v: k for k, v in FAMILY_FILES.items()}[kind]
+    game_dir = root / game
+    (game_dir / kind).mkdir(parents=True, exist_ok=True)
+    (game_dir / f"{kind}.json").write_bytes(
+        json.dumps(
+            {"schema_version": 1, "game": game, "type": family, "items": list(items)}
+        ).encode()
+    )
+    for item_id, name in items.items():
+        (game_dir / kind / f"{item_id}.json").write_bytes(
+            json.dumps(
+                {
+                    "id": item_id,
+                    "name": name,
+                    "type": family,
+                    "game": game,
+                    "source": {"repo": "azerothcore/mod-x"},
+                }
+            ).encode()
+        )
+
+
+def _overlay(tmp_path: Path) -> ManifestStore:
+    """A borrowed tree plus an own tree colliding on one id, plus a user layer."""
+    root = tmp_path / "root"
+    _write_family(root, "wow-wotlk", "mods", {"mod-a": "BORROWED-A", "mod-b": "BORROWED-B"})
+    _write_family(root, "wow-coa", "mods", {"mod-b": "OWN-B", "mod-c": "OWN-C"})
+    return ManifestStore(root, "wow-wotlk", own_game="wow-coa")
+
+
+def test_an_own_item_replaces_its_borrowed_namesake_in_place(tmp_path: Path) -> None:
+    """The merged index is borrowed-then-own, with a colliding own id in the
+    borrowed place — not appended, not doubled."""
+    store = _overlay(tmp_path)
+
+    assert list(store.load_index("mod").items) == ["mod-a", "mod-b", "mod-c"]
+
+
+def test_own_files_win_load_and_load_all_on_a_collision(tmp_path: Path) -> None:
+    """`load()` and `load_all()` read the own file for a colliding id."""
+    store = _overlay(tmp_path)
+
+    assert store.load("mod", "mod-b").game == "wow-coa"
+    assert store.load("mod", "mod-b").name == "OWN-B"
+    assert store.load("mod", "mod-a").game == "wow-wotlk"
+
+    got = [(m.id, m.game) for m in store.load_all("mod")]
+    assert got == [("mod-a", "wow-wotlk"), ("mod-b", "wow-coa"), ("mod-c", "wow-coa")]
+
+
+def test_relative_files_lists_both_files_on_a_collision(tmp_path: Path) -> None:
+    """Every own-tree item file is emitted, including a colliding id's own
+    file, and the borrowed files the borrowed tree needs stay listed."""
+    store = _overlay(tmp_path)
+
+    files = store.relative_files("mod")
+
+    assert files[:2] == ["wow-wotlk/mods.json", "wow-coa/mods.json"]
+    assert "wow-wotlk/mods/mod-a.json" in files
+    assert "wow-wotlk/mods/mod-b.json" in files
+    assert "wow-coa/mods/mod-b.json" in files
+    assert "wow-coa/mods/mod-c.json" in files
+
+
+def test_a_user_file_shadowing_an_own_id_is_skipped_like_a_borrowed_one(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The no-shadow rule covers the own tree too: a user file naming an own id
+    is skipped and logged, exactly as for a borrowed id."""
+    _overlay(tmp_path)
+    user = tmp_path / "user"
+    (user / "wow-wotlk" / "mods").mkdir(parents=True, exist_ok=True)
+    (user / "wow-wotlk" / "mods" / "mod-c.json").write_bytes(
+        json.dumps(
+            {
+                "id": "mod-c",
+                "name": "MINE",
+                "type": "mod",
+                "game": "wow-wotlk",
+                "source": {"repo": "azerothcore/mod-x"},
+            }
+        ).encode()
+    )
+    (user / "wow-wotlk" / "mods.json").write_bytes(
+        json.dumps(
+            {"schema_version": 1, "game": "wow-wotlk", "type": "mod", "items": ["mod-c"]}
+        ).encode()
+    )
+    shadowed = ManifestStore(tmp_path / "root", "wow-wotlk", user_root=user, own_game="wow-coa")
+
+    with caplog.at_level("WARNING"):
+        got = [m.id for m in shadowed.load_all("mod")]
+
+    assert "mod-c" in got
+    assert [m for m in shadowed.load_all("mod") if m.id == "mod-c"][0].game == "wow-coa"
+    assert "mod-c" in caplog.text and "never replaces" in caplog.text

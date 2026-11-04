@@ -210,7 +210,7 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
     ),
     ("yulon/git.py", "_streamed_capture"): (
         f"removing a clone's container that Stop could not remove: {_TYPED}",
-        frozenset({"docker rm -f {…}"}),
+        frozenset({"docker rm -f -v {…}"}),
     ),
     ("yulon/catalog/native.py", "_killed_hint"): (
         f"checking the kernel log for a world server killed for memory: {_TYPED}",
@@ -219,14 +219,14 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
     **{
         ("yulon/catalog/native.py", owner): (
             f"removing a database importer a Stop or a retry could not end (T539): {_TYPED}",
-            frozenset({"docker rm -f {…}"}),
+            frozenset({"docker rm -f -v {…}"}),
         )
         for owner in ("_one_shot_left_sentence", "stage_import", "download_left_sentence")
     },
     **{
         ("yulon/docker.py", owner): (
             f"removing a database importer Repair could not end (T539): {_TYPED}",
-            frozenset({"docker rm -f {…}"}),
+            frozenset({"docker rm -f -v {…}"}),
         )
         for owner in ("importer_left_sentence", "repair_import", "DockerRefusal.__init__")
     },
@@ -235,13 +235,13 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
         # meets it in both.
         ("yulon/catalog/families/trinitycore.py", owner): (
             f"removing a folder reservation an earlier run of this Yu'lon left (T543): {_TYPED}",
-            frozenset({"docker rm -f {…}"}),
+            frozenset({"docker rm -f -v {…}"}),
         )
         for owner in ("_claimed_note", "reextract")
     },
     ("yulon/catalog/families/trinitycore.py", "_refuse_a_tool_still_writing"): (
         f"removing, on Linux, a map tool's container an earlier press left running: {_TYPED}",
-        frozenset({"docker rm -f {…}"}),
+        frozenset({"docker rm -f -v {…}"}),
     ),
     **{
         ("yulon/networking.py", owner): (

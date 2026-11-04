@@ -21,8 +21,8 @@ The command is the same on every family, read from each pinned tree:
 * TBC, mangos-tbc `75f9ae68`: `src/game/Chat/Chat.cpp:83`, `SEC_CONSOLE`, console
   allowed; handler `Chat.cpp:3800`. SOAP runs every command at `SEC_CONSOLE`
   (`src/mangosd/MaNGOSsoap.cpp:113`).
-* Vanilla, mangos-classic `57312491`: `Chat.cpp:83`, handler `Chat.cpp:3714`,
-  `MaNGOSsoap.cpp:115`.
+* Vanilla, mangos-classic `ff13624a` (T860; same lines at `57312491`): `Chat.cpp:83`, handler
+  `Chat.cpp:3714`, `MaNGOSsoap.cpp:115`.
 * Tortoise, tortoise-wow `187af788`: `src/game/Chat/Chat.cpp:71`, handler
   `src/mangosd/CliRunnable.cpp:74`; SOAP at `SEC_CONSOLE` in
   `src/mangosd/MaNGOSsoap.cpp:196`.
@@ -897,7 +897,9 @@ def test_yulon_makes_an_all_digit_account_only_where_the_server_looks_names_up(
             services.create_account("123", "pw1234", 0)
 
 
-@pytest.mark.parametrize("scheme", ["azerothcore", "trinitycore", "mangos_srp6", "mangos_sha"])
+@pytest.mark.parametrize(
+    "scheme", ["azerothcore", "trinitycore", "trinitycore_sha", "mangos_srp6", "mangos_sha"]
+)
 def test_a_caller_that_does_not_say_the_tree_looks_names_up_gets_a_refusal(
     scheme: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

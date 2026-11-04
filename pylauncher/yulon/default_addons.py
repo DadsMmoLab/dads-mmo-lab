@@ -1,8 +1,9 @@
 """A server's default client add-ons: put in by themselves, never again once removed (T612).
 
-Tortoise's two Sagiroth add-ons (TortoiseBots Manager, Tortoise GM Manager) are Modules-tab
-items whose whole content is one `client` step. This module is the part that runs them without
-a press, in two modes of `put_in()`:
+Tortoise's two Sagiroth add-ons (TortoiseBots Manager, Tortoise GM Manager) and Conquest of
+Azeroth's SquidBots Lite (T870) are Modules-tab items whose whole content is one or more
+`client` steps. This module is the part that runs them without a press, in two modes of
+`put_in()`:
 
 * **At Play** (`clone=False`): no git and no network. An add-on whose clone is on disk but whose
   files are missing from the client Play uses (a ready-to-play client made again, an add-on
@@ -25,6 +26,15 @@ Remove report comes back and lifted when the player installs the add-on again by
 nobody can read is "do not know", and `put_in()` then installs nothing: guessing would put back
 what a player removed.
 
+**A copy the player brought wins (T870).** When the player has an outside add-on record for
+this server (`yulon.client_addons`) whose steps write a folder one of the defaults writes,
+the default is left out (`ids_to_put_in()`, `players_own()`): two items owning one folder is
+a clash, and the copy the player chose is theirs. The question is asked before EVERY write
+-- install, put-back, update, and whether or not the shipped clone is on disk -- and the
+follow after a server update says so (`FOLLOW_PLAYERS_OWN`) instead of writing. A record
+store nobody can read is "the player may own it", never "not the player's"
+(`players_own_or_unknown()`, review round 2).
+
 No Qt here.
 """
 
@@ -33,14 +43,21 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Callable, Collection, Iterable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from yulon.apply import Applier, ApplyReport, installed_clones
 from yulon.log import get_logger
 from yulon.manifest import Manifest
+
+if TYPE_CHECKING:
+    import threading
+
+    from yulon.catalog.native import LatestRoute
+    from yulon.controller_wow_tortoise.botpool import Press
 
 logger = get_logger(__name__)
 
@@ -135,6 +152,7 @@ def remember(server_dir: Path, report: ApplyReport, ids: Collection[str]) -> Non
 _NAMES = {
     "tortoise-bots-manager": "TortoiseBots Manager",
     "tortoise-gm-manager": "Tortoise GM Manager",
+    "yulon-squidbots-lite": "SquidBots Lite",
 }
 
 
@@ -179,6 +197,7 @@ def put_in(
     what: str = "default add-on",
     say: Callable[[str], None] = lambda _line: None,
     now: Callable[[], float] = time.time,
+    players_own: Callable[[str], bool] | None = None,
 ) -> Outcome:
     """Put each of `ids` that is not removed into the client; see the module docstring.
 
@@ -190,6 +209,10 @@ def put_in(
     Never raises for one add-on: a failure is in `Outcome.failed` and the next add-on goes on,
     because a game that cannot reach GitHub must still start. Nothing is done without a client
     folder to put the files in, or a clone would read as installed with no files.
+
+    `players_own(item)` is asked before this function writes anything for `item` -- a put-back
+    as much as an install -- so a caller that has not filtered its ids cannot put the shipped
+    copy over the player's own (T870 review round 2).
     """
     manifests = list(manifests)
     out = Outcome(names={m.id: m.name for m in manifests})
@@ -209,6 +232,9 @@ def put_in(
         if manifest is None or item in removed:
             continue
         try:
+            if players_own is not None and players_own(item):
+                logger.info(f"{item} stays out: the player brought its add-on")
+                continue
             if item in present:
                 if applier.client_files_missing(manifest):
                     say(f"Putting the missing files of {manifest.name} back…")
@@ -239,6 +265,59 @@ def put_in(
                 logger.warning(f"could not note that {item} failed: {note_exc}")
     out.installed, out.restored = tuple(installed), tuple(restored)
     return out
+
+
+def addon_folders(manifest: Manifest) -> frozenset[str]:
+    """The `Interface/AddOns` folder names `manifest`'s steps write, casefolded (T870)."""
+    return frozenset(
+        (step.name or PurePosixPath(step.src).name).casefold()
+        for step in manifest.client
+        if step.dest == "addons" and (step.name or PurePosixPath(step.src).name)
+    )
+
+
+def players_own(item_id: str, manifests: Iterable[Manifest], outside: Iterable[Manifest]) -> bool:
+    """Whether an add-on the player brought writes a folder this default writes (T870 D6).
+
+    `manifests` are this server's `mod` items (the default is looked up by id, `type` `mod`);
+    `outside` the records of the add-ons the player brought. The default's own record is never
+    a match, and an unknown default is not the player's either.
+    """
+    default = next((m for m in manifests if m.id == item_id and m.type == "mod"), None)
+    if default is None:
+        return False
+    ours = addon_folders(default)
+    if not ours:
+        return False
+    return any(addon_folders(m) & ours for m in outside if m.id != item_id)
+
+
+def players_own_or_unknown(
+    item_id: str, manifests: Iterable[Manifest], outside: Iterable[Manifest] | None
+) -> bool:
+    """`players_own()`, with an unreadable record store counting as the player's (T870 C2).
+
+    `outside` is `None` when the player's add-on records could not be read at all. Unknown is
+    not "not the player's": writing there could replace the copy they brought, so the answer
+    is True and every write is skipped. The reader logs the one line; nothing here raises, and
+    `manifests` is not read either -- it may come from the same unreadable store.
+    """
+    if outside is None:
+        return True
+    return players_own(item_id, manifests, outside)
+
+
+def ids_to_put_in(
+    ids: Sequence[str], manifests: Sequence[Manifest], outside: Sequence[Manifest]
+) -> tuple[str, ...]:
+    """`ids` without the ones a player's own add-on already covers (T870 D6), order kept."""
+    kept: list[str] = []
+    for item in ids:
+        if players_own(item, manifests, outside):
+            logger.info(f"{item} stays out: the player brought an add-on that writes its folder")
+            continue
+        kept.append(item)
+    return tuple(kept)
 
 
 class ClientPlace(Enum):
@@ -279,6 +358,7 @@ class Followed(Enum):
     UNKNOWN = "unknown"
     ELSEWHERE = "elsewhere"
     NOT_INSTALLED = "not_installed"
+    PLAYERS_OWN = "players_own"
     FAILED = "failed"
 
 
@@ -311,6 +391,10 @@ FOLLOW_NOT_INSTALLED = (
     "{name} is not installed for this server, so your game client was left as it is; "
     "install it on the Modules tab if you want it."
 )
+FOLLOW_PLAYERS_OWN = (
+    "{name} in your game client is the copy you brought yourself, so Yu'lon left it as it is; "
+    "update it from its row on the Modules tab."
+)
 FOLLOW_FAILED = (
     "The server update is done, but {name} in your game client could not be updated ({why}); "
     "update it again from its row on the Modules tab."
@@ -324,6 +408,7 @@ def follow_server_update(
     item_id: str,
     *,
     place: Callable[[], ClientPlace],
+    players_own: Callable[[], bool] = lambda: False,
 ) -> AddonFollow:
     """Bring the addon up to the release that goes with the new server (T814).
 
@@ -351,6 +436,11 @@ def follow_server_update(
                 FOLLOW_FAILED.format(name=name, why="its description is missing"),
             )
         present = installed_clones(server_dir).get("mod", frozenset())
+        # T870 review round 2: asked before EVERY write -- the put-back and update of an
+        # installed shipped clone as much as the install -- because the player's own copy
+        # and the shipped one write the same folder.
+        if players_own():
+            return AddonFollow(Followed.PLAYERS_OWN, FOLLOW_PLAYERS_OWN.format(name=name))
         if item_id not in present:
             removed = declined(server_dir)
             if removed is None or item_id in removed:
@@ -396,3 +486,36 @@ def _installed_release(applier: Applier, manifest: Manifest) -> str:
 def _short(exc: Exception) -> str:
     """One line of `exc`, for the FAILED sentence (T814)."""
     return " ".join(str(exc).split())
+
+
+def follow_route(
+    route: LatestRoute | None,
+    follow: Callable[[], AddonFollow],
+    *,
+    item_id: str,
+    name: str,
+) -> LatestRoute | None:
+    """The update route with the addon follow around `press` only (T814).
+
+    `None` in is `None` out. The addon step runs after a finished press, never
+    after a failed one (its exception propagates untouched) and never when the
+    press was stopped. `to_pin` is untouched: the way back leaves the addon
+    alone. The wrapper never raises after a finished update: the outcome's own
+    sentence is the failure's line. Shared by Tortoise and CoA (T870).
+    """
+    if route is None:
+        return None
+
+    def run(inner: Press, cancel: threading.Event | None) -> Iterator[str]:
+        yield from inner(cancel)
+        if cancel is not None and cancel.is_set():
+            logger.info("the update was stopped, so the client addon was left as it is")
+            return
+        yield f"Checking {name} in your game client…"
+        try:
+            yield follow().sentence
+        except Exception as exc:  # noqa: BLE001 - the update is done; the addon step never fails it
+            logger.warning(f"following the server update for {item_id}: {exc}")
+            yield FOLLOW_FAILED.format(name=name, why=_short(exc))
+
+    return replace(route, press=lambda cancel: run(route.press, cancel))

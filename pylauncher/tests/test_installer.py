@@ -723,6 +723,7 @@ def test_no_source_of_a_shipped_game_is_cloned_into_the_server_dir_except_wotlks
         "wow-vanilla",
         "wow-tortoise",
         "wow-centurion",
+        "wow-mop",
     }, landings
     into_server_dir = {
         game_id

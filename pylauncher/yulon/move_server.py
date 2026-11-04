@@ -52,7 +52,7 @@ from yulon.catalog.catalog import (
 from yulon.catalog.families import conf as conf_patch
 from yulon.catalog.git_head import read_head_file
 from yulon.log import get_logger
-from yulon.manifest import Manifest, ManifestType
+from yulon.manifest import Manifest, ManifestType, id_for_folder
 from yulon.move import PackedModule, PackedSource, PackFile, ServerFacts, ServerSpec, counts_phrase
 from yulon.move_flows import PRESS_BRING_IN, MoveError, MoveWorld, move_held_reason
 from yulon.server_build_presses import MAINTENANCE_TAB, REBUILD, under_server_build
@@ -115,22 +115,33 @@ def _modules_of(
     files: list[PackFile] = []
     refusals: list[str] = []
     for folder, kinds in sorted(_CLONE_FOLDERS.items()):
-        ids = sorted(apply.installed_clones(server_dir).get(str(kinds[0]), frozenset()))
-        for item_id in ids:
-            if PurePosixPath(folder) / item_id in builds_into:
+        folders = sorted(apply.installed_clones(server_dir).get(str(kinds[0]), frozenset()))
+        for clone_name in folders:
+            if PurePosixPath(folder) / clone_name in builds_into:
                 continue
-            candidates = [m for m in (load_manifest(kind, item_id) for kind in kinds) if m]
+            # T861 review round 3: the store is keyed by id, and a folder may be the author's
+            # exact name (`mod-twow-QOL-followers` for the id `mod-twow-qol-followers`), so the
+            # store is asked by the id the folder derives to. A description that names any
+            # other folder is not this one's: a folder that is only a case variant of the
+            # item's folder is a different folder here and must stay undescribed.
+            derived_id = id_for_folder(clone_name)
+            candidates = [
+                m
+                for m in (load_manifest(kind, derived_id) for kind in kinds)
+                if m is not None and apply.clone_folder(m) == clone_name
+            ]
             if len(candidates) != 1:
                 refusals.append(
-                    f"{folder}/{item_id} is a module folder Yu'lon cannot name (no description of "
-                    "it, or more than one), so the new computer could not install it again. "
+                    f"{folder}/{clone_name} is a module folder Yu'lon cannot name (no "
+                    "description of it, or more than one), so the new computer could not "
+                    "install it again. "
                     f"Remove it, or add it again on the Modules tab, then pack again. {_NOT_PACKED}"
                 )
                 continue
             manifest = candidates[0]
             if manifest.origin is not None and manifest.origin.kind == "folder":
                 try:
-                    members = _folder_module_members(manifest, server_dir / folder / item_id)
+                    members = _folder_module_members(manifest, server_dir / folder / clone_name)
                 except MoveError as exc:
                     refusals.append(str(exc))
                     continue
@@ -155,7 +166,7 @@ def _modules_of(
                     f"{_NOT_PACKED}"
                 )
                 continue
-            commit = read_head_file(server_dir / folder / item_id)
+            commit = read_head_file(server_dir / folder / clone_name)
             if commit is None or not re.fullmatch(r"[0-9a-f]{40}", commit):
                 refusals.append(
                     f"Yu'lon cannot read which commit {manifest.name} is on, so the new computer "

@@ -25,6 +25,11 @@ pytestmark = pytest.mark.skipif(not git_available(), reason="needs a host git")
 URL = "https://github.com/you/MobStats"
 
 
+def _legacy_mod():
+    """An add-on clone a record from before T861 still calls a `mod` (its type and path stay)."""
+    return tortoise_modules.derive_link(URL).model_copy(update={"type": "mod", "folder": None})
+
+
 def _publish(origin: Path, interface: str, label: str) -> str:
     (origin / "MobStats.toc").write_text(
         f"## Interface: {interface}\n## Title: MobStats\nMobStats.lua\n", encoding="utf-8"
@@ -60,7 +65,7 @@ def _installed(applier: autoupdate.GuardedApplier) -> object:
 def test_a_refused_update_of_an_addon_is_put_back_and_not_offered_again(tmp_path: Path) -> None:
     applier, origin, server = _rig(tmp_path)
     first = _publish(origin, "11200", "v1")
-    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(URL), None)
+    tortoise_modules.install_custom(applier)(_legacy_mod(), None)
     clone = server / "sql_scripts" / "clones" / "mobstats"
     assert _git(clone, "rev-parse", "HEAD") == first
     second = _publish(origin, "20400", "v2")  # now made for another game version
@@ -79,7 +84,7 @@ def test_a_refused_update_of_an_addon_is_put_back_and_not_offered_again(tmp_path
 def test_an_addon_update_that_is_accepted_is_kept(tmp_path: Path) -> None:
     applier, origin, server = _rig(tmp_path)
     _publish(origin, "11200", "v1")
-    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(URL), None)
+    tortoise_modules.install_custom(applier)(_legacy_mod(), None)
     second = _publish(origin, "11200", "v2")
 
     applier.update(_installed(applier))  # type: ignore[arg-type]
@@ -90,7 +95,7 @@ def test_an_addon_update_that_is_accepted_is_kept(tmp_path: Path) -> None:
 def test_a_put_back_that_cannot_be_made_says_what_the_clone_is_on(tmp_path: Path) -> None:
     applier, origin, server = _rig(tmp_path)
     _publish(origin, "11200", "v1")
-    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(URL), None)
+    tortoise_modules.install_custom(applier)(_legacy_mod(), None)
     second = _publish(origin, "20400", "v2")
 
     def cannot(dest: Path, rev: str) -> None:
@@ -110,7 +115,7 @@ def test_a_refusal_when_nothing_moved_hides_no_version(tmp_path: Path) -> None:
     """A rule that changed (not the author's push) refuses an Update to the commit it is on."""
     applier, origin, server = _rig(tmp_path)
     first = _publish(origin, "11200", "v1")
-    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(URL), None)
+    tortoise_modules.install_custom(applier)(_legacy_mod(), None)
 
     def refuses(manifest: object, clone: Path) -> object:
         raise CompletionRefused("Not any more.")
@@ -133,7 +138,7 @@ def test_check_for_updates_hides_the_refused_version_and_shows_a_later_push(
 
     applier, origin, server = _rig(tmp_path)
     _publish(origin, "11200", "v1")
-    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(URL), None)
+    tortoise_modules.install_custom(applier)(_legacy_mod(), None)
     _publish(origin, "20400", "v2")
     with pytest.raises(CompletionRefused):
         applier.update(_installed(applier))  # type: ignore[arg-type]
@@ -154,7 +159,7 @@ def test_a_clone_edited_in_the_meantime_is_not_forced_back(tmp_path: Path) -> No
     """`restore_rev` is `--force`, so the put-back asks the clone is clean first (as put_back)."""
     applier, origin, server = _rig(tmp_path)
     _publish(origin, "11200", "v1")
-    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(URL), None)
+    tortoise_modules.install_custom(applier)(_legacy_mod(), None)
     second = _publish(origin, "20400", "v2")
     clone = server / "sql_scripts" / "clones" / "mobstats"
 
@@ -219,3 +224,36 @@ def test_a_route_add_on_on_tortoise_that_gains_sql_runs_none_of_it(tmp_path: Pat
     assert _git(clone, "rev-parse", "HEAD") == second, "put back on the version it was on"
     assert sent.sent == []  # type: ignore[attr-defined]
     assert first != third
+
+
+def _installed_module(applier: autoupdate.GuardedApplier) -> object:
+    listed = {m.id: m for m in tortoise_modules.store().load_all("module")}
+    return listed["mobstats"]
+
+
+def test_a_refused_update_of_a_new_addon_link_is_put_back_without_naming_a_rebuild(
+    tmp_path: Path,
+) -> None:
+    """N5: a link is derived as a `module` now, and an add-on one holds no C++.
+
+    Nothing compiles it, so "the next rebuild builds that one" would name a build step
+    that does not exist for this item; the add-on path's sentence is the true one.
+    Mutation: route every `module` through `put_back()` and this sentence comes back.
+    """
+    applier, origin, server = _rig(tmp_path)
+    first = _publish(origin, "11200", "v1")
+    tortoise_modules.install_custom(applier)(tortoise_modules.derive_link(URL), None)
+    clone = server / "modules" / "MobStats"
+    assert _git(clone, "rev-parse", "HEAD") == first
+    second = _publish(origin, "20400", "v2")  # now made for another game version
+
+    with pytest.raises(CompletionRefused) as refused:
+        applier.update(_installed_module(applier))  # type: ignore[arg-type]
+
+    said = str(refused.value)
+    assert "is made for The Burning Crusade (Interface 20400)" in said
+    assert "put it back on the version it was on" in said
+    assert "next rebuild" not in said
+    assert _git(clone, "rev-parse", "HEAD") == first, "the clone agrees with its record again"
+    ledger = module_moves.read(server)
+    assert ledger is not None and ledger.skipped["module/mobstats"].tip == second

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "game": "wow-coa",
+  "type": "mod",
+  "items": [
+    "yulon-consoleport",
+    "yulon-squidbots-lite"
+  ]
+}

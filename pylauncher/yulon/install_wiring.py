@@ -58,6 +58,8 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.catalog.native import (
+    NOTHING_BUILT,
+    PARKED_TAG_SUFFIX,
     REPAIR_FILES_LABEL,
     WSL_DISTRO_STOPPED_NOTE,
     CatalogPin,
@@ -653,7 +655,11 @@ def with_module_moves(
     - **it returned**: every clone on disk was just compiled, so no update is
       unbuilt any more (`module_moves.settle()`); so does a build that was KEPT
       after its world came up (`WorldStoppedAfterReadyError`), when
-      `kept_settles`;
+      `kept_settles`. **Not when the generator's return value is
+      `native.NOTHING_BUILT` (T863)**: the Update that moved nothing and found
+      every record current ends without a compile, and settling there would
+      erase module moves nobody has built -- the very work the exit refused to
+      skip;
     - **Stop** (a failure that IS the Stop taking effect: `after_stop.stop_took_effect()`):
       nothing changes. The cancel event is not asked (T592): a compile error that
       lands as Stop is pressed is still the compile error, and its module goes back;
@@ -677,10 +683,22 @@ def with_module_moves(
     and "update mod-ale" is not the way out (`native.ale_playerbots_note()`).
     """
     scanner = module_moves.BuildErrorScanner()
-    try:
-        for line in lines:
+    returned: object = None
+
+    def scanned(through: Iterator[str]) -> Iterator[str]:
+        """`through`'s lines, fed to the scanner; its return value is kept (T863)."""
+        nonlocal returned
+        while True:
+            try:
+                line = next(through)
+            except StopIteration as done:
+                returned = done.value
+                return
             scanner.feed(line)
             yield line
+
+    try:
+        yield from scanned(lines)
     except WorldStoppedAfterReadyError:
         if kept_settles:
             _settle(server_dir)
@@ -713,7 +731,8 @@ def with_module_moves(
         close = getattr(lines, "close", None)
         if close is not None:
             close()
-    _settle(server_dir)
+    if returned is not NOTHING_BUILT:
+        _settle(server_dir)
 
 
 ModuleNote = Callable[[tuple[str, ...]], str]
@@ -1284,7 +1303,28 @@ def kept_build_for_app(
     return KeptBuildRoute(
         check=lambda: parked_build_note(server_dir),
         remove=lambda: installer_for_app(entry).remove_kept_build(options),
+        size=lambda: _kept_build_bytes(entry, server_dir, wsl_distro=wsl_distro),
     )
+
+
+def _kept_build_bytes(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> int | None:
+    """What this install's kept `-parked` images take, up to (T864); None unknown. Never raises."""
+    try:
+        engine = installer_for_app(entry)
+        if not isinstance(engine, StagedInstaller):
+            return None
+        names = [ref + PARKED_TAG_SUFFIX for ref in engine.image_refs_at(server_dir)]
+        if not names:
+            return None
+        facts = docker.image_facts(names, wsl_distro=wsl_distro)
+        if not facts:
+            return None
+        return sum(f.size for f in facts)
+    except Exception as exc:  # noqa: BLE001 - a size must never fail a dialog
+        logger.warning(f"kept build size is unknown ({exc})")
+        return None
 
 
 def repair_confs_for_app(

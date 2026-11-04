@@ -176,10 +176,17 @@ def test_a_whole_entry_with_a_trinitycore_block_loads() -> None:
 def test_trinitycore_is_a_family_and_an_account_scheme_the_models_name() -> None:
     assert "trinitycore" in get_args(NativeInstall.model_fields["family"].annotation)
     assert Accounts(scheme="trinitycore").scheme == "trinitycore"
+    # The family's second shape (T850-C), which its MoP line declares.
+    assert Accounts(scheme="trinitycore_sha").scheme == "trinitycore_sha"
 
 
-def test_the_shipped_catalog_has_one_trinitycore_entry_and_it_is_centurion() -> None:
-    """Task 1 was the model only; the real `wow-centurion` entry landed in Task 7."""
+def test_the_shipped_catalog_has_two_trinitycore_entries_centurion_and_mop() -> None:
+    """Task 1 was the model only; `wow-centurion` landed in Task 7 and `wow-mop` in T850.
+
+    The family's two credential shapes are declared one per entry (T850-C): Centurion's
+    `trinitycore` (SRP6 `salt`/`verifier`) and MoP's `trinitycore_sha` (`sha_pass_hash`
+    with the level in `account_access(id, gmlevel, RealmID)`).
+    """
     catalog = load_catalog()
     assert [entry.id for entry in catalog.games] == [
         "wow-wotlk",
@@ -189,14 +196,19 @@ def test_the_shipped_catalog_has_one_trinitycore_entry_and_it_is_centurion() -> 
         "wow-centurion",
         "wow-unbound",
         "wow-coa",
+        "wow-mop",
     ]
+    shapes = {"wow-centurion": "trinitycore", "wow-mop": "trinitycore_sha"}
     for entry in catalog.games:
         native = entry.install.native
         assert native is not None
-        is_tc = entry.id == "wow-centurion"
+        is_tc = entry.id in shapes
         assert (native.family == "trinitycore") is is_tc, entry.id
         assert (native.trinitycore is not None) is is_tc, entry.id
-        assert (entry.accounts.scheme == "trinitycore") is is_tc, entry.id
+        assert (entry.accounts.scheme in tuple(shapes.values())) is is_tc, entry.id
+    assert {(game, shapes[game]) for game in shapes} == {
+        (game, catalog.get(game).accounts.scheme) for game in shapes
+    }
 
 
 def test_an_entry_of_the_family_dispatches_to_the_trinitycore_engine() -> None:
@@ -256,6 +268,24 @@ def test_a_sparse_exclusion_holding_a_pattern_character_is_refused(path: str) ->
 def test_a_dbc_overlay_outside_the_checkout_is_refused(path: str) -> None:
     with pytest.raises(ValidationError, match="dbc_overlay_from must be a relative POSIX path"):
         NativeInstall.model_validate(_native(extract__dbc_overlay_from=path))
+
+
+def test_the_dbc_overlay_is_optional_and_none_means_no_overlay() -> None:
+    """A tree that ships no DBCs (MoP) leaves the extractor's own in place (T850 A1)."""
+    native = _native()
+    del native["trinitycore"]["extract"]["dbc_overlay_from"]
+    block = NativeInstall.model_validate(native).trinitycore
+    assert block is not None and block.extract.dbc_overlay_from is None
+
+
+def test_map_names_defaults_to_centurions_naming_and_takes_mops() -> None:
+    """T850 A2: the id width and separator are catalog data, not a constant in the check."""
+    block = NativeInstall.model_validate(NATIVE).trinitycore
+    assert block is not None and block.map_names == "mmmyyxx"
+    mop = NativeInstall.model_validate(_native(map_names="mmmm_yy_xx")).trinitycore
+    assert mop is not None and mop.map_names == "mmmm_yy_xx"
+    with pytest.raises(ValidationError, match="map_names"):
+        NativeInstall.model_validate(_native(map_names="mmmyy"))
 
 
 @pytest.mark.parametrize("checkout", ["/src/core", "../core", "src\\core", "."])
@@ -462,6 +492,30 @@ def test_a_trinitycore_entry_cannot_take_another_cores_account_scheme(scheme: st
 def test_a_trinitycore_entry_may_declare_no_scheme() -> None:
     entry = parse_catalog({"schema_version": 1, "games": [_entry(accounts={"scheme": None})]})
     assert entry.get("wow-example").accounts.scheme is None
+
+
+def test_a_trinitycore_entry_may_declare_the_familys_second_scheme() -> None:
+    """`trinitycore_sha` (T850-C): MoP's sha_pass_hash rows with AzerothCore's level table.
+
+    One family, two shapes: the credential and the GM level are separate halves,
+    and the Mists of Pandaria line takes one from each. Refusing it would send
+    that entry to the worldserver console for no reason.
+    """
+    entry = parse_catalog(
+        {"schema_version": 1, "games": [_entry(accounts={"scheme": "trinitycore_sha"})]}
+    )
+    assert entry.get("wow-example").accounts.scheme == "trinitycore_sha"
+
+
+def test_the_trinitycore_scheme_refusal_names_both_shapes_the_family_writes() -> None:
+    """`mangos_sha` is still refused, and the sentence now says what IS accepted.
+
+    Tortoise's shape is the same hash with the level in `account.rank` — a table
+    and a column MoP does not have, so accepting it would write a level nowhere.
+    """
+    with pytest.raises(ValidationError) as caught:
+        parse_catalog({"schema_version": 1, "games": [_entry(accounts={"scheme": "mangos_sha"})]})
+    assert "'trinitycore' or 'trinitycore_sha' or null" in str(caught.value)
 
 
 def test_a_rename_must_land_on_one_of_the_entrys_own_schemas() -> None:

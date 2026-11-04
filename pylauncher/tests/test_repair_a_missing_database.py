@@ -20,7 +20,7 @@ import pytest
 
 from tests.support_native import ABSENT, ENTRY, IMPORTED, Recorder, engine, install
 from tests.test_families_cmangos import engine as cm_engine
-from yulon import database_presence, docker, git
+from yulon import database_presence, docker, docker_space, git
 from yulon.catalog import native
 from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.database_presence import Reading
@@ -98,6 +98,33 @@ def test_repair_runs_the_install_s_database_stages_and_records_none_of_them(
     assert "one-shot:ac-db-import" in rec.calls and "start" in rec.calls, rec.calls
     assert "build" not in rec.calls and "recreate" not in rec.calls
     assert (server_dir / native.STATE_FILE).read_bytes() == record, "nothing is recorded"
+
+
+def test_a_repair_is_not_counted_as_building_so_free_docker_space_is_not_refused(
+    tmp_path: Path,
+) -> None:
+    """T864 review: the shared stage loop counts only a real build.
+
+    `_staged()` is the spine of the install, rebuild, updates, repair,
+    corrections and adopt. Counting all of them made Free Docker space refuse
+    with the install's "builds with Docker" sentence during a repair, which
+    runs no `build` stage at all (and while a build counter is shared by every
+    server). Asked at every line the press yields, so the whole loop is covered.
+    """
+    rec = Recorder(images=True)
+    server_dir = _finished(rec, tmp_path)
+    rec.db_started = False
+    rec.probe_answers = [ABSENT, IMPORTED]
+    said: list[str] = []
+    refused: list[str | None] = []
+    for line in engine(rec, read_database=_reads("missing")).repair_database(
+        InstallOptions(server_dir=server_dir)
+    ):
+        said.append(line)
+        refused.append(docker_space.build_press_refusal())
+    assert "--- start-db" in said and "--- build" not in said, said
+    assert docker_space.build_press_refusal() is None
+    assert refused == [None] * len(said), refused
 
 
 @pytest.mark.parametrize("presence", ["present", "unknown"])

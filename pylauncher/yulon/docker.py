@@ -2146,7 +2146,8 @@ def remove_volume(name: str, *, wsl_distro: str | None = None) -> None:
     that, because it cannot: a volume name carries no reference to the folder it
     belongs to. What it does check is the ONE thing it can — that the volume is
     actually gone afterwards, rather than trusting an exit code, the same way
-    `remove_staged()` re-censuses.
+    `remove_staged()` re-censuses. An already orphaned ANONYMOUS volume is not
+    purged here: it carries no project label, so it cannot be attributed safely (T846).
 
     Raises:
         DockerCommandError: The volume is still in use, or the removal could not
@@ -2199,7 +2200,10 @@ def remove_image(ref: str, *, force: bool = False, wsl_distro: str | None = None
     `-rollback` tag on the daemon for ever, which is exactly what the round-3
     gate found. Forcing removes the NAME; the image it last pointed at becomes
     dangling and the exited container keeps running on the layers it already
-    has until compose next recreates it from the live tag. `(cannot be forced)`
+    has until compose next recreates it from the live tag. A successful build's
+    T864 pass removes such an image once no container holds it
+    (`remove_unused_image`), and the exited one-shot containers still hold it
+    until compose recreates them (T865 idea). `(cannot be forced)`
     -- a RUNNING container -- is a different answer, and this function passes
     both back for the caller to tell apart rather than retrying blind.
     """
@@ -2524,7 +2528,9 @@ def remove_staged(
     # reverse, so the servers close their database connections before the
     # database goes. `--remove-orphans` clears services dropped from the compose
     # file, which are exactly the leftovers that make a project need recreating.
-    # No `-v`, ever.
+    # No `-v` on `down`, ever: that flag removes the project's NAMED volumes
+    # (the characters). The `rm -f -v` fallback below removes only each
+    # container's OWN anonymous volumes, never a named one (T846).
     # The grace matters here as much as it does on the stop path, and it was
     # missed the first time round: this button is offered on a RUNNING server,
     # under copy that says the characters are not affected. At Docker's 10s
@@ -2563,9 +2569,10 @@ def remove_staged(
             # Stopped with the full grace BEFORE it is removed. `rm -f` is a
             # SIGKILL with no grace at all, so leaving it as the only fallback
             # left a hard-kill path reachable from the same button whose copy
-            # promises the characters survive (review, 2026-08-23).
+            # promises the characters survive (review, 2026-08-23). `-v` takes
+            # only the container's own anonymous volumes, never a named one (T846).
             _run_docker_stop(name, wsl_distro=wsl_distro)
-            _docker(["rm", "-f", name], wsl_distro=wsl_distro)
+            _docker(["rm", "-f", "-v", name], wsl_distro=wsl_distro)
         after = _project_containers(project, wsl_distro=wsl_distro) or []
     if after:
         raise DockerCommandError(f"still present after remove: {', '.join(after)}")
@@ -3913,7 +3920,7 @@ def importer_left_sentence(left: OneShotLeft, nothing_done: str) -> str:
     )
     if not left.names:
         return said
-    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f -v {' '.join(left.names)}"
 
 
 def one_shot_ended_marker(server_dir: Path, service: str) -> Path:
@@ -8020,14 +8027,20 @@ def compose_up_service(
 def compose_remove_service(
     server_dir: Path, service: str, *, wsl_distro: str | None = None
 ) -> None:
-    """Stop and remove ONE service's container (`compose rm --stop --force`). No volumes (T127).
+    """Stop and remove ONE service's container (`compose rm -v --stop --force`, T846).
 
-    Meant to be idempotent: compose v2 treats a service that has no container as
-    nothing to remove and exits 0, which the bot dashboard's switch-off relies on
-    when a second press repeats this step. Expected from compose, not measured in
-    this repository; a non-zero exit still raises, and then the switch stays On.
+    `-v` removes only that service container's OWN anonymous volumes, never a
+    named one. Meant to be idempotent: compose v2 treats a service that has no
+    container as nothing to remove and exits 0, which the bot dashboard's
+    switch-off relies on when a second press repeats this step. Expected from
+    compose, not measured in this repository; a non-zero exit still raises, and
+    then the switch stays On.
     """
-    _run(["compose", "rm", "--stop", "--force", service], cwd=server_dir, wsl_distro=wsl_distro)
+    _run(
+        ["compose", "rm", "-v", "--stop", "--force", service],
+        cwd=server_dir,
+        wsl_distro=wsl_distro,
+    )
 
 
 def container_ip(container: str, *, wsl_distro: str | None = None) -> str | None:
@@ -8164,6 +8177,282 @@ def build_cache_bytes(*, wsl_distro: str | None = None) -> int | None:
         return size
     logger.info("`docker system df` printed no Build Cache row")
     return None
+
+
+IMAGE_IN_USE = "in use"
+IMAGE_GONE = "gone"
+BUILD_CACHE_PRUNE_TIMEOUT_SECONDS = 900.0
+
+
+def dangling_image_ids(label: str, *, wsl_distro: str | None = None) -> tuple[str, ...] | None:
+    """This daemon's dangling image ids carrying the label `label`, or None (T864).
+
+    `label` is either `PROJECT_LABEL` alone or `f"{PROJECT_LABEL}=<project>"`.
+    `-q` lists ids only and no `-a` is passed: BuildKit makes no intermediate
+    images, so every dangling image here is a build whose last name was let go.
+    The label filter keeps other daemons' images out: alpine/git is pulled by
+    digest and carries no compose label (measured on yulon-ubuntu2 it is not
+    even matched by `dangling=true`).
+    """
+    proc = _docker(
+        ["images", "-q", "--filter", "dangling=true", "--filter", f"label={label}"],
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.info(f"could not list dangling images: {proc.stderr.strip()}")
+        return None
+    seen: list[str] = []
+    for line in proc.stdout.splitlines():
+        image_id = line.strip()
+        if image_id and image_id not in seen:
+            seen.append(image_id)
+    return tuple(seen)
+
+
+@dataclass(frozen=True)
+class ImageFact:
+    image_id: str
+    size: int  # bytes, as `image inspect` gives `.Size`
+    project: str | None  # the compose project label, None without one
+
+
+def image_facts(
+    names: Sequence[str], *, wsl_distro: str | None = None
+) -> tuple[ImageFact, ...] | None:
+    """What `names` are, as one `image inspect` answers; None when it would not say (T864)."""
+    if not names:
+        return ()
+    proc = _docker(
+        ["image", "inspect", "--format", "{{.Id}}\t{{.Size}}\t{{json .Config.Labels}}", *names],
+        wsl_distro=wsl_distro,
+    )
+    rows: list[ImageFact] = []
+    for line in proc.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3:
+            logger.info(f"could not read an image inspect line: {line!r}")
+            continue
+        raw_id, raw_size, raw_labels = fields
+        image_id = raw_id.strip()
+        if not image_id:
+            logger.info(f"could not read an image inspect line: {line!r}")
+            continue
+        try:
+            size = int(raw_size.strip())
+        except ValueError:
+            logger.info(f"could not read an image size: {line!r}")
+            continue
+        try:
+            labels = json.loads(raw_labels)
+        except ValueError:
+            logger.info(f"could not read image labels: {line!r}")
+            continue
+        project: str | None = None
+        if isinstance(labels, dict):
+            found = labels.get(PROJECT_LABEL)
+            project = found if isinstance(found, str) else None
+        if all(row.image_id != image_id for row in rows):
+            rows.append(ImageFact(image_id=image_id, size=size, project=project))
+    if proc.returncode != 0 and not rows:
+        return None
+    return tuple(rows)
+
+
+@dataclass(frozen=True)
+class ContainerRef:
+    """One container the daemon listed on an image (T864-E).
+
+    `id` is what `docker rm` is given: a name can be taken by the next `compose
+    up` between the listing and the removal, the id cannot. `state` is Docker's
+    own word (`running`, `exited`, `created`, ...), and `project`/`service` are
+    the two compose labels, each None when the container carries none
+    (something started by hand, or by a tool).
+    """
+
+    id: str
+    name: str
+    state: str
+    project: str | None
+    service: str | None
+
+
+def containers_on(
+    image_id: str, *, wsl_distro: str | None = None
+) -> tuple[ContainerRef, ...] | None:
+    """EVERY container created from `image_id`, or None when unlisted (T864-E).
+
+    No `status=` filter, on purpose. The caller decides what may go, and it can
+    only decide that about holders it can see: a listing narrowed to `exited`
+    would hide a RUNNING container and let the caller remove the image it
+    holds, ending something the player is using.
+    `docker_space.remove_finished_holders_on()` is where that decision lives --
+    an image is removed only when all of its holders are exited one-shot
+    containers of the image's own project.
+
+    A one-shot service's container (`ac-db-import`, `ac-client-data-init`, and
+    the like) keeps its image referenced after it exits, and a rebuild never
+    recreates it -- `compose up --force-recreate` does not select those
+    services -- so the old image cannot be removed until the finished container
+    is.
+
+    A nonzero exit is None, never `()`: "the daemon would not answer" is not
+    "nothing holds it", and a caller that confused the two would go on to remove
+    an image whose holders it never saw.
+    """
+    proc = _docker(
+        [
+            "ps",
+            "-a",
+            "--filter",
+            f"ancestor={image_id}",
+            "--format",
+            "{{.ID}}\t{{.Names}}\t{{.State}}\t"
+            '{{.Label "com.docker.compose.project"}}\t'
+            '{{.Label "com.docker.compose.service"}}',
+        ],
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.info(f"could not list the containers on image {image_id}: {proc.stderr.strip()}")
+        return None
+    refs: list[ContainerRef] = []
+    for line in proc.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 5:
+            logger.info(f"could not read a container listing line: {line!r}")
+            continue
+        ident, name, state, project, service = (field.strip() for field in fields)
+        if not ident or not name:
+            logger.info(f"could not read a container listing line: {line!r}")
+            continue
+        refs.append(
+            ContainerRef(
+                id=ident,
+                name=name,
+                state=state,
+                project=project or None,
+                service=service or None,
+            )
+        )
+    return tuple(refs)
+
+
+def _failure_said(proc: subprocess.CompletedProcess[str]) -> str:
+    """What a nonzero exit said: stderr, else stdout, else the exit code (T864 review).
+
+    The callers below use `""` as their only success sentinel, so a nonzero
+    exit MUST never answer `""` even when Docker printed nothing: an empty
+    string would read as "removed" and the caller would count the space freed.
+    """
+    return (
+        proc.stderr.strip() or proc.stdout.strip() or f"docker exited with code {proc.returncode}"
+    )
+
+
+def remove_unused_image(image_id: str, *, wsl_distro: str | None = None) -> str:
+    """Remove one dangling image by id. Returns why it could not be, or `""` (T864).
+
+    NEVER `-f`: forcing only takes the name off and leaves the layers, which is
+    the T79 leak this ticket cleans up.
+    """
+    proc = _docker(["image", "rm", image_id], wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        logger.info(f"removed image {image_id}")
+        return ""
+    said = _failure_said(proc)
+    lowered = said.lower()
+    if "no such image" in lowered:
+        return IMAGE_GONE
+    if "conflict: unable to delete" in lowered:
+        logger.debug(f"{image_id} is still held by a container: {said}")
+        return IMAGE_IN_USE
+    logger.warning(f"could not remove image {image_id}: {said}")
+    return said
+
+
+def remove_finished_container(container_id: str, *, wsl_distro: str | None = None) -> str:
+    """`docker rm <container id>`: one FINISHED one-shot container. `""` when it went (T864-E).
+
+    The caller passes the ID the listing gave (`ContainerRef.id`), never the
+    name: `compose up` can take a stopped container's name for a new one between
+    the listing and this call, and removing by name would then take the new
+    container instead of the one that was seen.
+
+    NEVER `-f`: a container that is somehow still running must be refused by the
+    daemon, not killed, because the image it holds is then left alone too.
+    NEVER `-v`: this is only ever a one-shot service's container, whose data
+    lives in the compose project's NAMED volumes; those are not touched by
+    `docker rm` at all, and asking for volume removal could only lose something.
+
+    Not `remove_container()`: that one is the `rm -f -v` the movement-map job's
+    container and the claim need (T846), and its force is the whole point there.
+    This asks the daemon to take a finished container and answers with the
+    daemon's own sentence when it will not, as `remove_unused_image()` does.
+
+    Returns:
+        `""` when the container is gone, otherwise what Docker said, never empty.
+    """
+    proc = _docker(["rm", container_id], wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        logger.info(f"removed container {container_id}")
+        return ""
+    said = _failure_said(proc)
+    logger.warning(f"could not remove container {container_id}: {said}")
+    return said
+
+
+def prune_build_cache(*, wsl_distro: str | None = None) -> str:
+    """Remove this daemon's unused build cache records; `""` when they went (T864).
+
+    Removes unused records only, of every builder user on this daemon; no image,
+    container, volume or database is touched; the next build compiles from the
+    start.
+    """
+    proc = _docker(
+        ["builder", "prune", "-f"], timeout=BUILD_CACHE_PRUNE_TIMEOUT_SECONDS, wsl_distro=wsl_distro
+    )
+    if proc.returncode == 0:
+        lines = proc.stdout.splitlines()
+        logger.info(f"pruned Docker's build cache: {lines[-1].strip() if lines else 'done'}")
+        return ""
+    said = _failure_said(proc)
+    logger.warning(f"could not prune Docker's build cache: {said}")
+    return said
+
+
+_BUILDING: int = 0
+"""How many install, rebuild or update stage loops of this process compile now (T864 R3)."""
+
+
+@contextmanager
+def building(server_dir: Path | str) -> Iterator[None]:
+    """Count the caller as compiling, from the first stage to the last (T864 R3).
+
+    No reservation, no refusal, never raises: `build_press_refusal()` asks
+    `builds_running()`, and an install only takes its reservation at `start-db`,
+    after `build`. Thread-safe like `_press_on()`'s bookkeeping; `server_dir`
+    is accepted and ignored so the stage loop reads plainly.
+    """
+    global _BUILDING
+    with _HOLD_LOCK:
+        _BUILDING += 1
+    try:
+        yield
+    finally:
+        with _HOLD_LOCK:
+            _BUILDING -= 1
+
+
+def builds_running() -> bool:
+    """Whether any install, rebuild or update stage loop of this process compiles now (T864 R3)."""
+    with _HOLD_LOCK:
+        return _BUILDING > 0
+
+
+def presses_running() -> tuple[str, ...]:
+    """Every press inside a reservation of any server in this process (T864)."""
+    with _HOLD_LOCK:
+        return tuple(p for presses in _PRESSES.values() for p in presses)
 
 
 def image_id(ref: str, *, wsl_distro: str | None = None) -> str | None:
@@ -8946,6 +9235,77 @@ def tool_containers_left_running(folder: Path) -> StillWriting:
     return StillWriting(ours=tuple(left), others=tuple(theirs))
 
 
+def install_tool_containers(
+    projects: Sequence[str], folders: Sequence[Path], *, wsl_distro: str | None = None
+) -> list[str] | None:
+    """Running extraction-tool containers (`yulon-extract-*`) that belong to THIS install.
+
+    T854: the movement-map step of an install is such a container, and it can outlive a Stop
+    (Docker Desktop keeps a container whose CLI is gone, T303). One `docker ps` lists every
+    running tool with the labels that can name its install; the filtering is here. A tool is
+    this install's when EITHER its `WRITES_LABEL` holds the `folder_id()` of one of `folders`
+    (the data folder it writes: what `ContainerRun.to_create_argv` records, and the only thing
+    that names the install for a tool that does not carry the compose label) OR it carries the
+    `PROJECT_LABEL` of one of `projects` (compose-built images hand their labels to the
+    containers made from them). `OWNER_LABEL` is deliberately not asked: `compose down
+    --remove-orphans` already takes any container of the project whoever made it, and a
+    Windows and a WSL Yu'lon on one folder are one install.
+
+    The ids are only READ (`_read_folder_id`): `folder_id()` would write a file into a folder
+    that is about to be deleted, through whatever link it is. A folder with no id file has had
+    no tool that names it, so it matches nothing.
+
+    None when Docker would not answer: the caller says so and the removal's own Docker
+    commands report it next.
+    """
+    wanted_projects = {project for project in projects if project}
+    wanted_ids = {
+        ident for ident in (_read_folder_id(folder / FOLDER_ID_FILE) for folder in folders) if ident
+    }
+    proc = _docker(
+        [
+            "ps",
+            "--filter",
+            f"name={TOOL_CONTAINER_PREFIX}",
+            "--format",
+            f'{{{{.Names}}}}\t{{{{.Label "{PROJECT_LABEL}"}}}}\t{{{{.Label "{WRITES_LABEL}"}}}}',
+        ],
+        timeout=_ASK_AGAIN_TIMEOUT,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.info(f"could not list this install's extraction tool containers: {proc.stderr}")
+        return None
+    ours: list[str] = []
+    for row in proc.stdout.splitlines():
+        name, project, writes = ([*row.strip().split("\t"), "", ""])[:3]
+        if not name.startswith(TOOL_CONTAINER_PREFIX):
+            continue
+        named = {part for part in writes.strip().split(",") if part}
+        if project.strip() in wanted_projects or named & wanted_ids:
+            ours.append(name)
+    return sorted(ours)
+
+
+def end_tool_container(name: str, *, wsl_distro: str | None = None) -> str | None:
+    """Kill and remove one extraction-tool container at once (`docker rm -f -v`, no grace).
+
+    `-v` takes only that container's own anonymous volumes (T846), never a named one.
+
+    T854: for an uninstall, which deletes the data the tool writes, so there is nothing to
+    wait for (`compose down` would give it `STOP_GRACE_SECONDS` first, twice). None once it is
+    gone; otherwise Docker's reason in words. Never raises.
+    """
+    proc = _docker(
+        ["rm", "-f", "-v", name], timeout=container_end.END_CONTAINER_TIMEOUT, wsl_distro=wsl_distro
+    )
+    said = (proc.stderr or "").lower()
+    if proc.returncode == 0 or "no such container" in said or "already in progress" in said:
+        _ended(name)
+        return None
+    return (proc.stderr or "").strip() or f"docker rm exited {proc.returncode}"
+
+
 WRITES_LABEL = "yulon.writes-ids"
 """The label `docker create` puts on an extraction tool container: the folders it writes,
 each as `folder_id()`, comma-separated (Codex review of the owner label; T536).
@@ -9609,8 +9969,11 @@ def _end_claim_cli(proc: subprocess.Popen[bytes], *, wait: float = _CLAIM_RELEAS
 def _remove_claim(
     container: str, timeout: float = _CLAIM_ASK_TIMEOUT, *, wsl_distro: str | None = None
 ) -> bool:
-    """`docker rm -f` a claim by its container id; True once it is gone (already gone counts)."""
-    proc = _docker(["rm", "-f", container], timeout=timeout, wsl_distro=wsl_distro)
+    """`docker rm -f -v` a claim by its container id; True once it is gone (already gone counts).
+
+    `-v` (T846) takes only the claim's own anonymous volumes, never a named one.
+    """
+    proc = _docker(["rm", "-f", "-v", container], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode != 0 and not _NO_SUCH_CONTAINER.search(proc.stderr):
         logger.warning(f"the claim {container} could not be removed: {proc.stderr.strip()}")
         return False
@@ -10451,7 +10814,7 @@ def tool_container_left_line(name: str, reason: str, *, stopped: bool = True) ->
     return (
         f"The extraction tool's container {name} could not be removed{after} ({reason}), "
         f"so it may still be writing into the server's data folder. "
-        f"{container_end.remove_it()}\ndocker rm -f {name}"
+        f"{container_end.remove_it()}\ndocker rm -f -v {name}"
     )
 
 
@@ -10629,20 +10992,22 @@ def daemon_arch(
 def remove_container(
     container: str, *, timeout: float | None = None, wsl_distro: str | None = None
 ) -> None:
-    """`docker rm -f <container>`; a container that is already gone is not a failure.
+    """`docker rm -f -v <container>`; a container that is already gone is not a failure.
+
+    `-v` (T846) takes only the container's own anonymous volumes, never a named one.
 
     Raises:
         DockerCliMissingError: there is no docker CLI.
         DockerCommandError: docker refused for any other reason, or did not answer in time.
     """
-    proc = _docker(["rm", "-f", container], timeout=timeout, wsl_distro=wsl_distro)
+    proc = _docker(["rm", "-f", "-v", container], timeout=timeout, wsl_distro=wsl_distro)
     if proc.returncode == 0:
         return
     if _cli_missing(proc):
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
     if _NO_SUCH_CONTAINER.search(proc.stderr):
         return
-    raise DockerCommandError(f"docker rm -f {container} exited {proc.returncode}: {proc.stderr}")
+    raise DockerCommandError(f"docker rm -f -v {container} exited {proc.returncode}: {proc.stderr}")
 
 
 _MISSING_IN_IMAGE = re.compile(r"No such container:path|Could not find the file", re.IGNORECASE)
@@ -10744,7 +11109,9 @@ def copy_from_image(image: str, src: str, dest: Path) -> None:
             raise DockerCommandError(f"{image} has no {src} to copy out: {exc}") from exc
         raise DockerCommandError(f"could not copy {src} out of {image}: {exc}") from exc
     finally:
-        removal = _docker(["rm", "-f", container])
+        # `-v` (T846): the image may declare VOLUME paths of its own, and a
+        # throwaway container that only ever held a `cp` must not leave them.
+        removal = _docker(["rm", "-f", "-v", container])
         if removal.returncode != 0:
             if _cli_missing(removal):
                 # `removal.stderr` here is the whole install-Docker help text,
@@ -10753,7 +11120,7 @@ def copy_from_image(image: str, src: str, dest: Path) -> None:
                 # now genuinely stranded, by name.
                 logger.warning(
                     f"no docker CLI left to remove {container[:12]} with; it is still "
-                    f"there, and `docker rm -f {container[:12]}` clears it once docker is back"
+                    f"there, and `docker rm -f -v {container[:12]}` clears it once docker is back"
                 )
             else:
                 logger.warning(

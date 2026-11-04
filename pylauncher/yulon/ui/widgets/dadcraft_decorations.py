@@ -1371,11 +1371,13 @@ class DadcraftHeader(QFrame):
                 painter.drawEllipse(QPointF(bx, by_bat - 0.5), 0.9, 0.9)
 
 
-THEME_OF = {"wow-unbound": "wow-wotlk", "wow-coa": "wow-wotlk"}
+THEME_OF = {"wow-unbound": "wow-wotlk", "wow-coa": "wow-wotlk", "wow-mop": "wow-tortoise"}
 """A tile that borrows another campaign's backdrop, particles and frame colours (T554).
 
 WoW Unbound is WotLK with more classes, so its card is the Frostmourne glacier too. The
-object name and the particle seed stay the tile's own id.
+object name and the particle seed stay the tile's own id. Mists of Pandaria (T850) borrows
+the jade-and-mist palette (the branch `wow-tortoise`, DDON and an unlisted id share), which
+is the closest of the five to Pandaria's own art; a MoP card of its own is a later change.
 """
 
 

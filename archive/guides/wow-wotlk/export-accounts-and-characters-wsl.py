@@ -95,6 +95,7 @@ OTHER_GAMES = (
     ("wow-tortoise", "WoW Tortoise", "tortoise-db"),
     ("wow-centurion", "Centurion", "centurion-db"),
     ("wow-unbound", "WoW Unbound", "ub-database"),
+    ("wow-mop", "WoW Mists of Pandaria", "mop-db"),
 )
 CHUNK = 1 << 20
 MIN_PYTHON = (3, 10)

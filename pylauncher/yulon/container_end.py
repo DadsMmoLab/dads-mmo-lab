@@ -3,8 +3,9 @@
 On Docker Desktop a Stop that ends the docker CLI does not end the container it
 was attached to: a clone's container went on cloning as an orphan (T240), and an
 extraction tool's went on writing into the server's `data/` (T303). So both
-name their containers and end them here by that name: `docker rm -f`, which
-kills and removes in one command.
+name their containers and end them here by that name: `docker rm -f -v`, which
+kills and removes in one command and takes the container's own anonymous
+volumes with it (T846: `-v` never touches a named volume).
 
 The clone (`git.py`) and the extraction tools (`docker.run_container()`) share
 this rather than each spelling it, because the second look below is the part a
@@ -18,7 +19,7 @@ exists: a Stop during the create is seen once the create returns, and one
 during the start ends a container known to be there, where "gone" means gone.
 Until T321 one `docker run` both created and started it, and a Stop that ended
 that CLI mid-create left the daemon free to create the container a moment
-after `rm -f` had found nothing; the second look below is kept now only for a
+after `rm -f -v` had found nothing; the second look below is kept now only for a
 create that did not answer in time and was ended by its timeout.
 """
 
@@ -49,7 +50,7 @@ def on_docker_desktop() -> bool:
 def remove_it() -> str:
     """How a log line says to remove a container this app could not; the command follows.
 
-    Only the words: each caller spells `docker rm -f` itself, on the line after, so the
+    Only the words: each caller spells `docker rm -f -v` itself, on the line after, so the
     rule that a command the player has to type stands on its own line is read where the
     line is made (T296).
     """
@@ -82,7 +83,7 @@ to need, and the longest a Stop can go unanswered on a daemon that has hung.
 """
 
 END_CONTAINER_TIMEOUT = 60.0
-"""How long `docker rm -f` of a stopped run's container may take before it is given up.
+"""How long `docker rm -f -v` of a stopped run's container may take before it is given up.
 
 A deadlock breaker: the kill and the removal take a second or two on a healthy
 daemon, and a daemon that does not answer must not hold a Stop's run open.
@@ -90,14 +91,18 @@ daemon, and a daemon that does not answer must not hold a Stop's run open.
 
 
 def remove_once(launcher: Sequence[str], name: str) -> str:
-    """One `docker rm -f name`: `REMOVED`, `GONE`, or the refusal in words (T240).
+    """One `docker rm -f -v name`: `REMOVED`, `GONE`, or the refusal in words (T240).
 
     `GONE` is "No such container", an exit 0 that named nothing (a CLI whose
     `-f` ignores a missing name), and Moby's "removal of container ... is already
     in progress", which is `--rm` getting there first: the container is going.
+
+    `-v` (T846) takes only this container's OWN anonymous volumes, never a
+    named one: the AzerothCore images declare VOLUME paths of their own, and
+    `--rm`'s removal is what a crash never gave them.
     """
     try:
-        done = runner.run([*launcher, "rm", "-f", name], timeout=END_CONTAINER_TIMEOUT)
+        done = runner.run([*launcher, "rm", "-f", "-v", name], timeout=END_CONTAINER_TIMEOUT)
     except OSError as exc:
         return str(exc)
     said = done.stderr.lower()
@@ -137,7 +142,7 @@ def create(
 def end_container(
     launcher: Sequence[str], name: str, *, what: str, created: bool = False
 ) -> str | None:
-    """Kill the container `name` and remove it: `docker rm -f`. Never raises.
+    """Kill the container `name` and remove it: `docker rm -f -v`. Never raises.
 
     `what` names the run in the log ("clone", "extraction tool"). Returns None
     once it is gone, or why it could not be removed; a refusal is logged and

@@ -275,6 +275,19 @@ def test_the_bootstrap_mounts_the_migrations_the_baseline_hashes() -> None:
     assert "./modules/mod-ascension:/src/modules/mod-ascension:ro" in volumes, volumes
 
 
+def test_the_bootstrap_makes_no_anonymous_volume_for_the_mysql_datadir() -> None:
+    """T846: mysql:8.4 declares VOLUME /var/lib/mysql; the bootstrap only uses its client.
+
+    A tmpfs at that path means Docker makes no anonymous volume for the
+    container, so `compose down` (no `-v`, on purpose) leaves none behind.
+    """
+    service = _rendered_bootstrap()
+    assert "/var/lib/mysql" in (service.get("tmpfs") or []), service
+    assert not [
+        mount for mount in service["volumes"] if mount.split(":")[1] == "/var/lib/mysql"
+    ], service["volumes"]
+
+
 def test_the_service_reads_the_core_checkout_at_src() -> None:
     service = _rendered_bootstrap()
     assert service["image"] == "mysql:8.4"

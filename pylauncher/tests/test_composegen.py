@@ -141,6 +141,60 @@ def render(server_dir: Path) -> composegen.ComposePlan:
     )
 
 
+def _one_shot_and_long_running(base: str) -> tuple[set[str], set[str]]:
+    """Split a rendered base file's services by whether compose would keep them up.
+
+    One-shot means the service has no `restart:` at all, says `restart: "no"`,
+    or is the target of a `condition: service_completed_successfully`
+    dependency — the three shapes the shipped templates use for a step that
+    runs once and exits (T864-E). Everything else is long-running.
+    """
+    services = yaml.safe_load(base)["services"]
+    one_shot: set[str] = set()
+    long_running: set[str] = set()
+    for name, service in services.items():
+        if str(service.get("restart", "no")).lower() == "no":
+            one_shot.add(name)
+        else:
+            long_running.add(name)
+        for dependency, edge in (service.get("depends_on") or {}).items():
+            if isinstance(edge, dict) and edge.get("condition") == "service_completed_successfully":
+                one_shot.add(dependency)
+    return one_shot, long_running
+
+
+def test_the_one_shot_service_list_is_exactly_what_the_templates_render(
+    tmp_path: Path,
+) -> None:
+    """`ONE_SHOT_SERVICES` is derived from the output, so it can never drift from it.
+
+    A service in that set may have its EXITED container removed by Free Docker
+    space and the post-build pass (T864-E). That makes an over-wide list a way
+    to end a server somebody stopped on purpose, and a stale one a silent return
+    of the leak this ticket closes; both directions fail here.
+    """
+    catalog = load_catalog()
+    derived: set[str] = set()
+    long_running: set[str] = set()
+    for index, entry in enumerate(catalog.games):
+        rendered = composegen.render(
+            entry,
+            tmp_path / f"install-{index}",
+            templates_root=TEMPLATES,
+            db_password="Zx9-safe-pass",
+            platform_id=lambda: "macos",
+        )
+        one_shot, up = _one_shot_and_long_running(rendered.base)
+        derived |= one_shot
+        long_running |= up
+    assert derived == composegen.ONE_SHOT_SERVICES
+    # The servers themselves are long-running in every family, and none of them
+    # may ever be removed as a "finished one-shot container".
+    assert {"ac-database", "ac-authserver", "ac-worldserver"} <= long_running
+    assert {"coa-database", "coa-authserver", "coa-worldserver"} <= long_running
+    assert long_running.isdisjoint(composegen.ONE_SHOT_SERVICES)
+
+
 def _services_with_user_key(base: str) -> set[str]:
     """Which services carry a service-level `user:`, by indentation.
 
@@ -289,7 +343,7 @@ def test_only_the_world_and_auth_servers_share_a_buildx_group(tmp_path: Path) ->
 
 
 PINNED_WOTLK_DOCKERFILE = (
-    Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-3f2969dd" / "Dockerfile"
+    Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-93333d6a" / "Dockerfile"
 )
 """The catalog pin's `apps/docker/Dockerfile`; `test_build_context` fails a pin bump until it is
 vendored again, which re-runs the check below on the new recipe."""
@@ -1599,6 +1653,26 @@ def test_logs_db_is_omitted_not_blanked_without_an_extra_schema(tmp_path: Path) 
         composegen.fill("{{LOGS_DB}}", tokens)
 
 
+def test_playerbots_db_is_the_entries_own_schema_or_absent(tmp_path: Path) -> None:
+    """T850 A4: the 4th-database token, for a core whose SQL plan creates it itself.
+
+    Like `LOGS_DB`, it is absent rather than blank when the entry names none, so a
+    template that uses it fails the unknown-token check instead of writing `None`.
+    """
+    entry = generated_entry(tmp_path, SAFE_BASE)  # wow-tbc: no playerbots schema
+    tokens = composegen.entry_tokens(entry)
+    assert "PLAYERBOTS_DB" not in tokens
+    with pytest.raises(composegen.ComposeGenError, match="PLAYERBOTS_DB"):
+        composegen.fill("{{PLAYERBOTS_DB}}", tokens)
+
+    with_playerbots = entry.model_copy(
+        update={"databases": entry.databases.model_copy(update={"playerbots": "tbc_playerbots"})}
+    )
+    tokens = composegen.entry_tokens(with_playerbots)
+    assert tokens["PLAYERBOTS_DB"] == "tbc_playerbots"
+    assert composegen.fill("db: {{PLAYERBOTS_DB}}", tokens) == "db: tbc_playerbots"
+
+
 def test_the_family_tokens_come_from_the_entry(tmp_path: Path) -> None:
     """DB host, user, schema names, container prefix and client build are catalog facts."""
     templates = tmp_path / "native"
@@ -2712,6 +2786,29 @@ def test_the_centurion_windows_render_reproduces_its_committed_snapshot_byte_for
     assert set(texts) == {path.name for path in root.iterdir() if path.is_file()}
     for name, text in texts.items():
         assert text == (root / name).read_text(encoding="utf-8"), name
+
+
+# -- T850: Mists of Pandaria's files are the family's second entry's -----------------------
+
+
+@pytest.mark.parametrize("folder", sorted(support_rendered.MOP_LABELS))
+def test_the_mop_render_reproduces_its_committed_snapshot_byte_for_byte(folder: str) -> None:
+    """T850's `wow-mop`: the shared TrinityCore templates over MoP's own Dockerfile set.
+
+    Written by `support_rendered.write_mop_snapshots()` at the commit that added the entry,
+    so a later change to a shared token or to `wow-mop/native/*.tmpl` has to move these bytes
+    deliberately. Regenerate only when a MoP template change for Linux is the point:
+
+        python -c "from tests.support_rendered import write_mop_snapshots as w; w()"
+    """
+    texts = support_rendered.mop_rendered(support_rendered.MOP_LABELS[folder])
+    root = support_rendered.MOP_SNAPSHOT_ROOT / folder
+    assert set(texts) == {path.name for path in root.iterdir() if path.is_file()}
+    for name, text in texts.items():
+        assert text == (root / name).read_text(encoding="utf-8"), f"{folder}: {name}"
+    # The install prefix the whole entry hangs on: `conf.source_dir` is /opt/mop/etc, so the
+    # data bind and every argv in the catalog spell /opt/mop.
+    assert "./data:/opt/mop/data" in texts[composegen.BASE_FILE]
 
 
 # -- T219: on Windows the world server reads its map data from a volume ---------------------

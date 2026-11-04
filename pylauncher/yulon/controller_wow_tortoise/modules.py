@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import date
@@ -85,7 +85,6 @@ from yulon.catalog.upstream import Comparison, Release, github_slug
 from yulon.catalog.upstream import cached_row as upstream_cached_row
 from yulon.controller_wow_tortoise import autoupdate, custom
 from yulon.controller_wow_tortoise.autoupdate import Arming, GuardedApplier
-from yulon.controller_wow_tortoise.botpool import Press
 from yulon.controller_wow_wotlk.maintenance import BackupReport, backups_dir
 
 # Explicit re-exports: the user layer's place, the copy and the replace question
@@ -167,16 +166,20 @@ def _taken_ids() -> tuple[str, ...]:
 
 def derive_link(text: str) -> Manifest:
     """A Tortoise server module, add-on or database package for the link `text` (T596)."""
-    return module_source.derive_link(
+    derived = module_source.derive_link(
         text, GAME, today=date.today(), shipped_ids=_taken_ids(), layout=layout()
     )
+    module_source.refuse_if_recorded(user_manifests_dir(), derived)
+    return derived
 
 
 def derive_folder(path: Path) -> Manifest:
     """As `derive_link()`, for a folder on this computer; read before anything is copied."""
-    return module_source.derive_folder(
+    derived = module_source.derive_folder(
         path, GAME, today=date.today(), shipped_ids=_taken_ids(), layout=layout()
     )
+    module_source.refuse_if_recorded(user_manifests_dir(), derived)
+    return derived
 
 
 def complete(manifest: Manifest, clone: Path) -> Manifest:
@@ -439,6 +442,9 @@ def applier(
     )
     # An item brought from a link is read again whenever its clone is put on new code.
     guarded.recomplete = _completer(guarded)
+    # T861: an ID alone (a conflict's other item, a build ledger key) has to find the
+    # folder its manifest names.
+    guarded.manifest_by_id = store().load
     return guarded
 
 
@@ -500,27 +506,9 @@ def follow_with_addon(
     alone. The wrapper never raises after a finished update: the outcome's own
     sentence is the failure's line.
     """
-    if route is None:
-        return None
-
-    def run(inner: Press, cancel: threading.Event | None) -> Iterator[str]:
-        yield from inner(cancel)
-        if cancel is not None and cancel.is_set():
-            logger.info("the update was stopped, so the client addon was left as it is")
-            return
-        yield "Checking TortoiseBots Manager in your game client…"
-        try:
-            yield follow().sentence
-        except Exception as exc:  # noqa: BLE001 - the update is done; the addon step never fails it
-            logger.warning(f"following the server update for {ADDON_ID}: {exc}")
-            yield _default_addons.FOLLOW_FAILED.format(name="TortoiseBots Manager", why=_short(exc))
-
-    return replace(route, press=lambda cancel: run(route.press, cancel))
-
-
-def _short(exc: Exception) -> str:
-    """One line of `exc`, for the FAILED sentence (T814)."""
-    return " ".join(str(exc).split())
+    return _default_addons.follow_route(
+        route, follow, item_id=ADDON_ID, name="TortoiseBots Manager"
+    )
 
 
 def module_updates(
@@ -545,7 +533,7 @@ def module_updates(
     """
     rows: list[ModuleUpdate] = []
     for kind in _COUNTED_KINDS:
-        branches, releases = _follows(kind)
+        branches, releases, manifests = _follows(kind)
         rows += cached_module_updates(
             server_dir,
             kind=kind,
@@ -555,6 +543,7 @@ def module_updates(
             newest_release=newest_release,
             compare_commits=compare_commits,
             now=now,
+            manifests=manifests,
         )
     return tuple(rows)
 
@@ -577,7 +566,7 @@ def refresh_module_updates(
     """
     rows: list[ModuleUpdate] = []
     for kind in _COUNTED_KINDS:
-        branches, releases = _follows(kind)
+        branches, releases, manifests = _follows(kind)
         rows += refresh_cached(
             server_dir,
             kind=kind,
@@ -588,6 +577,7 @@ def refresh_module_updates(
             newest_release=newest_release,
             compare_commits=compare_commits,
             now=now,
+            manifests=manifests,
         )
         if cancel.is_set():
             return ()
@@ -598,12 +588,16 @@ _COUNTED_KINDS: tuple[ManifestType, ...] = ("mod", "module")
 """What "Check for updates" and the background refresh count on Tortoise (T596, T621)."""
 
 
-def _follows(kind: ManifestType) -> tuple[dict[str, str | None], dict[str, str]]:
-    """Each `kind` item's branch, and the GitHub slug of each that follows its releases (T126)."""
+def _follows(
+    kind: ManifestType,
+) -> tuple[dict[str, str | None], dict[str, str], list[Manifest]]:
+    """Each `kind` item's branch and release slug, and the manifests themselves (T126, T861)."""
     branches: dict[str, str | None] = {}
     releases: dict[str, str] = {}
+    manifests: list[Manifest] = []
     try:
         for manifest in store().load_all(kind):
+            manifests.append(manifest)
             if manifest.source is None:
                 continue
             branches[manifest.id] = manifest.source.branch
@@ -613,7 +607,7 @@ def _follows(kind: ManifestType) -> tuple[dict[str, str | None], dict[str, str]]
                     releases[manifest.id] = slug
     except Exception as exc:  # boundary: a broken manifest tree must not stop the count
         logger.warning(f"could not read the wow-tortoise {kind}s for what they follow: {exc}")
-    return branches, releases
+    return branches, releases, manifests
 
 
 def release_note(

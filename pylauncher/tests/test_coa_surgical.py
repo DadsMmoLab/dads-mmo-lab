@@ -13,6 +13,7 @@ pins turns its test red.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -136,6 +137,8 @@ def _run_script(
     # The tools live on PATH in the test but at an absolute path in the
     # script: rewrite the container path to the fake bindir first.
     rewritten = script.replace("/x/bin", str(tmp_path / "bin"))
+    # T849: the scratch lies in the container's own /tmp; here it is the test's.
+    rewritten = rewritten.replace(f'w="{surgical.SCRATCH_ROOT}/', f'w="{root}/scratch/')
     rewritten = rewritten.replace("/client", f"{root}/client").replace("/out", f"{root}/out")
     return subprocess.run(
         ["bash", "-c", rewritten, "yulon-surgical"],
@@ -148,6 +151,11 @@ def _run_script(
             "FAKE_THIN": "1" if thin else "0",
         },
     )
+
+
+def _scratch(tmp_path: Path) -> Path:
+    """Where `_run_script` puts the scratch (the container's `/tmp/.yulon-surgical-936`)."""
+    return tmp_path / "root" / "scratch" / f"{surgical.SURGICAL_DIR}936"
 
 
 # -- the script ------------------------------------------------------------
@@ -180,7 +188,39 @@ def test_the_script_copies_only_the_named_map_and_vmo(tmp_path: Path) -> None:
         "936_43_44.vmtile",
         "Ns_Inquisitorial_Dungeon.wmo.vmo",
     ]
-    assert not (out / f"{surgical.SURGICAL_DIR}936").exists(), "the scratch is removed"
+    assert not (out / f"{surgical.SURGICAL_DIR}936").exists(), "nothing at the top of /out"
+    assert not _scratch(tmp_path).exists(), "the scratch is removed"
+
+
+@needs_bash
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root ignores the folder's mode"
+)
+def test_a_data_folder_the_tools_user_may_not_write_at_its_top_still_gets_the_map(
+    tmp_path: Path,
+) -> None:
+    """#459 / T849: on Docker Desktop `/out` is root's 0755 when Docker made `data/`, and the
+    tools run as uid 1000; only the host-made `maps/` and `vmaps/` are theirs to write. The side
+    run made its scratch at `/out/.yulon-surgical-936` and died on "Permission denied"."""
+    client = _client_with_wb1(tmp_path)
+    out = tmp_path / "out"
+    (out / "maps").mkdir(parents=True)
+    (out / "vmaps").mkdir(parents=True)
+    out.chmod(0o555)
+    try:
+        proc = _run_script(
+            tmp_path,
+            surgical.script(spec936(), "/x/bin", scratch_root=surgical.SCRATCH_ROOT),
+            client,
+            out,
+        )
+    finally:
+        out.chmod(0o755)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert len(list((out / "maps").iterdir())) == 9
+    assert (out / "vmaps" / "936.vmtree").is_file()
+    assert sorted(path.name for path in out.iterdir()) == ["maps", "vmaps"]
+    assert not _scratch(tmp_path).exists()
 
 
 def test_the_script_never_links_the_disabled_archive_into_the_main_client(tmp_path: Path) -> None:
@@ -211,7 +251,8 @@ def test_too_few_936_maps_fails_the_tool(tmp_path: Path) -> None:
     # T836: the count is read in the scratch before anything is copied or the vmaps run.
     assert list((out / "maps").iterdir()) == []
     assert "fake vmap_extractor" not in (tmp_path / "marker.txt").read_text(encoding="utf-8")
-    assert not (out / f"{surgical.SURGICAL_DIR}936").exists(), "the trap removes the scratch"
+    assert not (out / f"{surgical.SURGICAL_DIR}936").exists(), "nothing at the top of /out"
+    assert not _scratch(tmp_path).exists(), "the trap removes the scratch"
 
 
 @needs_bash
@@ -231,6 +272,7 @@ def test_a_missing_archive_stops_the_script_before_any_tool(tmp_path: Path, dang
     assert "patch-WB1.MPQ.DISABLED is missing or empty" in proc.stdout
     assert (tmp_path / "marker.txt").read_text(encoding="utf-8") == ""
     assert not (out / f"{surgical.SURGICAL_DIR}936").exists()
+    assert not _scratch(tmp_path).exists()
 
 
 # -- T836: which layout the plan and the preflight see ------------------------

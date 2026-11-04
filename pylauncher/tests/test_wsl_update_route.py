@@ -269,6 +269,8 @@ _GIT_FIELDS = {
     "file_lines",
     # T632: Tortoise's Return reads the migration files of both commits, as bytes.
     "tree_bytes",
+    # T862: the blob the world baseline file is at two commits (`git ls-tree`).
+    "blob_id",
 }
 """The seams that are git questions: bound to a `ContainerGit` that names the distro."""
 
@@ -559,8 +561,17 @@ class _Distro:
             return subprocess.CompletedProcess(cmd, 0, "29.1.3\n", "")
         if "image inspect" in text:
             return subprocess.CompletedProcess(cmd, 0, "sha256:0123\n", "")
+        if inner[:2] == ["docker", "images"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
         if " up " in f" {text} " and "compose" in text:
             return subprocess.CompletedProcess(cmd, 1, "", "the test stops the press here")
+        if "reset --hard" in text and mount:
+            # T863: the fetch moves the checkout even when the test stops the
+            # press later: `reset --hard` lands what the fetch brought, so the
+            # heads this double answers follow it the way `stream()`'s own
+            # reset branch already did. Without this the press reads every
+            # source as unmoved and ends before the compose the test is about.
+            self.heads[mount.replace(":/git", ":/git:ro")] = NEW
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     def stream(self, cmd: list[str], *a: object, **kw: object) -> Iterator[str]:
@@ -574,7 +585,15 @@ class _Distro:
 def _through_the_distro(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[_Distro, Path]:
     rec = Recorder()
     server_dir = tmp_path / "server"
-    install(rec, server_dir)
+    # T864: the install's success tail lists this install's dangling images;
+    # the distro's daemon is only patched in below, so hand the setup a quiet
+    # listing (the presses under test run against the distro fake).
+    install(
+        rec,
+        server_dir,
+        dangling_image_ids=lambda label: (),
+        remove_unused_image=lambda image: "",
+    )
     # The Linux spelling of the folder IS its path here, so the id the install
     # recorded is the one the distro's engine recomputes (see the identity tests).
     monkeypatch.setattr(

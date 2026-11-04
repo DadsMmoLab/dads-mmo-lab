@@ -660,7 +660,12 @@ class Runner:
     Its fabricated output goes straight to the `/out` mount even for a staged
     run, where the real tool writes into the farm and `STAGE_SCRIPT` copies the
     result across. That is the same net effect, and the copy itself is shell —
-    proved against a real `cp -rs`, not against this class.
+    proved against a real `cp -rs`, not against this class. For a SCRATCHED run
+    (cwd `/tmp`, T840) it instead lands the output in the host-made staging
+    folder with the copy marker, which is what `SCRATCH_SCRIPT`'s copy-back
+    leaves for `promote_copies()`: the double's tool, like the real one, starts
+    in an empty scratch folder and never sees `data/Buildings`, so no polluted
+    refusal fires there however stale the bind folder is.
 
     `vmap_extractor` is the one program this double knows anything about, and
     it knows the two things the pinned sources say (`cmangos/mangos-classic`
@@ -673,7 +678,7 @@ class Runner:
       the tool STATS and what it WRITES are different lists, and a double that
       conflated them fabricated the marker the guard was then tested on;
     * it exits 1 without writing anything when either STATTED name is already
-      there.
+      there — on the bind, where its cwd is `data/`.
 
     Both are needed to reach the state the review of 2026-09-05 measured on a
     real install — a finished `data/` whose evidence file has been deleted —
@@ -703,7 +708,8 @@ class Runner:
         sink(f"ran {program}")
         out = next(mount.host for mount in spec.mounts if mount.guest == "/out")
         extractor = Path(program).name in REFUSES_POLLUTED_OUTPUT
-        if extractor:
+        scratched = spec.argv[:2] == ("sh", "-c") and spec.workdir == extract.SCRATCH_WORKDIR
+        if extractor and not scratched:
             buildings = out / extract.BUILDINGS_DIR
             if any((buildings / marker).exists() for marker in extract.DIRTY_MARKERS):
                 words = "Your output directory seems to be polluted, please use an empty directory!"
@@ -711,7 +717,10 @@ class Runner:
                 return docker.AttachedRun(1, (words,))
         for folder, count in self.writes.get(program, {}).items():
             marked = self.FINISHED if extractor and folder == extract.BUILDINGS_DIR else ()
-            fill(out, folder, count, first=marked)
+            dest = f".yulon-copy-{folder}" if scratched else folder
+            fill(out, dest, count, first=marked)
+            if scratched:
+                (out / dest / ".yulon-copied").write_bytes(b"")
         if program in self.fail:
             code, words = self.fail.pop(program)
             return docker.AttachedRun(code, (words,))
@@ -739,6 +748,7 @@ def run(
     *,
     cancel: threading.Event | None = None,
     enforcing: bool | None = None,
+    scratch_off_bind: bool = False,
 ) -> list[str]:
     """Drive `run_plan` to exhaustion, with the SELinux answer stated rather than measured.
 
@@ -746,8 +756,20 @@ def run(
     default. A test that let the real probe answer would assert whatever THIS
     machine is — on Windows always "could not tell" — and would pass for a
     reason that has nothing to do with the code.
+
+    `scratch_off_bind` is `run_plan()`'s T840 switch, off unless a test asks:
+    every existing test drives the bind path exactly as before.
     """
-    return list(driven(plan, runner, tmp_path, cancel=cancel, enforcing=enforcing))
+    return list(
+        driven(
+            plan,
+            runner,
+            tmp_path,
+            cancel=cancel,
+            enforcing=enforcing,
+            scratch_off_bind=scratch_off_bind,
+        )
+    )
 
 
 def driven(
@@ -757,6 +779,7 @@ def driven(
     *,
     cancel: threading.Event | None = None,
     enforcing: bool | None = None,
+    scratch_off_bind: bool = False,
 ) -> Iterator[str]:
     """`run_plan()` with this module's fixtures bound, not yet consumed.
 
@@ -777,6 +800,7 @@ def driven(
         required_file=REQUIRED,
         client_build=8606,
         selinux_enforcing=lambda: enforcing,
+        scratch_off_bind=scratch_off_bind,
     )
 
 
@@ -1132,6 +1156,54 @@ def test_trinitycores_vmap4extractor_over_a_finished_buildings_is_refused_before
         run(plan, blocked, tmp_path)
     assert named_folder(str(caught.value)) == buildings
     assert blocked.names() == [], "refused before the first container, mapextractor included"
+
+
+def test_off_the_bind_a_leftover_buildings_dir_bin_does_not_refuse_the_tool(tmp_path: Path) -> None:
+    """T856-B: the MoP resume the bind guard would stop, run to completion off the bind.
+
+    Live on yulon-win11 2026-11-02: a vmap4extractor run interrupted under the old
+    on-the-bind code left `data/Buildings/dir_bin`, and the next press died before
+    any container in `run_plan()`'s up-front `blocking_output()` pass. That pass
+    is right on the bind — the tool's cwd IS `data/`, and the real extractor
+    exits on that leftover. Off the bind the tool starts in an empty scratch
+    `Buildings/` (`SCRATCH_SCRIPT` makes every `produces` folder fresh and links
+    nothing under a produced name in), and `promote_copies()` replaces the old
+    folder with the finished one — so the leftover can neither meet the tool
+    nor survive the run.
+
+    The old leftover and NO evidence: the double's vmap leg, like the real one,
+    refuses the bind folder and stays silent in scratch, so the bind leg of this
+    same state keeps refusing (the sentence below) while the scratch leg runs.
+    """
+    data = tmp_path / "server" / "data"
+    buildings = data / extract.BUILDINGS_DIR
+    buildings.mkdir(parents=True)
+    (buildings / extract.DIR_BIN).write_bytes(b"x")
+    assert extract.blocking_output(VMAP, data) == buildings, "not the state the bind guard refuses"
+
+    runner = Runner(FULL)
+    run(PLAN, runner, tmp_path, scratch_off_bind=True)
+    assert runner.names() == [
+        "ad",
+        "vmap_extractor",
+        "vmap_assembler",
+    ], "the vmap tool ran instead of being refused"
+    assert (buildings / extract.DIR_BIN).is_file()
+    assert not list(data.glob(".yulon-copy-*")), "staging folders leave nothing behind"
+    evidence = extract.read_evidence(data)
+    assert evidence is not None
+    assert [record.name for record in evidence.tools] == [AD.name, VMAP.name, ASSEMBLE.name]
+
+    # The same state on the bind still stops before the first container.
+    (data / extract.EVIDENCE_FILE).unlink()
+    shutil.rmtree(buildings)
+    buildings.mkdir(parents=True)
+    (buildings / extract.DIR_BIN).write_bytes(b"x")
+    bound = Runner(FULL)
+    with pytest.raises(InstallerError) as caught:
+        run(PLAN, bound, tmp_path)
+    assert named_folder(str(caught.value)) == buildings
+    assert bound.names() == [], "a container ran in a press that says nothing was run"
 
 
 def _data_snapshot(data_dir: Path) -> dict[str, bytes]:
@@ -3919,6 +3991,57 @@ def test_a_map_file_of_another_map_does_not_stand_in(tmp_path: Path) -> None:
         (tmp_path / "maps" / name).write_bytes(b"x")
     (tmp_path / "vmaps" / "000.vmtree").write_bytes(b"VMAP")
     assert extract.missing_map_data(tmp_path, (0,)) == ("map 0: no maps/000????.map",)
+
+
+def start_maps_4digit(data: Path, ids: Sequence[int]) -> None:
+    """The same set under TrinityCore 5.x/MoP's naming: `MMMM_YY_XX.map`, `MMMM.vmtree`."""
+    (data / "maps").mkdir(parents=True, exist_ok=True)
+    (data / "vmaps").mkdir(parents=True, exist_ok=True)
+    for map_id in ids:
+        (data / "maps" / f"{map_id:04}_32_48.map").write_bytes(b"MAPS")
+        (data / "vmaps" / f"{map_id:04}.vmtree").write_bytes(b"VMAP")
+
+
+def test_a_4_digit_named_start_map_set_passes_under_the_mop_naming(tmp_path: Path) -> None:
+    """T850 A2: `map_names="mmmm_yy_xx"` reads `maps/MMMM_YY_XX.map` and `vmaps/MMMM.vmtree`."""
+    start_maps_4digit(tmp_path, (0, 1, 530))
+    assert extract.missing_map_data(tmp_path, (0, 1, 530), map_names="mmmm_yy_xx") == ()
+
+
+def test_a_3_digit_named_set_is_missing_under_the_4_digit_naming(tmp_path: Path) -> None:
+    """The two namings do not stand in for each other; the phrase names the pattern asked for."""
+    start_maps(tmp_path, (0,))
+    assert extract.missing_map_data(tmp_path, (0,), map_names="mmmm_yy_xx") == (
+        "map 0: no maps/0000_??_??.map",
+        "map 0: no vmaps/0000.vmtree",
+    )
+
+
+def test_a_4_digit_named_set_is_missing_under_the_centurion_naming(tmp_path: Path) -> None:
+    """And the other way: the default still asks for `maps/MMMYYXX.map` (T850 A2)."""
+    start_maps_4digit(tmp_path, (0,))
+    assert extract.missing_map_data(tmp_path, (0,)) == (
+        "map 0: no maps/000????.map",
+        "map 0: no vmaps/000.vmtree",
+    )
+
+
+def test_a_4_digit_map_file_of_another_map_does_not_stand_in(tmp_path: Path) -> None:
+    """`MMMM_YY_XX.map` is exact too: the id and both grid numbers, two digits each."""
+    start_maps_4digit(tmp_path, ())
+    for name in (
+        "0001_32_48.map",
+        "000_32_48.map",
+        "0000_3_48.map",
+        "0000_32_4.map",
+        "0000_32_48.mapx",
+        "0000_32_48.mmap",
+    ):
+        (tmp_path / "maps" / name).write_bytes(b"x")
+    (tmp_path / "vmaps" / "0000.vmtree").write_bytes(b"VMAP")
+    assert extract.missing_map_data(tmp_path, (0,), map_names="mmmm_yy_xx") == (
+        "map 0: no maps/0000_??_??.map",
+    )
 
 
 def test_no_data_folder_at_all_is_every_half_missing(tmp_path: Path) -> None:

@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "yulon-squidbots-lite",
+  "name": "SquidBots Lite (CoA Bots add-on, client add-on)",
+  "type": "mod",
+  "game": "wow-coa",
+  "description": "The CoA Bots add-on: a thin bar of bot orders, the bots' roles on your party frames, bot offers as small toasts, and My alts with a sheet for every bot. Yu'lon puts it into your CoA client's Interface/AddOns by itself and brings it up to date when you update the server; nothing is written to the server. Remove it here and Yu'lon leaves it out from then on.",
+  "source": {
+    "repo": "Zyth45/squidbots-addon",
+    "follow": "releases"
+  },
+  "build": {
+    "rebuild": false,
+    "restart": false
+  },
+  "client": [
+    {
+      "src": "SquidBotsLite",
+      "dest": "addons",
+      "name": "SquidBotsLite"
+    }
+  ],
+  "notes": [
+    "FOLLOWS RELEASES (T126, T870): Install and Update take the newest published release's commit, not the",
+    "branch tip. Zyth45/squidbots-addon tags v<x.y[.z]> on the same day as each CoA Bots (mod-playerbots) release;",
+    "the tags are not one-to-one with the server's, so the add-on follows the newest release and moves with the",
+    "server's Update the server to latest (T814's pairing), not with the server's tag.",
+    "ON BY DEFAULT (T870): one of CoA's default add-ons (controller_wow_coa.modules.DEFAULT_ADDONS), put in by",
+    "itself at a fresh install, at every tab open and at Play, never again once the player removed it (T612). Only",
+    "into a folder that holds Interface/ or ascension.exe. A copy the player brought from a link or a folder wins.",
+    "Only `SquidBotsLite/` is copied: the repository root also holds README, images/ and release/ (old zips).",
+    "The tag's SquidBotsLite/ tree is byte-identical to the release zip SquidBotsLite-v<ver>.zip (checked for",
+    "v2.9.1, 2026-11-04). Interface 30300 against this entry's 30300 CoA client. Update client never writes",
+    "Interface/AddOns/SquidBotsLite/ (coa_client._EXCLUDED_TREES). Remove leaves the folder in the client, as for",
+    "every shipped add-on; the game's AddOns menu turns it off. \"Check for updates\" counts only modules/, so this",
+    "mod gets no update count (T855's known limit); a manual Update follows releases.",
+    "Credit: SquidBots Lite by the CoA Bots team (Zyth45), GPL-2.0. Yu'lon downloads it from GitHub on the",
+    "player's computer and ships none of its files."
+  ]
+}

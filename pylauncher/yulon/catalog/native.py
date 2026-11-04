@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import difflib
 import functools
+import hashlib
 import inspect
 import io
 import json
@@ -69,7 +70,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, ExitStack, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -85,6 +86,7 @@ from yulon import (
     forgetting,
     git,
     module_answers,
+    module_moves,
     networking,
     platform,
     realm_flag,
@@ -99,7 +101,7 @@ from yulon import (
     update_failure,
 )
 from yulon.after_stop import PutBackAfterStop, TrueAfterStop, withdraw_stop
-from yulon.apply import module_git
+from yulon.apply import module_git, rebuilds_owed_now
 from yulon.catalog import (
     bot_count,
     build_context,
@@ -4104,7 +4106,10 @@ not write it (an older Yu'lon) are not trusted either.
 A file of its own and not a key in `STATE_FILE`, for `BUILD_CACHE_FILE`'s reason: the spine
 and the update route write the install record from copies taken at their start, which would
 put a forgotten key back. `.yulon*`, so outside the build fingerprint (`build_context`).
-`{"version": 1, "sources": {"<repo>": "<full sha>"}}`.
+`{"version": 1, "sources": {"<repo>": "<full sha>"}}`, and since T863 `"written":
+"<sha256>"` -- `written_digest()` of the files this app's write-back leaves in the
+checkouts. A record an older Yu'lon wrote has no `written`; a reader that needs it takes
+that as "a build is owed" rather than trusting the commits alone.
 """
 
 
@@ -4122,8 +4127,52 @@ def source_heads(server_dir: Path, sources: Sequence[EmulatorSource]) -> dict[st
     return heads
 
 
-def remember_built_from(server_dir: Path, heads: Mapping[str, str]) -> None:
+def written_digest(server_dir: Path, paths: Mapping[str, Sequence[str]]) -> str | None:
+    """A sha256 over the files this app's write-back may write in a checkout (T863).
+
+    `paths` is `StagedInstaller.app_written_paths()`: the compose files over a server
+    dir's own checkout, a family's carried patch targets. One entry per file, sorted by
+    the path relative to `server_dir`, and each entry is that path, a NUL, either the
+    sha256 of the file's bytes or the literal `missing`, and a NUL. So the same content
+    in the same places always hashes the same, and a write-back that creates a file
+    counts as a change.
+
+    Written into `BUILT_FROM_FILE` after a build finishes and compared with the files on
+    disk by the update route's no-move exit: a Yu'lon that writes content different from
+    what the running build was made from has left the image stale, and that press
+    recompiles.
+
+    `None` when a file that is there cannot be read: unknown, so no exit is taken.
+    """
+    rows: list[tuple[str, str]] = []
+    for key, relatives in paths.items():
+        root = server_dir / key
+        for relative in relatives:
+            path = root / relative
+            try:
+                content = hashlib.sha256(path.read_bytes()).hexdigest()
+            except FileNotFoundError:
+                content = "missing"
+            except OSError as exc:
+                logger.warning(f"could not read {path} to fingerprint what this app wrote: {exc}")
+                return None
+            rows.append((path.relative_to(server_dir).as_posix(), content))
+    digest = hashlib.sha256()
+    for relative, content in sorted(rows):
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(content.encode("utf-8") + b"\0")
+    return digest.hexdigest()
+
+
+def remember_built_from(
+    server_dir: Path, heads: Mapping[str, str], *, written: str | None = None
+) -> None:
     """Write `BUILT_FROM_FILE` (T589), or forget it when no checkout could be read. Never raises.
+
+    `written` (T863) is `written_digest()` of the files this app's write-back leaves in
+    the checkouts, taken after that write-back. `None` -- because a file could not be
+    read, or a caller that has nothing to compare -- writes the record an older Yu'lon
+    wrote: readable, and the no-move exit is not taken on it.
 
     A record that cannot be written is logged and left absent, which readers take as "not
     known": the cost is a button withheld, never one offered on the wrong build.
@@ -4133,7 +4182,9 @@ def remember_built_from(server_dir: Path, heads: Mapping[str, str]) -> None:
         return
     path = server_dir / BUILT_FROM_FILE
     staged = path.with_name(path.name + ".yulon-new")
-    record = {"version": 1, "sources": dict(sorted(heads.items()))}
+    record: dict[str, Any] = {"version": 1, "sources": dict(sorted(heads.items()))}
+    if written is not None:
+        record["written"] = written
     try:
         staged.write_text(json.dumps(record) + "\n", encoding="utf-8")
         os.replace(staged, path)
@@ -4173,6 +4224,58 @@ def read_built_from(server_dir: Path) -> dict[str, str]:
         for repo, sha in rows.items()
         if isinstance(repo, str) and isinstance(sha, str) and sha
     }
+
+
+def read_built_from_written(server_dir: Path) -> str | None:
+    """The `written` digest in `BUILT_FROM_FILE` (T863), or None for no record or an old one.
+
+    None is also a record this build cannot use: absent, unreadable, or written by a
+    Yu'lon older than T863, whose build was compiled from files nobody fingerprinted.
+    """
+    path = server_dir / BUILT_FROM_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning(f"{path} could not be read ({exc}); the build is taken as not known")
+        return None
+    written = raw.get("written") if isinstance(raw, dict) else None
+    return written if isinstance(written, str) and written else None
+
+
+def module_moves_owed(server_dir: Path) -> bool:
+    """Is a module update nobody has built yet in the T557 record, or can it not be read?
+
+    The update route's no-move exit asks this before it ends without a build: a Modules-tab
+    Update resets the clone before anything compiles, and only a build settles it
+    (`module_moves.settle()`, which the Rebuild the exit would skip runs). Each move is
+    read against its clone's HEAD, exactly as `Applier.unbuilt_updates()` reads it.
+
+    A clone whose folder is not its id is not found here, and neither is a record that
+    cannot be read: both answer True, so the press rebuilds rather than skip a build it
+    may owe.
+    """
+    ledger = module_moves.read(server_dir)
+    if ledger is None:
+        return True
+    for item, move in ledger.moves.items():
+        family, _slash, item_id = item.partition("/")
+        if family != "module" or not item_id:
+            continue
+        head = read_head_file(server_dir / "modules" / item_id)
+        if head is None or move.unbuilt_at(head):
+            return True
+    return False
+
+
+NOTHING_BUILT = object()
+"""What `StagedInstaller.update_to_latest()` returns when it ended without compiling (T863).
+
+`install_wiring.with_module_moves()` reads the generator's return value: a press that
+builds settles the module-update record, and this one must not -- `module_moves.settle()`
+would erase moves nobody has built, which is exactly what the exit refused to skip.
+"""
 
 
 def built_carries_pin(built: str, pin: str, row: SourceRev | None) -> bool:
@@ -4635,17 +4738,35 @@ def parked_build_note(server_dir: Path) -> str | None:
     )
 
 
+def _no_size() -> int | None:
+    """No size answer: a kept-build route that does not weigh its images."""
+    return None
+
+
+@dataclass(frozen=True)
+class KeptBuildRemoved:
+    """What letting go of the kept build did: its sentence, and whether it went (T864 R2)."""
+
+    ok: bool
+    """True once no `-parked` name is left: the record is forgotten and the build is gone."""
+    line: str
+    """The sentence for the player, on either exit."""
+
+
 @dataclass(frozen=True)
 class KeptBuildRoute:
     """The two halves of the Server tab's kept-build banner (T224, D3), wired for one install.
 
     `check` reads only `PARKED_BUILD_FILE` and never raises: the note, or None.
-    `remove` lets the `-parked` names go and forgets the record, and returns the
-    sentence that says what it did.
+    `remove` lets the `-parked` names go and forgets the record, and returns
+    `KeptBuildRemoved`: `ok` says whether anything counts as freed (T864 R2),
+    `line` the sentence that says what it did.
+    `size` is what the `-parked` images take, up to (T864); None unknown.
     """
 
     check: Callable[[], str | None]
-    remove: Callable[[], str]
+    remove: Callable[[], KeptBuildRemoved]
+    size: Callable[[], int | None] = _no_size
 
 
 @dataclass(frozen=True)
@@ -5054,6 +5175,21 @@ class ReleaseTarget:
     rev: str
     """The release's commit, or the checkout's own HEAD when that already contains it."""
     line: str
+    branch: str | None = None
+    """The branch the fetch names for a branch-released source (T862); None = its own."""
+
+
+@dataclass(frozen=True)
+class BranchReleasePlan:
+    """The newest release branch and what each release-mode source moves to (T862)."""
+
+    branch: upstream.ReleaseBranch
+    commits: Mapping[str, tuple[str, str]]
+    """repo -> (name recorded and said, sha): the core's branch, each bots tag."""
+    missing: tuple[tuple[str, str], ...]
+    """`(repo, tag)` of paired tags not published: a release without its bots."""
+    branch_repo: str = ""
+    """The repo the release_branches source names: the refused-baseline hold reads it."""
 
 
 @dataclass(frozen=True)
@@ -5076,7 +5212,11 @@ class SourceRev:
       off the catalog when the line is drawn, because the two are different
       questions: "what was this measured against" is a fact about the press,
       and a later app version that moves the pin must not be able to rewrite
-      what an earlier press did.
+      what an earlier press did. The one exception is a press that compiled
+      NOTHING: `_record_unbuilt_refresh()` refreshes `pin` (and recounts
+      `ahead`) for a build the app still describes, because that press is the
+      new app version's reading of the same build, and a pin left behind
+      withholds Revive and the mmaps stamp from it (T863-D).
     * `ahead` is how many commits `built` carries that `pin` does not, or
       `None` for "could not count". `None` and `0` are deliberately different:
       zero is "you are on the tested pin" and `None` is "nobody could say",
@@ -5371,10 +5511,19 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
 
 
 def _refused_for(record: InstallState | None, source: EmulatorSource) -> str:
-    """The commit an update of `source` refused, for a branch-following source; else ""."""
+    """The commit an update of `source` refused, for any source but a releases one; else ""."""
     if record is None or source.follow == "releases":
         return ""
     return next((sha for repo, sha in record.refused_updates if repo == source.repo), "")
+
+
+def _branch_moved_from(source: EmulatorSource, record: InstallState | None) -> str | None:
+    """The branch this checkout's HEAD came from (T862): the release it moved to, else its own."""
+    if source.follow == "release_branches" and record is not None and source.release_prefix:
+        row = record.rev_for(source.repo)
+        if row is not None and upstream.release_version(row.release, source.release_prefix):
+            return row.release
+    return source.branch
 
 
 def _parse_refused(raw: object) -> tuple[tuple[str, str], ...]:
@@ -6007,6 +6156,11 @@ def _git_is_ancestor(dest: Path, old: str, new: str) -> bool | None:
 def _git_tree_files(dest: Path, rev: str, paths: Sequence[str]) -> tuple[str, ...] | None:
     """The files one commit of this checkout tracks under `paths`, containerised (T630)."""
     return git.ContainerGit().tree_files(dest, rev, paths)
+
+
+def _git_blob_id(dest: Path, rev: str, path: str) -> str | None:
+    """The blob `path` is at `rev` in this checkout, containerised (T862)."""
+    return git.ContainerGit().blob_id(dest, rev, path)
 
 
 def _git_tree_bytes(dest: Path, rev: str, path: str) -> dict[str, bytes] | None:
@@ -7446,9 +7600,21 @@ class Seams:
     to hash the migration files its databases' `migrations` table keys by hash, and to
     read the module's own install rules for where they go.
     """
+    blob_id: Callable[[Path, str, str], str | None] = _git_blob_id
+    """T862: the blob of one file at one commit; `""` = no such file, None = no answer.
+
+    What a move to a newer release asks of the world baseline file on both sides of the move.
+    """
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build_cache_bytes: Callable[[], int | None] = docker.build_cache_bytes
     """How much build cache Docker holds; preflight counts it for a resumed build (T203)."""
+    dangling_image_ids: Callable[[str], tuple[str, ...] | None] = docker.dangling_image_ids
+    containers_on: Callable[[str], tuple[docker.ContainerRef, ...] | None] = docker.containers_on
+    """T864-E: every container still referencing an image, whatever its state; None = no
+    answer."""
+    remove_finished_container: Callable[[str], str] = docker.remove_finished_container
+    """T864-E: `docker rm` of one finished container by its id; `""` when it went, else the
+    daemon's sentence."""
     folder_bytes: Callable[[Path], int | None] = folder_bytes
     """What the server folder already holds; preflight counts it for a resumed build (T203)."""
     image_id: Callable[[str], str | None] = docker.image_id
@@ -7562,6 +7728,7 @@ class Seams:
     compile is a copy of the new build, and one restored without a recreate
     leaves the failed build running.
     """
+    remove_unused_image: Callable[[str], str] = docker.remove_unused_image
     wait_db_healthy: Callable[[docker.ContainerSpec], bool] = docker.wait_db_healthy_for
     wait_ready: Callable[[docker.ContainerSpec, docker.ReadySpec], bool] = docker.wait_ready_for
     container_tail: Callable[[str], str | None] = _container_tail
@@ -7883,8 +8050,12 @@ class Seams:
             is_ancestor=repo.is_ancestor,
             file_lines=repo.file_lines,
             tree_bytes=repo.tree_bytes,
+            blob_id=repo.blob_id,
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),
+            dangling_image_ids=on(docker.dangling_image_ids, wsl_distro=distro),
+            containers_on=on(docker.containers_on, wsl_distro=distro),
+            remove_finished_container=on(docker.remove_finished_container, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),
             build=on(docker.build_staged, wsl_distro=distro),
             context_fingerprint=_no_fingerprint,
@@ -7906,6 +8077,7 @@ class Seams:
             remove_service=on(docker.compose_remove_service, wsl_distro=distro),
             tag_image=on(docker.tag_image, wsl_distro=distro),
             remove_image=on(docker.remove_image, wsl_distro=distro),
+            remove_unused_image=on(docker.remove_unused_image, wsl_distro=distro),
             wait_db_healthy=on(docker.wait_db_healthy_for, wsl_distro=distro),
             wait_ready=on(docker.wait_ready_for, wsl_distro=distro),
             world_output=on(_world_output, wsl_distro=distro),
@@ -8040,7 +8212,7 @@ def _end_on_loss(
 
 def _reserving(
     press: str | Callable[[Mapping[str, Any]], str],
-) -> Callable[[Callable[..., Iterator[str]]], Callable[..., Iterator[str]]]:
+) -> Callable[[Callable[..., Iterator[str]]], Callable[..., Generator[str, None, object]]]:
     """Decorate a press (a generator method) so it holds its server's reservation (T568).
 
     The reservation is taken when the press starts running, after the player's Yes and
@@ -8051,20 +8223,29 @@ def _reserving(
     function of the call's arguments that says it (Update and Return to the pin are one method).
     """
 
-    def decorate(method: Callable[..., Iterator[str]]) -> Callable[..., Iterator[str]]:
+    def decorate(
+        method: Callable[..., Iterator[str]],
+    ) -> Callable[..., Generator[str, None, object]]:
         signature = inspect.signature(method)
 
         @functools.wraps(method)
-        def reserved(self: StagedInstaller, *args: Any, **kwargs: Any) -> Iterator[str]:
+        def reserved(
+            self: StagedInstaller, *args: Any, **kwargs: Any
+        ) -> Generator[str, None, object]:
             given = signature.bind(self, *args, **kwargs).arguments
             options = given.get("options") or InstallOptions()
             named = press if isinstance(press, str) else press(given)
             done = threading.Event()
+            returned: object = None
             with self._reservation(self.server_dir(options), named, given.get("cancel")) as held:
                 if held is not None:
                     kwargs["cancel"] = _end_on_loss(held, given.get("cancel"), done)
                 try:
-                    yield from method(self, *args, **kwargs)
+                    # T863: the value must reach the wiring (`with_module_moves()` reads
+                    # the Update's NOTHING_BUILT) as the method's own caller would see it.
+                    returned = yield from cast(
+                        Generator[str, None, object], method(self, *args, **kwargs)
+                    )
                 except GeneratorExit:
                     raise
                 except BaseException:
@@ -8073,6 +8254,7 @@ def _reserving(
                     raise
                 finally:
                     done.set()
+            return returned
 
         return reserved
 
@@ -8644,6 +8826,7 @@ class StagedInstaller:
                 self._locking(self.stages(), server_dir, started_empty),
                 ctx,
                 run=ERROR_RUN_INSTALL,
+                builds=True,
             )
         except ReadyWaitStopped as stopped:
             # T247: the containers are up, and the world is still loading -- or,
@@ -8674,6 +8857,7 @@ class StagedInstaller:
         # After the realm row, for `_advertise_realm()`'s reason: a background job
         # is a sentence, never a failed install (T179's movement maps).
         yield from self.after_ready(server_dir)
+        yield from self._free_own_old_images(server_dir)
         # The bash path logs `install of <id> finished` (installer.py); this path
         # logged nothing at the end, so the only sign a run had ended was the
         # compose-project pin - which is how a tester on yulon-win11 (2026-08-28)
@@ -8731,7 +8915,13 @@ class StagedInstaller:
         return INSTALL_WORLD_STOPPED
 
     def _staged(
-        self, stages: Sequence[Stage], ctx: StageContext, *, run: str = ""
+        self,
+        stages: Sequence[Stage],
+        ctx: StageContext,
+        *,
+        run: str = "",
+        builds: bool = False,
+        press: str = INSTALL_PRESS,
     ) -> Generator[str, None, InstallState]:
         """Run `stages` in order, saying where the user is. The ONE progress reporter.
 
@@ -8767,6 +8957,19 @@ class StagedInstaller:
         during the extraction, 2026-09-08. The record belongs to whoever holds
         the current state, and after this change that is exactly one function.
 
+        **`builds` is about the FREE DOCKER SPACE press, not about this loop.**
+        Only the install's `run()` and `rebuild()` pass True, because only they
+        run a `build` stage; their whole loop counts as compiling
+        (`docker.building()`), which refuses Free Docker space (T864 R3). An
+        update, a repair, corrections and an adopt pass through the same loop
+        with no compile at all, and counting them refused the press with a
+        sentence about an install building when nothing was (T864 review).
+        Writing Docker's cache for a minute is not a reason to skip the press.
+        `press` is the name the server's reservation carries at `start-db`: the
+        caller's own (a repair's or an update's), never the install's by
+        default, so the label another Yu'lon and `build_press_refusal()` read
+        names the press that is actually running.
+
         **T841's cleanup stop is HERE for the same reason, and for its own.**
         An install whose world came up and then stopped must stop that world
         (nothing watches an unfinished install, and `restart: unless-stopped`
@@ -8784,7 +8987,8 @@ class StagedInstaller:
         reservation = ExitStack()
         reserved = False
         try:
-            with reservation, self._held_awake() as note:
+            compiling = docker.building(ctx.server_dir) if builds else nullcontext()
+            with reservation, self._held_awake() as note, compiling:
                 if note:
                     yield note
                 try:
@@ -8795,7 +8999,7 @@ class StagedInstaller:
                             held = reservation.enter_context(
                                 self._reservation(
                                     ctx.server_dir,
-                                    INSTALL_PRESS,
+                                    press,
                                     ctx.cancel,
                                     images=self.image_refs_at(ctx.server_dir),
                                 )
@@ -9119,7 +9323,7 @@ class StagedInstaller:
             for stage in planned
         )
         ctx = self._update_context(server_dir, cancel)
-        yield from self._staged(stages, ctx)
+        yield from self._staged(stages, ctx, press=UPDATES_BUTTON_LABEL)
         # T808: an update may write the realm row again (the shared post-import step).
         yield from self._apply_realm_name(ctx, "The database updates are applied")
 
@@ -9178,7 +9382,7 @@ class StagedInstaller:
         yield REPAIR_DATABASE_OPENING_NOTE
         self._check_cancel(cancel)
         ctx = replace(self._update_context(server_dir, cancel), updates_only=False)
-        yield from self._staged(self.repair_database_stages(), ctx)
+        yield from self._staged(self.repair_database_stages(), ctx, press=REPAIR_DATABASE_PRESS)
         # T808: the import just seeded the catalog's realm name into the new login database.
         yield from self._apply_realm_name(ctx, "The database was made again")
         yield (
@@ -9408,7 +9612,7 @@ class StagedInstaller:
             )
             for stage in (self.stage_named("start-db"), self.stage_named("import"))
         )
-        yield from self._staged(stages, ctx)
+        yield from self._staged(stages, ctx, press=CORRECTIONS_BUTTON_LABEL)
         # T808: a corrected phase may write the realm row again (the shared post-import step).
         yield from self._apply_realm_name(ctx, "The corrections are applied")
         if stopped:
@@ -9873,7 +10077,7 @@ class StagedInstaller:
         )
         ctx = self._update_context(server_dir, cancel)
         try:
-            yield from self._staged(stages, ctx)
+            yield from self._staged(stages, ctx, press=ADOPT_BUTTON_LABEL)
         except BaseException:
             # Logged and not yielded: a generator whose consumer has abandoned
             # it may not yield again, and a press that failed has already said
@@ -10268,7 +10472,7 @@ class StagedInstaller:
                 ) from exc
         yield HELD_REMOVED
 
-    @_reserving(server_build_presses.REBUILD)
+    @_reserving(lambda given: given.get("press") or server_build_presses.REBUILD)
     def rebuild(
         self,
         options: InstallOptions | None = None,
@@ -10670,7 +10874,11 @@ class StagedInstaller:
             ctx, refs, missing_ok=missing_images_ok, held=held is not None
         )
         try:
-            state = yield from self._staged(stages, ctx)
+            # `press`, never REBUILD: this loop's reservation (a family whose rebuild opens
+            # the database first) is the update route's or the player's own, and another
+            # Yu'lon reading `presses_running()` must not be told "Rebuild" while an Update
+            # or a Return to the pin is what runs (T864 review round 3).
+            state = yield from self._staged(stages, ctx, builds=True, press=press)
         except InstallerError as exc:
             # FIRST, and outside every rollback branch below, because it is not
             # about the images at all: `touched` False is the whole window the
@@ -10736,8 +10944,11 @@ class StagedInstaller:
                 # server never came up at all is a build worth putting back, and
                 # that is the whole of what this subclass separates.
                 yield from self._release(kept)
-                # T589: the new build is what the tags name, and it started.
-                remember_built_from(server_dir, compiled_from)
+                # T589: the new build is what the tags name, and it started. T863: and the
+                # files this app's write-back left in the checkouts, as it was compiled.
+                remember_built_from(
+                    server_dir, compiled_from, written=self._app_written_digest(server_dir)
+                )
                 # The new build started: as a success, the stopped build's record goes.
                 also = self._forget_the_stopped_build(server_dir)
                 # T680 (L11): and so do the two start records, as on a success. Every tag
@@ -10931,8 +11142,10 @@ class StagedInstaller:
         # T217: the build now running was made from the folders as they are.
         forget_sources_off(server_dir)
         # T589: and from these commits. Before `after_ready()`, which may start the movement
-        # map job that stamps its generation from this record.
-        remember_built_from(server_dir, compiled_from)
+        # map job that stamps its generation from this record. T863: the `written` half is
+        # the files this app's write-back left in the checkouts, hashed now that the press
+        # owns them; the update route's no-move exit compares it with them.
+        remember_built_from(server_dir, compiled_from, written=self._app_written_digest(server_dir))
         if landed is not None:
             landed()
         if own_copy is not None:
@@ -10946,6 +11159,7 @@ class StagedInstaller:
         if held is not None:
             yield held_rebuild_ending(self.entry.name, server_dir)
             return
+        yield from self._free_own_old_images(server_dir)
         # T739: the update route's own work ran the importer too (T220) for the family whose
         # Rebuild imports, and may have applied SQL for the others; "ran no SQL" is said only
         # by a plain Rebuild that ran none.
@@ -10956,31 +11170,37 @@ class StagedInstaller:
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
 
     @_reserving_call(REMOVE_KEPT_BUILD_LABEL)
-    def remove_kept_build(self, options: InstallOptions | None = None) -> str:
+    def remove_kept_build(self, options: InstallOptions | None = None) -> KeptBuildRemoved:
         """Remove the kept build now: "Remove kept build…" on the Server tab (T224, D3).
 
         Every `<ref>-parked` name is let go (`_let_go()`, whose `-f` covers a stopped
         container), and only when none is left is the record forgotten: a name Docker
         kept, or a Docker that did not answer, leaves the build recorded and the
         banner up (Codex adversarial review). `remove_image()` reads "no such image"
-        as done. Returns the sentence; never raises for Docker's refusals.
+        as done. Returns `KeptBuildRemoved`; never raises for Docker's refusals.
         """
         server_dir = self.server_dir(options or InstallOptions())
         names = [ref + PARKED_TAG_SUFFIX for ref in self.image_refs_at(server_dir)]
         left = self._let_go(names)
         if left:
-            return (
-                f"The kept build was not removed: Docker would not remove {', '.join(left)} (the "
-                f"log says why). It is still kept; press {REMOVE_KEPT_BUILD_LABEL} again once "
-                f"Docker answers."
+            return KeptBuildRemoved(
+                ok=False,
+                line=(
+                    f"The kept build was not removed: Docker would not remove {', '.join(left)} "
+                    f"(the log says why). It is still kept; press {REMOVE_KEPT_BUILD_LABEL} "
+                    f"again once Docker answers."
+                ),
             )
         forgot = forget_parked_build(server_dir)
         if forgot:
-            return (
-                f"The kept build was removed from Docker, but {forgot}; the next rebuild "
-                f"forgets it."
+            return KeptBuildRemoved(
+                ok=True,
+                line=(
+                    f"The kept build was removed from Docker, but {forgot}; the next rebuild "
+                    f"forgets it."
+                ),
             )
-        return "The kept build was removed."
+        return KeptBuildRemoved(ok=True, line="The kept build was removed.")
 
     # ------------------------------------------------------- update to latest (T64)
 
@@ -11013,14 +11233,42 @@ class StagedInstaller:
         found: list[upstream.SourceNews] = []
         asked = False
         record = read_state(server_dir, valid=())
+        branches: BranchReleasePlan | None = None
+        release_sources = [s for s in moving if s.follow in ("release_branches", "release_tag")]
+        stale_release = any(s.repo not in fresh for s in release_sources)
+        # T862 (review round 2): the release pair is ONE generation. A stale
+        # bots row beside a fresh core row once left the core row's held /
+        # release in place for a day, so the tab said "bots are not out" after
+        # the tag appeared (or an older pair after the plan moved on). When
+        # any release-mode row is stale or missing, every release-mode row is
+        # recomputed from the one resolved plan with the same timestamp.
+        if stale_release:
+            branches = self._newest_branch_release(release_sources)
+            release_fresh = False
+        else:
+            release_fresh = any(s.repo in fresh for s in release_sources)
         for index, source in enumerate(moving):
             kept = fresh.get(source.repo)
-            if kept is not None:
+            if kept is not None and (
+                source.follow not in ("release_branches", "release_tag") or release_fresh
+            ):
                 found.append(kept)
                 continue
             asked = True
             label = "server" if index == 0 else source.repo.rsplit("/", 1)[-1]
-            stands, release = self._behind(server_dir, source, refused=_refused_for(record, source))
+            if source.follow in ("release_branches", "release_tag"):
+                stands, release, held = self._behind_branch(
+                    server_dir,
+                    source,
+                    branches,
+                    refused=_refused_for(record, source),
+                    held_refused=self._baseline_refused(record, branches),
+                )
+            else:
+                behind, release = self._behind(
+                    server_dir, source, refused=_refused_for(record, source)
+                )
+                stands, held = behind, ""
             found.append(
                 upstream.SourceNews(
                     repo=source.repo,
@@ -11031,6 +11279,7 @@ class StagedInstaller:
                     follow=source.follow,
                     release=release,
                     installed=_installed_release(record, source.repo),
+                    held=held,
                 )
             )
         taken = clock if asked or not found else min(row.checked_unix for row in found)
@@ -11038,6 +11287,64 @@ class StagedInstaller:
         if asked and (server_dir / STATE_FILE).is_file():
             upstream.write_cached(server_dir, news)
         return news
+
+    def _behind_branch(
+        self,
+        server_dir: Path,
+        source: EmulatorSource,
+        branches: BranchReleasePlan | None,
+        *,
+        refused: str = "",
+        held_refused: bool = False,
+    ) -> tuple[upstream.Comparison | None, str, str]:
+        """How a release-mode source stands to the newest release branch (T862).
+
+        `(comparison, release name, held sentence)`. `(None, "")` with no held when
+        the listing could not be read. When the bots tag is missing every
+        release-mode row counts 0 with no release, and the release_branches row
+        carries the held sentence instead. A refused baseline holds the whole
+        paired release: while the newest release branch's commit still matches a
+        refused commit, every release-mode row counts 0 with no release and no
+        held sentence (review round 1).
+        """
+        slug = upstream.github_slug(source.repo)
+        if slug is None or branches is None:
+            return None, "", ""
+        if branches.missing:
+            held = ""
+            if source.follow == "release_branches":
+                _repo, tag = branches.missing[0]
+                held = upstream.bots_not_out_line(branches.branch.name, _repo, tag)
+            return upstream.Comparison(ahead=0, behind=0, status="identical"), "", held
+        try:
+            name, sha = branches.commits[source.repo]
+        except KeyError:
+            return None, "", ""
+        if held_refused:
+            return upstream.Comparison(ahead=0, behind=0, status="identical"), "", ""
+        if refused == sha:
+            return upstream.Comparison(ahead=0, behind=0, status="identical"), "", ""
+        head = self._seams.head_sha(server_dir / source.dest)
+        if head is None:
+            return None, "", ""
+        return upstream.compare(slug, head, sha, get=self._seams.upstream_get), name, ""
+
+    @staticmethod
+    def _baseline_refused(record: InstallState | None, branches: BranchReleasePlan | None) -> bool:
+        """Is the newest release branch's own commit already a refused one (T862)?
+
+        `_refuse_a_new_world_baseline` remembers only the core row's commit, but
+        the bots row moves to its paired tag in the same press: offering it
+        again would refuse again. While the listing's newest branch still names
+        that commit, the whole paired release holds.
+        """
+        if record is None or branches is None or branches.missing:
+            return False
+        try:
+            _name, sha = branches.commits[branches.branch_repo]
+        except KeyError:
+            return False
+        return any(commit == sha for _repo, commit in record.refused_updates)
 
     def _behind(
         self, server_dir: Path, source: EmulatorSource, *, refused: str = ""
@@ -11220,6 +11527,60 @@ class StagedInstaller:
         """
         return iter(())
 
+    def _nothing_moved(
+        self,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+        earlier: Mapping[Path, SourceOff],
+    ) -> bool:
+        """Did the moves loop leave every source on the commit it was on before (T863).
+
+        True only when each `(source, dest, old)` still reads as `old` off
+        `head_sha()` and no folder an earlier press left off its build is owed one
+        (`earlier`, T680/T758: a build IS owed then). A head git will not answer
+        (`None`) reads as moved: unknown, so the normal path runs and its own
+        refusals say so. The refusals at the top of `update_to_latest()` already
+        cover unfinished restores and imports; nothing else is asked here.
+
+        What the RUNNING build was compiled from is not asked here: that is
+        `_built_from_what_is_here()`, which reads the durable record rather than
+        what this press saw move.
+        """
+        if earlier:
+            return False
+        for _source, dest, old in moved:
+            head = self._seams.head_sha(dest)
+            if head is None or head != old:
+                return False
+        return True
+
+    def _app_written_digest(self, server_dir: Path) -> str | None:
+        """`written_digest()` of the files this installer's write-back writes (T863)."""
+        return written_digest(server_dir, self.app_written_paths(server_dir))
+
+    def _built_from_what_is_here(self, server_dir: Path) -> bool:
+        """Is the running build exactly what `BUILT_FROM_FILE` names? (T863)
+
+        The one check behind the no-move exit, and it asks the durable record rather
+        than what this press saw move: the record must name the commit each of this
+        entry's sources is on now, in full, and the `written` digest of the files this
+        app's write-back leaves in them.
+
+        Anything else reads as "a build is owed" and the press takes the full path: no
+        record, a record an older Yu'lon wrote (no `written`), a commit that differs, a
+        file that cannot be read, or a checkout git will not name. The commits are read
+        off `head_sha()`, the same seam `_nothing_moved()` uses, so a head git will not
+        answer is unknown rather than a match.
+        """
+        record = read_built_from(server_dir)
+        written = read_built_from_written(server_dir)
+        if not record or written is None:
+            return False
+        for source in self.entry.emulator.sources:
+            head = self._seams.head_sha(server_dir / source.dest)
+            if head is None or record.get(source.repo) != head:
+                return False
+        return self._app_written_digest(server_dir) == written
+
     @_reserving(
         lambda given: (
             server_build_presses.RETURN_TO_PIN
@@ -11234,11 +11595,16 @@ class StagedInstaller:
         to_pin: bool = False,
         cancel: threading.Event | None = None,
         rewritten_ok: Collection[str] = (),
-    ) -> Iterator[str]:
+    ) -> Generator[str, None, object]:
         """Move this install's sources and rebuild on them. Yields output live (T64).
 
         `rewritten_ok` names the sources whose rewritten history the player's
         confirmation already described (T126); see `_release_targets()`.
+
+        The generator's return value is `NOTHING_BUILT` when the press ended without
+        compiling anything (T863): `install_wiring.with_module_moves()` reads it so a
+        press that built nothing does not settle the module-update record. Every other
+        return is the `None` it always was.
 
         The owner's ask of 2026-09-15, in one route for all four families: "a
         update server to latest, with a warning and recommendation to take a
@@ -11358,7 +11724,7 @@ class StagedInstaller:
         # fetch, for `_refuse_unless_updatable()`'s reason: a press that moved
         # the core and then could not say which release the bots are on would
         # leave the folder half a version ahead of the image.
-        targets = {} if to_pin else self._release_targets(plan, rewritten_ok)
+        targets = {} if to_pin else self._release_targets(plan, rewritten_ok, server_dir)
         where = "the commit this app was tested against" if to_pin else "the newest upstream code"
         press = (
             server_build_presses.RETURN_TO_PIN if to_pin else server_build_presses.UPDATE_TO_LATEST
@@ -11401,7 +11767,15 @@ class StagedInstaller:
                             git.CloneSpec(
                                 url=source.url,
                                 dest=dest,
-                                branch=source.branch,
+                                # T862: `git._fetch_ref(spec.branch)` then fetches
+                                # `origin coa-bots-<newest>`, and with `rev` set there is
+                                # no reset (`_resets_to_the_tip`); `_pin` checks out the
+                                # tip sha.
+                                branch=(
+                                    source.branch
+                                    if to_pin
+                                    else self._latest_branch(source, targets)
+                                ),
                                 sparse_path=source.sparse_path,
                                 depth=source.depth,
                                 rev=source.rev if to_pin else self._latest_rev(source, targets),
@@ -11430,6 +11804,85 @@ class StagedInstaller:
                     stood = earlier[dest].head if dest in earlier else None
                     yield self._moved_line(source, dest, old, stood)
                 self._check_cancel(cancel)
+                if self._nothing_moved(moved, earlier):
+                    # T863: no source moved, and no folder an earlier press left off
+                    # its build is owed one. The fetch is still a `reset --hard` onto
+                    # upstream's files even when the commit did not change, so this
+                    # app's own files go back over the ones the move brought FIRST,
+                    # exactly as the full path does -- before the family's reading of
+                    # the move. Every failure here -- an UpdateRefused from the family
+                    # included -- reaches the outer handler, which remembers a refused
+                    # commit once, puts the sources back once and ends the press
+                    # refused.
+                    yield from self._rewrite_what_we_own(server_dir, opts, state)
+                    changes = yield from self.check_moved_sources(server_dir, moved, to_pin=to_pin)
+                    yield from self.check_carried_patches(server_dir)
+                    yield from self.apply_carried_patches(server_dir)
+                    # T863 (round 2): the exit asks the durable build record, not what
+                    # this press saw move -- `_built_from_what_is_here()` compares the
+                    # record's commits AND the digest of the files written back above
+                    # with what is on disk now -- and the two records of other presses
+                    # that still owe work: an unbuilt module Update (T557) and a module
+                    # installed since the last build (T750). Anything else ends here
+                    # with `NOTHING_BUILT`, and the wiring keeps the module-update
+                    # record unsolved.
+                    #
+                    # The family's servers-down work is asked here too because only the
+                    # family knows what a press that moved nothing still owes: a pending
+                    # world reimport (TrinityCore) is owed with no source moved. CMaNGOS
+                    # reports catch-up work from its plan, so its Update still rebuilds
+                    # (T866); this exit is not for it. The exit fires when the family
+                    # answers nothing owed in EITHER of its two shapes: no work object (a
+                    # TrinityCore press with no imports, no map data and no pending
+                    # reimport), or no `changes` reading (the AzerothCore update path,
+                    # whose check returns None: its remaining work is the idempotent
+                    # start-time updater one-shot, which a press that moved nothing has
+                    # nothing to feed).
+                    #
+                    # A press that owes a build joins the full path below: the
+                    # write-back, the family's reading and the patches above already
+                    # ran, so the full path must not run them again -- nor forget to
+                    # stop the family's background work before the compile it does owe
+                    # (`before_rebuild()`, `_already_prepared`).
+                    work = self.servers_down_work(server_dir, changes, press=press)
+                    if (
+                        self._built_from_what_is_here(server_dir)
+                        and not module_moves_owed(server_dir)
+                        and not rebuilds_owed_now(server_dir)
+                        and (work is None or changes is None)
+                    ):
+                        # What the success path records for releases keeps
+                        # holding (a kept HEAD keeps its release branch,
+                        # T862-E), and only that: with no build there is nothing
+                        # new to record, so just the names change and a refused
+                        # commit stays refused. The press's own rows name
+                        # folders still on their build commit, so they are
+                        # forgotten.
+                        #
+                        # The row's `pin` and `ahead` are refreshed with the name
+                        # (T863-D): this app version may test against a pin that
+                        # moved while no code did, and a pin left at the old one
+                        # withholds Revive and the mmaps stamp from a build this
+                        # catalog describes (`built_carries_pin()`). `built` and
+                        # `refused_updates` are never touched here.
+                        forget_sources_off(server_dir)
+                        marked = {repo: said.tag for repo, said in targets.items() if said.tag}
+                        self._record_unbuilt_refresh(server_dir, marked)
+                        if to_pin:
+                            yield (
+                                f"{self.entry.name} is already on the commit this app was tested "
+                                "against, so nothing was rebuilt and the server was not stopped."
+                            )
+                        else:
+                            yield (
+                                f"{self.entry.name} is already on the newest code it follows, so "
+                                "nothing was rebuilt and the server was not stopped."
+                            )
+                        return NOTHING_BUILT
+                    yield from self.before_rebuild(server_dir, route, press)
+                    _already_prepared = True
+                else:
+                    _already_prepared = False
                 # T179: the family reads what the move brought (TrinityCore's SQL
                 # snapshot) and may refuse it, while every source can still go back
                 # and nothing has been built, written or stopped.
@@ -11437,16 +11890,17 @@ class StagedInstaller:
                 # brought BEFORE the family reads the move, because AzerothCore's check may
                 # have to start a stopped database, and `compose up` refuses the target's
                 # file. A refusal below puts the sources back and writes it again.
-                yield from self._rewrite_what_we_own(server_dir, opts, state)
-                changes = yield from self.check_moved_sources(server_dir, moved, to_pin=to_pin)
-                yield from self.check_carried_patches(server_dir)
-                yield from self.apply_carried_patches(server_dir)
-                # After every refusal -- the source checks above included -- and
-                # before the compile: `rebuild()`'s reason, one step earlier. Not
-                # before the first fetch (as until T179 Task 6): what this stops
-                # (the movement-map job) reads no checkout, and a press the source
-                # checks refuse must leave it running. A stop that fails restores.
-                yield from self.before_rebuild(server_dir, route, press)
+                if not _already_prepared:
+                    yield from self._rewrite_what_we_own(server_dir, opts, state)
+                    changes = yield from self.check_moved_sources(server_dir, moved, to_pin=to_pin)
+                    yield from self.check_carried_patches(server_dir)
+                    yield from self.apply_carried_patches(server_dir)
+                    # After every refusal -- the source checks above included -- and
+                    # before the compile: `rebuild()`'s reason, one step earlier. Not
+                    # before the first fetch (as until T179 Task 6): what this stops
+                    # (the movement-map job) reads no checkout, and a press the source
+                    # checks refuse must leave it running. A stop that fails restores.
+                    yield from self.before_rebuild(server_dir, route, press)
             except (InstallerError, OSError) as exc:
                 if isinstance(exc, UpdateRefused) and not to_pin:
                     # T179: the same commit is not offered again (`upstream_news`).
@@ -11726,11 +12180,15 @@ class StagedInstaller:
             # exceptions). It exists for a count asked WHILE the press ran,
             # which cached the moved -- or about-to-be-restored -- HEADs.
             upstream.forget(server_dir)
+        # T863: every way out that built something says so with the `None` it always did;
+        # only the no-move exit above returns `NOTHING_BUILT`.
+        return None
 
     def _release_targets(
         self,
         plan: Sequence[tuple[EmulatorSource, Path, str]],
         rewritten_ok: Collection[str] = (),
+        server_dir: Path | None = None,
     ) -> dict[str, ReleaseTarget]:
         """The commit "latest" means for each source that follows its releases (T126).
 
@@ -11754,6 +12212,101 @@ class StagedInstaller:
         before anything moves, and the route asks again with the line in it.
         """
         found: dict[str, ReleaseTarget] = {}
+        branch_sources = [s for s, _, _ in plan if s.follow in ("release_branches", "release_tag")]
+        if branch_sources:
+            core = next(s for s in branch_sources if s.follow == "release_branches")
+            asked = self._newest_branch_release([s for s, _, _ in plan])
+            if asked is None:
+                if self._release_listing_reachable(core):
+                    prefix = core.release_prefix or ""
+                    raise InstallerError(
+                        f"{core.repo} follows its release branches, and {core.url} lists none "
+                        f"named {prefix}<version>. Nothing in that folder was changed."
+                    )
+                raise InstallerError(
+                    f"{core.repo} follows its release branches, and Yu'lon could not list them "
+                    f"from {core.url}. Nothing in that folder was changed; try again when it "
+                    "can be reached."
+                )
+            if asked.missing:
+                repo, tag = asked.missing[0]
+                raise InstallerError(
+                    f"{asked.branch.name} is out upstream, but its bots are not yet: {repo} has "
+                    f"no {tag}, and Yu'lon never builds a release with another release's bots. "
+                    f"Nothing in those folders was changed; this offers {asked.branch.name} "
+                    f"once {tag} is out."
+                )
+            record = read_state(server_dir, valid=()) if server_dir is not None else None
+            try:
+                _name, core_sha = asked.commits[asked.branch_repo or core.repo]
+            except KeyError:
+                core_sha = ""
+            refused = (
+                {commit for _repo, commit in record.refused_updates}
+                if record is not None
+                else set()
+            )
+            if core_sha and core_sha in refused:
+                raise UpdateRefused(
+                    f"{asked.branch.name} was refused before: it brings a new world baseline, "
+                    "which an update cannot take. Nothing was changed; wait for a Yu'lon "
+                    f"release that moves {self.entry.name} onto it.",
+                    repo=core.repo,
+                    commit=core_sha,
+                )
+            for source, dest, old in plan:
+                if source.follow not in ("release_branches", "release_tag"):
+                    continue
+                name, sha = asked.commits[source.repo]
+                slug = upstream.github_slug(source.repo)
+                stands = (
+                    None
+                    if slug is None
+                    else upstream.compare(slug, old, sha, get=self._seams.upstream_get)
+                )
+                if stands is None:
+                    raise InstallerError(
+                        f"{source.repo} follows its release branches, and GitHub did not answer "
+                        f"whether {name} is ahead of what {dest} is on. Nothing in that folder "
+                        "was changed; try again later."
+                    )
+                if stands.ahead == 0 and old != sha:
+                    past = _commits(stands.behind)
+                    # T862 (review round 2): the folder is kept, and the record
+                    # keeps the release HEAD came from -- the newest branch for
+                    # the core, the tag for a release_tag source. Naming nothing
+                    # once asked the guard the catalog's pinned branch, so the
+                    # retained upstream commits read as local work and a later
+                    # valid Update was refused.
+                    kept = asked.branch.name if source.follow == "release_branches" else name
+                    found[source.repo] = ReleaseTarget(
+                        tag=kept,
+                        rev=old,
+                        branch=(asked.branch.name if source.follow == "release_branches" else None),
+                        line=(
+                            f"{source.repo} follows its release branches; the newest, {name} "
+                            f"({sha[:7]}), is already in {old[:7]}, which is {past} past it, "
+                            "so it stays there."
+                        ),
+                    )
+                    continue
+                said = (
+                    f"{source.repo} follows its release branches; the newest is {name} "
+                    f"({sha[:7]})."
+                    if source.follow == "release_branches"
+                    else f"{source.repo} follows {core.repo}'s release; its {name} is {sha[:7]}."
+                )
+                if stands.diverged:
+                    warning = rewritten_line(source.repo, name, stands.behind)
+                    if source.repo not in rewritten_ok:
+                        raise RewrittenHistory(source.repo, warning)
+                    said = f"{said}\n{warning}"
+                found[source.repo] = ReleaseTarget(
+                    tag=name,
+                    rev=sha,
+                    branch=(asked.branch.name if source.follow == "release_branches" else None),
+                    line=said,
+                )
         for source, dest, old in plan:
             if source.follow != "releases":
                 continue
@@ -11805,11 +12358,68 @@ class StagedInstaller:
             found[source.repo] = ReleaseTarget(tag=release.tag, rev=release.sha, line=said)
         return found
 
+    def _newest_branch_release(self, sources: Sequence[EmulatorSource]) -> BranchReleasePlan | None:
+        """The newest release branch and each release-mode source's commit (T862).
+
+        None when any repo's listing could not be read, or no branch matches.
+        One listing per repo, through the same seam the compare GETs use.
+        """
+        core = next((s for s in sources if s.follow == "release_branches"), None)
+        if core is None or not core.release_prefix:
+            return None
+        adverts: dict[str, dict[str, str] | None] = {}
+        for source in sources:
+            if source.repo not in adverts:
+                adverts[source.repo] = upstream.advertised_refs(
+                    source.url, get=self._seams.upstream_get
+                )
+        core_refs = adverts.get(core.repo)
+        if core_refs is None:
+            return None
+        branch = upstream.newest_release_branch(core_refs, core.release_prefix)
+        if branch is None:
+            return None
+        commits: dict[str, tuple[str, str]] = {core.repo: (branch.name, branch.sha)}
+        missing: list[tuple[str, str]] = []
+        for source in sources:
+            if source.follow != "release_tag" or not source.release_prefix:
+                continue
+            refs = adverts.get(source.repo)
+            if refs is None:
+                return None
+            tag = f"{source.release_prefix}{branch.version}"
+            sha = upstream.tag_commit(refs, tag)
+            if sha is None:
+                missing.append((source.repo, tag))
+            else:
+                commits[source.repo] = (tag, sha)
+        return BranchReleasePlan(
+            branch=branch, commits=commits, missing=tuple(missing), branch_repo=core.repo
+        )
+
+    def _release_listing_reachable(self, core: EmulatorSource) -> bool:
+        """Was the core's release listing read, just with no matching branch (T862)?
+
+        `advertised_refs` answers None both when the server cannot be reached
+        and when its answer parses to an empty mapping, and only the first is
+        the "could not list them" sentence. A second read is cheap beside a
+        refused press, and it runs only on that path.
+        """
+        return upstream.advertised_refs(core.url, get=self._seams.upstream_get) is not None
+
     @staticmethod
     def _latest_rev(source: EmulatorSource, targets: Mapping[str, ReleaseTarget]) -> str | None:
         """What an update checks out for `source`: its release's commit, or `None` for the tip."""
         said = targets.get(source.repo)
         return said.rev if said is not None else None
+
+    @staticmethod
+    def _latest_branch(source: EmulatorSource, targets: Mapping[str, ReleaseTarget]) -> str | None:
+        """The branch the fetch names for `source`: the newest release branch (T862)."""
+        said = targets.get(source.repo)
+        if said is not None and said.branch is not None:
+            return said.branch
+        return source.branch
 
     def _refuse_unless_updatable(
         self, server_dir: Path, moving: Sequence[EmulatorSource]
@@ -11878,6 +12488,7 @@ class StagedInstaller:
         """
         ours = self.app_written_paths(server_dir)
         off = {row.dest: row.built for row in sources_still_off(server_dir)}
+        record = read_state(server_dir, valid=())
         plan: list[tuple[EmulatorSource, Path, str]] = []
         for source in moving:
             dest = server_dir / source.dest
@@ -11908,7 +12519,10 @@ class StagedInstaller:
                     f"nothing was fetched and nothing was changed. Copy them somewhere safe and "
                     f"put the files back as git has them, then press this again."
                 )
-            unmoved = self._seams.no_local_commits(dest, source.branch)
+            # T862: without this, a second Update or a Return after a move to
+            # coa-bots-2.10 fetches coa-bots-2.9.1, and HEAD's own release commits
+            # read as local commits.
+            unmoved = self._seams.no_local_commits(dest, _branch_moved_from(source, record))
             if unmoved is None:
                 raise InstallerError(
                     f"Yu'lon could not ask git whether {dest} carries commits of its own -- the "
@@ -12497,20 +13111,9 @@ class StagedInstaller:
         """
         found: list[SourceRev] = []
         for source, dest, _old in moved:
-            built = self._seams.head_version(dest)
-            if built is None:
-                logger.warning(f"could not read what {dest} was built from; not recording it")
-                continue
-            pin = source.rev or ""
-            found.append(
-                SourceRev(
-                    repo=source.repo,
-                    built=built,
-                    pin=pin,
-                    ahead=self._seams.commits_since(dest, pin) if pin else None,
-                    release=(releases or {}).get(source.repo, ""),
-                )
-            )
+            row = self._row_for(source, dest, (releases or {}).get(source.repo, ""))
+            if row is not None:
+                found.append(row)
         if not found:
             return
         fresh = read_state(server_dir, valid=self.stage_names())
@@ -12535,6 +13138,73 @@ class StagedInstaller:
                 refused_updates=refused,
             ),
         )
+
+    def _row_for(self, source: EmulatorSource, dest: Path, release: str) -> SourceRev | None:
+        """The row a LANDING writes for one source, or None when its built string is unreadable.
+
+        `_record_source_revs()` is the only caller, and it exists so `pin`/`ahead` have one
+        derivation for both writers of a row: this one, after a build, and
+        `_record_unbuilt_refresh()`, on a press that built nothing and must refresh the very
+        same two fields.
+        """
+        built = self._seams.head_version(dest)
+        if built is None:
+            logger.warning(f"could not read what {dest} was built from; not recording it")
+            return None
+        pin, ahead = self._pin_and_ahead(source, dest)
+        return SourceRev(repo=source.repo, built=built, pin=pin, ahead=ahead, release=release)
+
+    def _pin_and_ahead(self, source: EmulatorSource, dest: Path) -> tuple[str, int | None]:
+        """The pin `source` names in the catalog now, and how far `dest` is ahead of it (T863).
+
+        Shared by `_row_for()` and `_record_unbuilt_refresh()` so a landing and a no-move
+        press cannot disagree about the two fields the version line and
+        `built_carries_pin()` read. `ahead` is `None` -- "nobody could say" -- where the
+        source pins nothing, as `SourceRev` says.
+        """
+        pin = source.rev or ""
+        return pin, (self._seams.commits_since(dest, pin) if pin else None)
+
+    def _record_unbuilt_refresh(self, server_dir: Path, releases: Mapping[str, str]) -> None:
+        """Refresh what a press that built nothing can still make true (T863, T862-E).
+
+        Called on the no-move exit and nowhere else. `_record_source_revs()` is the wrong
+        tool here: it assumes a landing and drops every `refused_updates` entry for the
+        repos it touches. A press that moved nothing landed nowhere, and a refused commit
+        already recorded for the same repo must survive it. So this never touches `built`
+        or `refused_updates`.
+
+        It does refresh all three of the rest, and that was a review finding: the exit
+        used to change only `release`, so a server updated to a tip H under catalog pin
+        P1 kept P1 after a new Yu'lon shipped pin P2. `built_carries_pin()` then answered
+        False -- H is past P2, not past P1 -- which withholds Revive and the mmaps stamp
+        for a build the new catalog DOES describe. The press is the new app version's
+        reading of the same build, so the pin is the one this app now tests against, and
+        `ahead` is recounted from it exactly as a landing counts it (`_pin_and_ahead()`).
+
+        Only rows that exist are changed: without a row there is no `built` to keep the
+        other fields beside, and such a press could not be here (`_nothing_moved()`), nor
+        is a row invented for a source the install record never named.
+
+        Best-effort like every write through `write_state()`, and written only when
+        something changed.
+        """
+        fresh = read_state(server_dir, valid=self.stage_names())
+        if fresh is None:
+            return
+        sources = {source.repo: source for source in self.entry.emulator.sources}
+        rows: list[SourceRev] = []
+        for rev in fresh.source_revs:
+            source = sources.get(rev.repo)
+            if source is None:
+                rows.append(rev)
+                continue
+            pin, ahead = self._pin_and_ahead(source, server_dir / source.dest)
+            rows.append(
+                replace(rev, pin=pin, ahead=ahead, release=releases.get(rev.repo, rev.release))
+            )
+        if tuple(rows) != fresh.source_revs:
+            write_state(server_dir, replace(fresh, source_revs=tuple(rows)))
 
     def record_source_rows(self, server_dir: Path, rows: Sequence[SourceRev]) -> bool:
         """Write `rows` into the install record, keeping every other source's row (T601).
@@ -13527,6 +14197,70 @@ class StagedInstaller:
                 f"this server is stopped."
             )
         return left
+
+    def _free_own_old_images(self, server_dir: Path) -> tuple[str, ...]:
+        """Remove this install's own dangling images after a successful build (T864 D1).
+
+        Dangling images of THIS compose project only (`com.docker.compose.project=<project>`,
+        where project is spelled exactly like `_db_volume()`), each removed by id with plain
+        `docker image rm` and never `-f`: forcing only takes the name off and leaves the
+        layers, which is the leak this pass cleans. An image is left for a later build while
+        ANY container still uses it; one whose every holder is exited, of THIS project, and
+        serving a name in `composegen.ONE_SHOT_SERVICES` is removed after those containers
+        (`docker rm` by id, no `-f`, no `-v`, in
+        `docker_space.remove_finished_holders_on()`), and that is all or nothing. Anything
+        else is never touched: other projects, unlabelled images, running containers,
+        database/auth/world containers, volumes.
+
+        A failure here is one sentence at most and never fails the build that worked: the
+        returned lines are appended to the build's own success tail, after it.
+        """
+        from yulon import docker_space  # noqa: PLC0415 - native sits in docker_space's import chain
+
+        try:
+            project = composegen.project_name(
+                self.entry.id,
+                server_dir,
+                platform_id=self._seams.platform_id,
+                install_id=self._install_id(server_dir),
+            )
+            ids = self._seams.dangling_image_ids(f"{docker.PROJECT_LABEL}={project}")
+            failed = ids is None
+            for image in ids or ():
+                said = self._seams.remove_unused_image(image)
+                if said == docker.IMAGE_IN_USE:
+                    # T864-E: a rebuild's recreate never selects the one-shot services
+                    # (`ac-db-import`, `ac-client-data-init`), so their EXITED containers
+                    # keep the pre-rebuild image referenced for ever. Cleared here, and
+                    # only when every holder is exited, of THIS project, and its service
+                    # is in `composegen.ONE_SHOT_SERVICES`; the image is then asked for
+                    # once more. See `docker_space.remove_finished_holders_on()` for why
+                    # that is safe.
+                    cleared = docker_space.remove_finished_holders_on(
+                        image,
+                        project,
+                        listing=self._seams.containers_on,
+                        remove=self._seams.remove_finished_container,
+                    )
+                    if cleared:
+                        said = self._seams.remove_unused_image(image)
+                if said == "" or said == docker.IMAGE_GONE:
+                    logger.info(f"removed this install's old image {image}")
+                elif said == docker.IMAGE_IN_USE:
+                    logger.debug(f"{image} is still held by a container; left for a later build")
+                else:
+                    logger.warning(f"could not remove this install's old image {image}: {said}")
+                    failed = True
+            cache = self._seams.build_cache_bytes()
+        except Exception as exc:  # noqa: BLE001 - never fails a build that worked
+            logger.warning(f"could not remove this install's old images: {exc}")
+            return (docker_space.OLD_IMAGES_NOT_REMOVED,)
+        lines: list[str] = []
+        if failed:
+            lines.append(docker_space.OLD_IMAGES_NOT_REMOVED)
+        if cache is not None and cache > docker_space.CACHE_POINTER_BYTES:
+            lines.append(docker_space.cache_pointer(cache))
+        return tuple(lines)
 
     def _recipe_ground(self, server_dir: Path) -> dict[str, RecipeGround]:
         """The build-recipe files as found. Bytes, `None` for absent, `UNREADABLE` for neither.
@@ -16186,6 +16920,12 @@ class StagedInstaller:
         # T203: what the cache holds as this build starts, so the next press's
         # preflight can credit only what THIS build added to it -- or, after an
         # attempt that did not finish, what that one added (`BUILD_CACHE_FILE`).
+        # T589 (T863 round 2): from here this press can replace the server's build, and a
+        # compile that dies must leave "not known" rather than the record of the build it
+        # was replacing. Forgets what an install left before (a resumed install), as
+        # `rebuild()` does. Not before the skip above: a press that compiles nothing has
+        # not changed the build its record names.
+        forget_built_from(ctx.server_dir)
         # T589: what this compile is made from, read before it starts (the build context).
         heads = source_heads(ctx.server_dir, self.entry.emulator.sources)
         yield BUILD_CACHE_ASKING
@@ -16261,7 +17001,11 @@ class StagedInstaller:
             # T589: an install has no build from before to go back to, so the image this
             # compile tagged is the server's build. A rebuild records it once the press is
             # over (`rebuild()`), because until then a rollback can put the old one back.
-            remember_built_from(ctx.server_dir, heads)
+            # T863: the install's write-back (`generate-compose`, `patch-sources`) ran
+            # before this compile, so the files on disk now are the ones it was made from.
+            remember_built_from(
+                ctx.server_dir, heads, written=self._app_written_digest(ctx.server_dir)
+            )
         self._remember_built_prefix(ctx.server_dir)
         yield "The build finished."
 
@@ -17637,7 +18381,7 @@ def _one_shot_left_sentence(left: docker.OneShotLeft, *, earlier: bool) -> str:
         )
     if not left.names:
         return said
-    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f -v {' '.join(left.names)}"
 
 
 def download_left_sentence(left: docker.OneShotLeft, *, earlier: bool) -> str:
@@ -17657,7 +18401,7 @@ def download_left_sentence(left: docker.OneShotLeft, *, earlier: bool) -> str:
         )
     if not left.names:
         return said
-    return f"{said} To end it, run this in a terminal:\ndocker rm -f {' '.join(left.names)}"
+    return f"{said} To end it, run this in a terminal:\ndocker rm -f -v {' '.join(left.names)}"
 
 
 def _cancelled_message(what: str, note: str = "") -> str:

@@ -140,7 +140,7 @@ def test_the_world_command_is_the_pins_entrypoint_and_cmd() -> None:
     `apps/docker/Dockerfile:148` is the runtime stage's ENTRYPOINT and `:192` the
     worldserver stage's CMD.
     """
-    dockerfile = Path(__file__).resolve().parent / "data" / "coa-pin" / "Dockerfile-98570f24"
+    dockerfile = Path(__file__).resolve().parent / "data" / "coa-pin" / "Dockerfile-a1e8c99e"
     lines = dockerfile.read_text(encoding="utf-8").splitlines()
 
     def declared(stage: str, keyword: str) -> list[str]:
@@ -156,7 +156,7 @@ def test_the_world_command_is_the_pins_entrypoint_and_cmd() -> None:
     cmd = declared("runtime AS worldserver", "CMD")
     assert composegen.AC_WORLD_COMMAND == (*entrypoint, *cmd)
     rev = COA.emulator.sources[0].rev
-    assert rev.startswith("98570f24"), (
+    assert rev.startswith("a1e8c99e"), (
         "the CoA pin moved: copy apps/docker/Dockerfile at the new pin into tests/data/coa-pin/ "
         "and check AC_WORLD_COMMAND"
     )

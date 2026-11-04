@@ -19,6 +19,32 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Changed
 
+## v0.9.31-Public — 2026-11-04
+
+### New
+- Mists of Pandaria 5.4.8 (LoA Pandaria with 500 playerbots) can be installed; bring the Recall WoW client.
+- Conquest of Azeroth servers can use **Update the server to latest…** to move to the newest CoA Bots release and its bots.
+- New, untested on a Steam Deck: WotLK, Unbound and Centurion can use the ConsolePort controller add-on and a Deck layout. Report issues.
+- New, untested on a Steam Deck: Conquest of Azeroth can install the ConsolePort controller add-on from its Modules tab.
+- Six new themes: Gruvbox dark and light (medium and soft) and Organic dark and light.
+- Free Docker space… on Backups & updates removes Docker's build cache and old builds; builds now clean up their own.
+- Conquest of Azeroth puts the SquidBots Lite bot add-on into your game client by itself and updates it with the server.
+
+### Fixed
+- mod-ale builds on Conquest of Azeroth servers again; its Playerbots Lua functions are left out there.
+- Installs no longer leave unnamed Docker volumes behind (one per Conquest of Azeroth install, and one after a tool run was cut off).
+- Conquest of Azeroth on Windows builds its map data hours faster: the last map step no longer reads through the Windows folder share.
+- The Conquest of Azeroth install on Windows no longer stops at the map step with "Permission denied" on a stock Ascension client.
+- Conquest of Azeroth: pressing Start with another realm type picked now offers to switch to it instead of starting the old one.
+- Uninstall and Start over stop a running movement-map job first, instead of waiting for it silently.
+- Update the server to latest… and Return to the tested pin… no longer stop and rebuild a server that is already there.
+- Centurion and Mists of Pandaria on Windows build their map data inside Docker, not through the slow Windows folder share.
+
+### Changed
+- Conquest of Azeroth installs CoA Bots 2.9.1 (was 2.8); Update brings an existing server to it.
+- Every game's server now builds from its newest upstream version (WotLK, Unbound, TBC, Vanilla, Centurion, Conquest of Azeroth).
+- Bring your own… takes a module whatever its repository or folder is named, capitals included.
+
 ## v0.9.30-Public — 2026-11-01
 
 ### New

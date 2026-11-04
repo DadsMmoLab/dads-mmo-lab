@@ -20,7 +20,7 @@ import json
 import os
 import subprocess
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -42,15 +42,28 @@ from tests.test_families_cmangos import ENTRY as TBC
 from tests.test_families_cmangos import engine as tbc_engine
 from tests.test_families_cmangos import entry_with_sql
 from tests.test_families_cmangos import install as tbc_install
-from yulon import docker, git, resources, rmtree, runner, server_build_presses
+from yulon import (
+    apply,
+    docker,
+    git,
+    install_wiring,
+    module_answers,
+    module_moves,
+    resources,
+    rmtree,
+    runner,
+    server_build_presses,
+)
 from yulon.apply import CLONE_DIRS
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource, load_catalog
+from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
     RollbackNotDone,
+    UpdateRefused,
     WorldStoppedAfterReadyError,
 )
 from yulon.controller import Controller, StartRefused
@@ -101,6 +114,60 @@ def _press(rec: Recorder, server_dir: Path, **kwargs: object) -> list[str]:
 
 def _heads(rec: Recorder, server_dir: Path) -> dict[str, str]:
     return {source.repo: rec.heads[server_dir / source.dest] for source in ENTRY.emulator.sources}
+
+
+def _record_the_build(
+    rec: Recorder,
+    server_dir: Path,
+    *,
+    sources: Sequence[EmulatorSource] = ENTRY.emulator.sources,
+    heads: Mapping[str, str] | None = None,
+    written: str | None = None,
+    paths: Mapping[str, tuple[str, ...]] | None = None,
+) -> None:
+    """Write the record a finished build leaves (`native.BUILT_FROM_FILE`, T589/T863).
+
+    T863 (round 2): the no-move exit asks this record instead of what the press saw
+    move, so a test that wants the exit has to say a build was made from these
+    sources. `heads` is what the record names (each source's current head by
+    default, which is the case that exits); `written` overrides the digest of the
+    files this app's write-back leaves (this engine's `app_written_paths()` by
+    default), so a build made from other content can be arranged.
+    """
+    compiled = (
+        dict(heads)
+        if heads is not None
+        else {source.repo: rec.heads[server_dir / source.dest] for source in sources}
+    )
+    digest = (
+        written
+        if written is not None
+        else native.written_digest(
+            server_dir,
+            paths if paths is not None else engine(rec).app_written_paths(server_dir),
+        )
+    )
+    native.remember_built_from(server_dir, compiled, written=digest)
+    rec.calls.clear()
+
+
+def _entry_pinning(pin: str) -> CatalogEntry:
+    """`ENTRY` with its core pinned to `pin`: a catalog that moved the pin, not the code."""
+    sources = list(ENTRY.emulator.sources)
+    sources[0] = sources[0].model_copy(update={"rev": pin})
+    emulator = ENTRY.emulator.model_copy(update={"sources": tuple(sources)})
+    return CatalogEntry.model_validate(ENTRY.model_copy(update={"emulator": emulator}).model_dump())
+
+
+def _entry_engine(rec: Recorder, entry: CatalogEntry) -> AzerothCoreInstaller:
+    """`engine()` over a catalog entry this test built rather than the shipped one (T863-D)."""
+    return AzerothCoreInstaller(
+        entry,
+        installers_root=resources.installers_dir(),
+        import_probe=rec.probe,
+        reset_unfinished=rec.reset,
+        seams=rec.seams(),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -173,8 +240,8 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
     # "nine sources, seven shallow" when the catalog held ten and nine. A number
     # in prose that nothing recomputes is a number that was true once.
     every = [source for entry in load_catalog().games for source in entry.emulator.sources]
-    assert len(every) == 17, [s.repo for s in every]
-    assert sum(1 for s in every if s.depth is not None) == 14
+    assert len(every) == 18, [s.repo for s in every]
+    assert sum(1 for s in every if s.depth is not None) == 15
     moving = {
         entry.id: tuple(s.repo for s in entry.emulator.sources if not native.held_at_its_pin(s))
         for entry in load_catalog().games
@@ -192,6 +259,7 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
         "wow-tortoise": ("tortoise-wow/tortoise-wow", "Sagiroth/TortoiseBots"),
         "wow-centurion": ("thomasjteachey/TrinityCore112",),
         "wow-coa": ("pjerra/azerothcore-wotlk-coa", "pjerra/mod-playerbots-coa"),
+        "wow-mop": ("1LineAtaTime/LoA-Pandaria-Playerbots",),
     }, moving
 
 
@@ -271,8 +339,11 @@ def test_the_route_is_offered_for_every_shipped_entry_and_by_the_flag_not_the_id
         "wow-vanilla": True,
         "wow-tortoise": True,
         "wow-centurion": True,
-        # T812: CoA pins its fork and carries a patch; no update control until a gate proves one.
-        "wow-coa": False,
+        # T862: follows its newest release branch and paired bots tag.
+        "wow-coa": True,
+        # T850: MoP pins its fork and its world database comes from a release asset, so
+        # there is no checkout snapshot for an update route to compare.
+        "wow-mop": False,
     }
     assert update_to_latest_for_app(ENTRY, Path("/srv/x")) is not None
     unflagged = ENTRY.install.native.model_copy(update={"update_to_latest": False})
@@ -514,7 +585,7 @@ def test_a_source_that_was_already_at_the_tip_says_so_rather_than_claiming_a_mov
     not published anything.
     """
     rec, server_dir = _ready(tmp_path)
-    rec.upstream[server_dir] = OLD
+    rec.upstream[server_dir / ENTRY.emulator.sources[0].dest] = OLD
 
     said = "\n".join(_press(rec, server_dir))
     assert f"already on {OLD[:7]}" in said
@@ -2991,3 +3062,652 @@ def test_an_update_that_was_put_back_shows_its_details_in_the_fold_and_the_messa
     assert "put back" in line and "docker compose logs" not in line, line
     assert "docker compose logs" in panel.failure_details.text_box.toPlainText()
     assert finished and "\nDetails:\n" in finished[0] and "docker compose logs" in finished[0]
+
+
+# -- T863: an update that moves nothing -----------------------------------------
+
+NO_MOVE_UPDATE = (
+    "WoW WotLK is already on the newest code it follows, so nothing was rebuilt "
+    "and the server was not stopped."
+)
+NO_MOVE_RETURN = (
+    "WoW WotLK is already on the commit this app was tested against, so nothing "
+    "was rebuilt and the server was not stopped."
+)
+
+
+def _no_move_press(rec: Recorder, server_dir: Path, **kwargs: object) -> list[str]:
+    """Run the press, failing loudly on a refusal or crash."""
+    return list(
+        engine(rec).update_to_latest(InstallOptions(server_dir=server_dir), **kwargs)  # type: ignore[arg-type]
+    )
+
+
+def test_an_update_with_nothing_new_ends_without_a_rebuild(tmp_path: Path) -> None:
+    """T863: every source on upstream's tip: the last line says so, and the rebuild never runs.
+
+    The build record is written first (`_record_the_build()`), because the exit
+    now asks whether the image on disk was built from these heads: a fresh
+    install has no such record and owes a build (T863 review R3).
+
+    Mutation: remove the early exit -> fails (the full path rebuilds).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _record_the_build(rec, server_dir)
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == NO_MOVE_UPDATE, lines
+    assert "build" not in rec.calls, rec.calls
+    assert "recreate" not in rec.calls, rec.calls
+    assert "stop_servers" not in rec.calls and "stop_servers:forced" not in rec.calls, rec.calls
+    assert "start" not in rec.calls, rec.calls
+    assert not [call for call in rec.calls if call.startswith("snapshot:")], rec.calls
+    assert f"already on {OLD[:7]}" in "\n".join(lines)
+
+
+def test_a_return_on_the_pin_already_ends_without_a_rebuild(tmp_path: Path) -> None:
+    """T863: on the pin, the way back ends the same way.
+
+    Mutation: remove the early exit -> fails (the full path rebuilds).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        assert source.rev, "the ground: every shipped source pins its commit"
+        rec.heads[server_dir / source.dest] = source.rev
+    _record_the_build(rec, server_dir)
+    lines = _no_move_press(rec, server_dir, to_pin=True)
+    assert lines[-1] == NO_MOVE_RETURN, lines
+    assert "build" not in rec.calls, rec.calls
+    assert "recreate" not in rec.calls, rec.calls
+    assert "stop_servers" not in rec.calls and "stop_servers:forced" not in rec.calls, rec.calls
+    assert "start" not in rec.calls, rec.calls
+    assert not [call for call in rec.calls if call.startswith("snapshot:")], rec.calls
+    assert f"already on {PINNED[:7]}" in "\n".join(lines)
+
+
+def test_an_update_where_one_source_moved_still_rebuilds(tmp_path: Path) -> None:
+    """T863: one source on the tip, the other behind: the normal full path runs.
+
+    Mutation: `any` instead of `all` in `_nothing_moved` -> fails (ends early on
+    a half-moved press).
+    """
+    rec, server_dir = _ready(tmp_path)
+    rec.upstream[server_dir / ENTRY.emulator.sources[0].dest] = OLD
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+    assert f"already on {OLD[:7]}" in "\n".join(lines)
+    assert f"{OLD[:7]} -> {NEW[:7]}" in "\n".join(lines)
+
+
+def test_an_update_with_an_unreadable_head_runs_the_normal_path(tmp_path: Path) -> None:
+    """T863: a head git will not name refuses the press before anything is fetched.
+
+    The route's own guard (`_refuse_unless_updatable()`) reads every head, so
+    this press stops there and never reaches `_nothing_moved()`; what this pins
+    is that guard: no clone, and the record is exactly as it was. The helper's
+    own half of the rule is
+    `test_nothing_moved_reads_an_unreadable_head_as_moved`.
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    real_head = rec.head_sha
+
+    def silent_head(dest: Path) -> str | None:
+        if dest == server_dir / ENTRY.emulator.sources[0].dest:
+            real_head(dest)
+            return None
+        return real_head(dest)
+
+    made = engine(rec, head_sha=silent_head)
+    before = native.read_state(server_dir, valid=())
+    with pytest.raises(InstallerError, match="could not read which commit"):
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert rec.clones == []
+    assert native.read_state(server_dir, valid=()) == before
+
+
+def test_nothing_moved_reads_an_unreadable_head_as_moved() -> None:
+    """T863 review R6: `_nothing_moved()` answers False for a head `None`.
+
+    Driven directly, because the route's guards refuse an unreadable head
+    before the helper is ever asked -- the old claim that the refusal test
+    proved this half could not fail.
+
+    Mutation: treat `None` as unmoved (answer True there) -> fails on the first
+    assertion, while the second shows the same state does answer True for a head
+    git can name.
+    """
+    rec = Recorder()
+    source = ENTRY.emulator.sources[0]
+    dest = Path("/srv/x") / source.dest
+    assert (
+        engine(rec, head_sha=lambda _dest: None)._nothing_moved([(source, dest, OLD)], {}) is False
+    )
+    assert engine(rec, head_sha=lambda _dest: OLD)._nothing_moved([(source, dest, OLD)], {}) is True
+
+
+def test_an_older_build_on_the_same_commit_still_rebuilds(tmp_path: Path) -> None:
+    """T863 review R3 (round 2): the record names another commit than the checkout is on.
+
+    Nothing moved in this press, but the durable record says the image was built
+    from another commit. Reading only what moved would end the press and leave
+    the image stale against the files beside it.
+
+    Mutation: drop the commit comparison in `_built_from_what_is_here()` -> fails
+    (the press ends without a build).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _record_the_build(rec, server_dir, heads={s.repo: "d" * 40 for s in ENTRY.emulator.sources})
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+
+
+def test_a_no_move_press_keeps_a_refusal_and_only_refreshes_the_release(tmp_path: Path) -> None:
+    """T863 review R2: the release name is refreshed, the recorded build and the refusal stay.
+
+    `_record_source_revs()` is a landing's writer: it rewrites `built`/`pin`/
+    `ahead` from the checkout and drops the repo's `refused_updates` entry. A
+    press that moved nothing landed nowhere, so it must change only the name --
+    a refused commit already recorded for that repo is still refused.
+
+    Mutation: call `_record_source_revs()` on the no-move exit again -> fails
+    (the refusal is gone).
+    """
+    from tests.test_release_branches import BOTS, CORE, TAG_C, _branching
+    from tests.test_release_branches import _engine as _coa_engine
+    from tests.test_release_branches import _ready as _coa_ready
+
+    rec, server_dir = _coa_ready(tmp_path)
+    entry = _branching()
+    ahead = "f" * 40
+    rec.heads[server_dir / entry.emulator.sources[0].dest] = ahead
+    rec.heads[server_dir / entry.emulator.sources[1].dest] = TAG_C
+    rec.github = {CORE: 0, BOTS: 0}
+    rec.github_behind = {CORE: 2, BOTS: 0}
+    list(_coa_engine(rec, entry).update_to_latest(InstallOptions(server_dir=server_dir)))
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    before = state.rev_for(CORE)
+    assert before is not None and before.release == "coa-bots-2.10", before
+    stale = "d" * 40
+    native.write_state(
+        server_dir,
+        replace(
+            state,
+            source_revs=tuple(
+                replace(rev, release="") if rev.repo == CORE else rev for rev in state.source_revs
+            ),
+            refused_updates=((CORE, stale),),
+        ),
+    )
+    # T863 (round 2): the first press built this folder; the exit asks that build's
+    # record now, so the fixture says what a real `.git/HEAD` on disk would have said.
+    _record_the_build(
+        rec,
+        server_dir,
+        sources=entry.emulator.sources,
+        paths=_coa_engine(rec, entry).app_written_paths(server_dir),
+    )
+    rec.clones.clear()
+    rec.calls.clear()
+    rec.gets.clear()
+    lines = list(_coa_engine(rec, entry).update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert lines[-1].endswith("nothing was rebuilt and the server was not stopped."), lines
+    after = native.read_state(server_dir, valid=())
+    assert after is not None
+    assert (CORE, stale) in after.refused_updates, after.refused_updates
+    got = after.rev_for(CORE)
+    assert got is not None and got.release == "coa-bots-2.10", got
+    assert replace(got, release="") == replace(before, release=""), "the build was rewritten"
+
+
+def test_a_no_move_press_names_the_pin_this_app_now_tests_against(tmp_path: Path) -> None:
+    """T863-D: the exit refreshes the row's `pin` and `ahead`, never `built` or a refusal.
+
+    A server updated to a tip H under catalog pin P1, then a new Yu'lon ships pin P2
+    that H is past, and upstream did not move: the press exits without a build, and
+    the row must stop naming P1. `built_carries_pin()` reads that row's pin, so a
+    stale one withholds Revive (Centurion) and the mmaps stamp from a build this
+    catalog does describe, and the version line keeps an old "ahead".
+
+    Mutation: refresh only `release` again (`replace(rev, release=...)`) -> fails
+    (the row's pin is still P1 and its `ahead` still the stale count).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _record_the_build(rec, server_dir)
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    core = ENTRY.emulator.sources[0]
+    old_pin = "e" * 40
+    stale_commit = "d" * 40
+    rows = tuple(
+        native.SourceRev(
+            repo=source.repo,
+            built=rec.head_version(server_dir / source.dest) or "",
+            pin=old_pin if source.repo == core.repo else (source.rev or ""),
+            # A count neither pin gives: the exit must recount from the pin it records.
+            ahead=7,
+            release="",
+        )
+        for source in ENTRY.emulator.sources
+    )
+    native.write_state(
+        server_dir,
+        replace(state, source_revs=rows, refused_updates=((core.repo, stale_commit),)),
+    )
+    rec.calls.clear()
+    # The pin moved onto the head: P2 is the commit every source is already on, so
+    # the fetch lands where it started and this press has nothing to compile.
+    repinned = _entry_pinning(OLD)
+    made = _entry_engine(rec, repinned)
+    lines = list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert lines[-1] == NO_MOVE_UPDATE, lines
+    assert "build" not in rec.calls, rec.calls
+    after = native.read_state(server_dir, valid=())
+    assert after is not None
+    got = after.rev_for(core.repo)
+    assert got is not None, after.source_revs
+    assert got.pin == OLD, got
+    assert got.ahead == 0, got
+    assert tuple(rev.built for rev in after.source_revs) == tuple(
+        rev.built for rev in rows
+    ), "the build was rewritten"
+    assert after.refused_updates == ((core.repo, stale_commit),), after.refused_updates
+    for rev in after.source_revs:
+        source = next(one for one in repinned.emulator.sources if one.repo == rev.repo)
+        assert (rev.pin, rev.ahead) == made._pin_and_ahead(source, server_dir / source.dest), rev
+
+
+def test_a_no_move_press_the_family_refuses_puts_each_folder_back_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T863 review R1: one remember-refusal and one put-back, done by the outer handler.
+
+    The no-move exit used to have its own `except` clauses inside the route's
+    `try`, so an InstallerError from the family was restored twice: the inner
+    handler put the folders back and raised, and the outer handler put them back
+    again, cursing every line into the log a second time.
+
+    Mutation: restore the two inner `except` clauses -> fails (each folder is
+    put back twice).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _record_the_build(rec, server_dir)
+    made = engine(rec)
+    core = ENTRY.emulator.sources[0]
+
+    def refuses(_server_dir: Path, _moved: object, *, to_pin: bool) -> Iterator[str]:
+        raise UpdateRefused(
+            "The new code changes the characters database.", repo=core.repo, commit=OLD
+        )
+        yield ""  # pragma: no cover - makes this a generator
+
+    monkeypatch.setattr(made, "check_moved_sources", refuses)
+    said: list[str] = []
+    with pytest.raises(InstallerError) as raised:
+        for line in made.update_to_latest(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    put_back = [line for line in said if "was put back on" in line]
+    assert len(set(put_back)) == len(put_back), put_back
+    assert len(put_back) == len(ENTRY.emulator.sources), (put_back, said)
+    message = str(raised.value)
+    assert message.count("changes the characters database") == 1, message
+    state = native.read_state(server_dir, valid=())
+    assert state is not None and (core.repo, OLD) in state.refused_updates, state
+
+
+def test_a_no_move_press_whose_write_back_changes_a_file_still_rebuilds(tmp_path: Path) -> None:
+    """T863 review R4 (round 2): the record's `written` digest is what the image was built from.
+
+    A new Yu'lon can render a different compose file into the same checkout.
+    Nothing moved and nothing was built since, but the record says the image on
+    disk was compiled from the older file, so the press must rebuild. The record
+    is written while the older content is on disk and the current file restored
+    after it: the write-back then writes the current content back, and only the
+    record can tell that the image is behind.
+
+    Mutation: drop the `written` comparison in `_built_from_what_is_here()` ->
+    fails (the press ends without a build).
+    """
+    from yulon.catalog import composegen
+
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    current = server_dir / composegen.BASE_FILE
+    text = current.read_text(encoding="utf-8")
+    current.write_text(text + "# an older Yu'lon wrote this line\n", encoding="utf-8")
+    _record_the_build(rec, server_dir)  # the image was built from that older file
+    current.write_text(text, encoding="utf-8")  # what this Yu'lon writes back
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+
+
+def test_a_no_move_update_on_a_cmangos_entry_still_rebuilds(tmp_path: Path) -> None:
+    """T863 review R5 (T866): CMaNGOS reports catch-up work from its plan, so Update rebuilds.
+
+    `CmangosInstaller.servers_down_work()` returns work from the catalog plan's
+    phases, never from the ledger, and `check_moved_sources()` always hands it
+    that plan. So even with every source on the commit its build is from, a
+    CMaNGOS Update joins the full path -- not by accident of a missing record,
+    which is why the record is written first.
+
+    Mutation: let the no-move exit ignore the family's work -> fails (no build).
+    """
+    rec, server_dir, made = _tbc(tmp_path)
+    for source in TBC.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _record_the_build(
+        rec,
+        server_dir,
+        sources=TBC.emulator.sources,
+        paths=made.app_written_paths(server_dir),
+    )
+    lines = list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert not any("nothing was rebuilt" in line for line in lines), lines
+    assert "is running on" in lines[-1], lines
+    assert "build" in rec.calls, rec.calls
+
+
+def test_an_update_with_a_folder_off_its_build_still_rebuilds(tmp_path: Path) -> None:
+    """T863 (T680/T758): an `earlier` row owes a build, so the full path runs with heads unchanged.
+
+    The build record is written first, so the only thing that can send this
+    press down the full path is the stray row.
+
+    Mutation: drop the `earlier` condition in `_nothing_moved` -> fails (ends early
+    while a folder is owed its build).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _record_the_build(rec, server_dir)
+    stray = server_dir / "elsewhere"
+    (stray / ".git").mkdir(parents=True, exist_ok=True)
+    (stray / ".git" / "HEAD").write_text("c" * 40 + "\n")
+    assert native.remember_sources_off(server_dir, [("other/repo", stray, "d" * 40)]) == ""
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+
+
+def test_a_kept_head_with_nothing_new_still_names_its_release(tmp_path: Path) -> None:
+    """T863 (T862-E): the "stays there" press with nothing moved still leaves coa-bots-2.10.
+
+    Mutation: skip the record on the exit -> fails (the release row is lost).
+    """
+    from tests.test_release_branches import BOTS, CORE, TAG_C, _branching
+    from tests.test_release_branches import _engine as _coa_engine
+    from tests.test_release_branches import _ready as _coa_ready
+
+    rec, server_dir = _coa_ready(tmp_path)
+    entry = _branching()
+    ahead = "f" * 40
+    rec.heads[server_dir / entry.emulator.sources[0].dest] = ahead
+    rec.heads[server_dir / entry.emulator.sources[1].dest] = TAG_C
+    rec.github = {CORE: 0, BOTS: 0}
+    rec.github_behind = {CORE: 2, BOTS: 0}
+    first = list(_coa_engine(rec, entry).update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert any("so it stays there" in line for line in first), first
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    got = state.rev_for(CORE)
+    assert got is not None and got.release == "coa-bots-2.10", got
+    # T863 (round 2): the first press built this folder; the exit asks that build's
+    # record, not what the next press sees move.
+    _record_the_build(
+        rec,
+        server_dir,
+        sources=entry.emulator.sources,
+        paths=_coa_engine(rec, entry).app_written_paths(server_dir),
+    )
+    rec.clones.clear()
+    rec.calls.clear()
+    rec.gets.clear()
+    lines = list(_coa_engine(rec, entry).update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert lines[-1].endswith("nothing was rebuilt and the server was not stopped."), lines
+    assert "build" not in rec.calls, rec.calls
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    got = state.rev_for(CORE)
+    assert got is not None and got.release == "coa-bots-2.10", got
+
+
+def _heads_on_disk(server_dir: Path, sha: str) -> None:
+    """Every source's checkout says `sha` in `.git/HEAD`, as a real clone does.
+
+    The build record's `sources` are read off the folder (`native.source_heads()`), not
+    off a seam, so a test whose press really rebuilds needs the files a real install has.
+    """
+    for source in ENTRY.emulator.sources:
+        (server_dir / source.dest / ".git" / "HEAD").write_text(f"{sha}\n", encoding="utf-8")
+
+
+def test_a_press_that_failed_before_compiling_still_leaves_the_next_one_rebuilding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T863 (round 2, Codex's case): the record is what decides, not what this press did.
+
+    The build on disk was made from app-written content this Yu'lon does not write (the
+    record's `written` differs). The first press gets past the write-back and dies
+    before it compiles, so nothing rewrites the record; the second, identical press must
+    rebuild for the same reason. A check that compared the files before and after THIS
+    press would see no change on either press and end both without a build.
+
+    Mutation: compare the pre-write-back hash with the post-write-back one again (drop
+    `written` from `_built_from_what_is_here()`) -> fails (the second press ends early).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _heads_on_disk(server_dir, OLD)
+    _record_the_build(rec, server_dir, written="e" * 64)
+    made = engine(rec)
+
+    def cannot_stop(_server_dir: Path, _route: str, _press: str) -> Iterator[str]:
+        raise InstallerError("the map data job would not stop")
+        yield ""  # pragma: no cover - makes this a generator
+
+    monkeypatch.setattr(made, "before_rebuild", cannot_stop)
+    with pytest.raises(InstallerError, match="would not stop"):
+        list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert "build" not in rec.calls, rec.calls
+    assert native.read_built_from_written(server_dir) == "e" * 64, "it wrote a record"
+
+    rec.calls.clear()
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+    assert native.read_built_from_written(server_dir) not in (None, "e" * 64)
+
+
+def test_a_record_without_written_takes_the_full_path_and_then_the_exit(tmp_path: Path) -> None:
+    """T863 (round 2): a record an older Yu'lon wrote owes one build, then it is usable.
+
+    The commits match and nothing moved, but the record has no `written`: this build
+    cannot say what files the image was made from, so it compiles. That compile writes
+    a record with `written`, and the next press -- identical -- ends early.
+
+    Mutation: treat a missing `written` as a match -> fails (the first press ends early).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _heads_on_disk(server_dir, OLD)
+    native.remember_built_from(server_dir, {s.repo: OLD for s in ENTRY.emulator.sources})
+    assert native.read_built_from_written(server_dir) is None
+
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+    assert native.read_built_from_written(server_dir) is not None, "the rebuild wrote no `written`"
+
+    rec.calls.clear()
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == NO_MOVE_UPDATE, lines
+    assert "build" not in rec.calls, rec.calls
+
+
+def test_a_forgotten_record_takes_the_full_path(tmp_path: Path) -> None:
+    """T863 (round 2): a compile that died forgot the record, so no exit may be taken.
+
+    The checkout is unchanged and the state file still names a build, which is exactly
+    the state a Yu'lon killed inside a compile leaves. Nothing durable says the running
+    image is this code, so the press compiles.
+
+    Mutation: answer True when there is no record -> fails (the press ends early).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    native.forget_built_from(server_dir)
+    assert native.read_built_from(server_dir) == {}
+
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+
+
+def test_a_pending_module_move_takes_the_full_path(tmp_path: Path) -> None:
+    """T863 (round 2): a T557 module update nobody has built owes the build the exit would skip.
+
+    Every source is where its build was made from, but a module's clone was moved by a
+    Modules-tab Update since the last build. Ending here would leave that module out of
+    the worldserver until some later press, which is the whole of what T557 exists for.
+
+    Mutation: drop the module-move check in the exit -> fails (the press ends early).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _record_the_build(rec, server_dir)
+    moved_to = "b" * 40
+    clone = server_dir / "modules" / "mod-ale"
+    (clone / ".git").mkdir(parents=True, exist_ok=True)
+    (clone / ".git" / "HEAD").write_text(f"{moved_to}\n", encoding="utf-8")
+    assert module_moves.record_start(server_dir, "module/mod-ale", head="a" * 40, release="") == ""
+    assert module_moves.record_end(server_dir, "module/mod-ale", head=moved_to, release="") == ""
+
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+
+
+def test_an_exit_does_not_settle_the_module_update_record(tmp_path: Path) -> None:
+    """T863 (round 2, E4): a press that builds nothing must not say a build worked.
+
+    `with_module_moves()` settles the T557 record on a normal return -- every clone was
+    just compiled. This exit compiled nothing, so it returns `native.NOTHING_BUILT` and
+    the wiring leaves the record exactly as it found it, `built_unix` included.
+
+    Mutation: settle on `NOTHING_BUILT` too -> fails (`built_unix` appears in the record).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _record_the_build(rec, server_dir)
+    assert module_moves.skip(server_dir, "module/mod-ale", tip="c" * 40) == ""
+    record = server_dir / module_moves.MOVES_FILE
+    before = record.read_bytes()
+    ledger = module_moves.read(server_dir)
+    assert ledger is not None and ledger.built_unix is None and not ledger.moves
+
+    lines = list(
+        install_wiring.with_module_moves(
+            engine(rec).update_to_latest(InstallOptions(server_dir=server_dir)),
+            server_dir,
+            put_back=None,
+            kept_settles=False,
+        )
+    )
+    assert lines[-1] == NO_MOVE_UPDATE, lines
+    assert record.read_bytes() == before, "the exit settled a record no build settled"
+    assert "build" not in rec.calls, rec.calls
+
+
+def test_a_rebuild_owed_now_takes_the_full_path(tmp_path: Path) -> None:
+    """T863 (round 2, E3): a module installed since the last build owes the compile (T750).
+
+    Every source is where its build was made from and no module Update is pending, but
+    the answers record says a module went in after this build: the exit would leave code
+    the worldserver does not have. `rebuilds_owed_now()` names it, so the full path runs
+    and its rebuild settles it.
+
+    Mutation: drop the `rebuilds_owed_now()` check in the exit -> fails (the press ends
+    early).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _record_the_build(rec, server_dir)
+    stamp = apply.built_stamp(server_dir)
+    assert stamp is not None
+    (server_dir / module_answers.ANSWERS_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "rebuild_owed": {"module/mod-ale": {"build": stamp, "never_built": True}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert apply.rebuilds_owed_now(server_dir) == {"module/mod-ale": True}
+
+    lines = _no_move_press(rec, server_dir)
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+
+
+def test_a_failed_record_check_prepares_the_press_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T863 (round 2, E5): the path that joins the full path after preparing does not redo it.
+
+    The record's `written` is stale, so the exit's own check fails AFTER the write-back,
+    the family's reading and the patches ran. The full path continues with
+    `_already_prepared = True`, exactly as the family-work branch does: each of the three
+    runs once, not twice.
+
+    Mutation: set `_already_prepared = False` on the failed-check path -> fails (each
+    count is 2).
+    """
+    rec, server_dir = _ready(tmp_path)
+    for source in ENTRY.emulator.sources:
+        rec.upstream[server_dir / source.dest] = OLD
+    _record_the_build(rec, server_dir, written="e" * 64)
+    made = engine(rec)
+    counts = {"rewrite": 0, "check": 0, "patch": 0}
+    real_rewrite = made._rewrite_what_we_own
+    real_check = made.check_moved_sources
+    real_patch = made.apply_carried_patches
+
+    def rewrite(*args: object, **kwargs: object) -> Iterator[str]:
+        counts["rewrite"] += 1
+        yield from real_rewrite(*args, **kwargs)  # type: ignore[arg-type]
+
+    def check(*args: object, **kwargs: object) -> Iterator[str]:
+        counts["check"] += 1
+        return (yield from real_check(*args, **kwargs))  # type: ignore[arg-type]
+
+    def patch(*args: object, **kwargs: object) -> Iterator[str]:
+        counts["patch"] += 1
+        yield from real_patch(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(made, "_rewrite_what_we_own", rewrite)
+    monkeypatch.setattr(made, "check_moved_sources", check)
+    monkeypatch.setattr(made, "apply_carried_patches", patch)
+    lines = list(made.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert lines[-1] == "WoW WotLK is running on the newest upstream code.", lines
+    assert "build" in rec.calls, rec.calls
+    assert counts == {"rewrite": 1, "check": 1, "patch": 1}, counts

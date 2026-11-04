@@ -173,3 +173,59 @@ def write_coa_snapshots() -> None:
         folder.mkdir(parents=True, exist_ok=True)
         for name, text in coa_rendered(label).items():
             (folder / name).write_text(text, encoding="utf-8", newline="\n")
+
+
+# -- T850: Mists of Pandaria's files, the family's first SECOND entry --------------------
+
+MOP = "wow-mop"
+MOP_SNAPSHOT_ROOT = Path(__file__).resolve().parent / "data" / "mop-rendered"
+MOP_LABELS = {"linux": "", "linux-z": ":z"}
+"""Snapshot folder -> the bind label it was rendered with: no SELinux, and SELinux enforcing.
+
+The first TrinityCore entry that is not Centurion: same family, same `shared/trinitycore`
+templates, its own `wow-mop/native/{Dockerfile,dockerignore}.tmpl` and its own core dir, so
+this is what the shared templates plus that template set render to on Linux. Unlike
+`centurion_rendered`, it carries the Dockerfile and `.dockerignore` too, as the CMaNGOS
+goldens do, because the MoP template set is new in T850. Regenerate only when a MoP
+template change for Linux is the point of the commit:
+
+    python -c "from tests.support_rendered import write_mop_snapshots as w; w()"
+"""
+
+
+def mop_rendered(bind_label: str, platform_id: str = "linux") -> dict[str, str]:
+    """wow-mop's three compose files, Dockerfile and .dockerignore, on `platform_id`."""
+    entry = load_catalog().get(MOP)
+    server_dir = linux_server_dir(MOP)
+    plan = composegen.render(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        db_password=PASSWORD,
+        bind_label=bind_label,
+        platform_id=lambda: platform_id,
+    )
+    actual = composegen.install_id(server_dir, platform_id=lambda: platform_id)
+    wanted = linux_install_id(MOP)
+    block = entry.install.native
+    assert block is not None and block.dockerfile_dir is not None
+    docker, ignore = dockerfile.render(
+        resources.installers_dir() / block.dockerfile_dir,
+        composegen.entry_tokens(entry),
+        secrets=native.Secrets(db_password=PASSWORD),
+    )
+    return {
+        composegen.BASE_FILE: plan.base.replace(actual, wanted),
+        composegen.OVERRIDE_FILE: plan.override.replace(actual, wanted),
+        composegen.BUILD_FILE: plan.build.replace(actual, wanted),
+        "Dockerfile": str(docker),
+        ".dockerignore": str(ignore),
+    }
+
+
+def write_mop_snapshots() -> None:
+    for folder_name, label in MOP_LABELS.items():
+        folder = MOP_SNAPSHOT_ROOT / folder_name
+        folder.mkdir(parents=True, exist_ok=True)
+        for name, text in mop_rendered(label).items():
+            (folder / name).write_text(text, encoding="utf-8", newline="\n")

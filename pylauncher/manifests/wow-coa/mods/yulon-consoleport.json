@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "id": "yulon-consoleport",
+  "name": "ConsolePort (controller support, client add-on)",
+  "type": "mod",
+  "game": "wow-coa",
+  "description": "New: play with a controller: the ConsolePortLK Enhanced add-on, copied into your CoA client's Interface/AddOns; nothing is written to the server. On a Steam Deck, Steam Input sends its keys; in game type /cp recalibrate once. Not yet tested on Conquest of Azeroth's own class and talent windows. Not yet tested on a Steam Deck: tell us on Discord if something is off.",
+  "source": {
+    "repo": "SuttonX/ConsolePortLK-Enhanced",
+    "follow": "releases"
+  },
+  "build": {
+    "rebuild": false,
+    "restart": false
+  },
+  "client": [
+    {
+      "src": "ConsolePort",
+      "dest": "addons",
+      "name": "ConsolePort"
+    },
+    {
+      "src": "ConsolePortAdvanced",
+      "dest": "addons",
+      "name": "ConsolePortAdvanced"
+    },
+    {
+      "src": "ConsolePortBar",
+      "dest": "addons",
+      "name": "ConsolePortBar"
+    },
+    {
+      "src": "ConsolePortHelp",
+      "dest": "addons",
+      "name": "ConsolePortHelp"
+    },
+    {
+      "src": "ConsolePortKeyboard",
+      "dest": "addons",
+      "name": "ConsolePortKeyboard"
+    },
+    {
+      "src": "ConsolePortLoader",
+      "dest": "addons",
+      "name": "ConsolePortLoader"
+    },
+    {
+      "src": "ConsolePortUI_Loot",
+      "dest": "addons",
+      "name": "ConsolePortUI_Loot"
+    },
+    {
+      "src": "ConsolePortUI_Menu",
+      "dest": "addons",
+      "name": "ConsolePortUI_Menu"
+    }
+  ],
+  "notes": [
+    "FOLLOWS RELEASES (T126): Install and Update take the newest published release's commit,",
+    "not the branch tip. ConsolePortLK Enhanced publishes versioned releases (v1.0.4-v1.0.6);",
+    "the release's own digest proves the download.",
+    "Play with a controller: the whole checkout is NOT copied, only the eight add-on folders",
+    "WoW reads (the repo root holds assets/, tests/, docs and the .toc files' siblings).",
+    "Two names are left behind (T65): `.git`, whose 0444 pack files made every second install",
+    "of a `src: \".\"` addon die with Errno 13 before it had landed a file, and this app's own",
+    "`.yulon-clone.json`. Both are bookkeeping, the history stays in the clone, and the client",
+    "never reads either.",
+    "OPT-IN (T855): nothing puts this add-on into your client without a press. It is not among",
+    "the default add-ons, so Play and a fresh install leave the client alone until the Modules",
+    "tab's own Install. A Remove is remembered per server and nothing puts the add-on back;",
+    "installing it by hand lifts that. Nothing is written to the server and nothing is restarted.",
+    "\"Check for updates\" counts only `modules/`, so this `mods` item gets no update count; a",
+    "manual Update follows releases. Interface 30300 (Wrath 3.3.5a) against this entry's 30300",
+    "CoA client, which Yu'lon itself keeps current. Credit: ConsolePortLK Enhanced by SuttonX,",
+    "Artistic License 2.0; based on ConsolePort by Sebastian Lindfors and ConsolePortLK by Leandro Araujo."
+  ]
+}

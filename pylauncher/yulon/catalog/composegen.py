@@ -433,6 +433,36 @@ distinction a hand-typed second copy of `"yulon-"` could quietly drift from.
 """
 
 
+ONE_SHOT_SERVICES = frozenset(
+    {
+        "ac-db-import",
+        "ac-client-data-init",
+        "ub-db-import",
+        "ub-client-data-init",
+        "coa-db-import",
+        "coa-tools",
+        "coa-world-bootstrap",
+    }
+)
+"""Every compose service this module emits that runs once and exits (T864-E).
+
+The full set, not a suffix rule: these are the keys the shipped templates
+write with no `restart:` at all (`db-import`, `client-data-init`,
+`world-bootstrap`) or `restart: "no"` (`tools`), and every one of them is
+either depended on with `condition: service_completed_successfully` or simply
+exits. `test_composegen.py` derives the set from the rendered base file of
+every entry and fails if this list and the templates ever disagree.
+
+Why a caller wants it: a finished container of one of these still references
+the image it ran from, while `compose up --force-recreate` never selects the
+service again. Such a container has no state of its own — what a one-shot wrote
+lives in the project's volumes and databases — so clearing it is safe, and
+`docker_space.remove_finished_holders_on()` allows that for these services
+ONLY. A database, authserver or worldserver container is never in this set:
+removing one would end a server somebody is running.
+"""
+
+
 def project_name(
     game_id: str,
     server_dir: Path,
@@ -1046,7 +1076,10 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
     `_public_tokens()` adds `REALM_HOST`, the three ports, the project name and
     the image prefix and tag, and is what the build context is rendered from;
     `_secret_tokens()` is that plus `DB_PASSWORD`, for the conf tables and
-    (K.7) the SQL and verify.
+    (K.7) the SQL and verify. `LOGS_DB` is `databases.extra[0]` and
+    `PLAYERBOTS_DB` is `databases.playerbots`, each present only when the entry
+    names one (T850): a template that uses a token its entry does not set fails
+    the unknown-token check, as before.
 
     Raises:
         ComposeGenError: the entry has no `install.native` block, its three
@@ -1067,6 +1100,8 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
     }
     if entry.databases.extra:
         tokens["LOGS_DB"] = entry.databases.extra[0]
+    if entry.databases.playerbots is not None:
+        tokens["PLAYERBOTS_DB"] = entry.databases.playerbots
     built = built_here(native)
     if built is not None:
         tokens["MAKE_JOBS"] = str(built.dockerfile.make_jobs)
@@ -1441,7 +1476,7 @@ AC_DIST_DIR = "/azerothcore/env/dist"
 `data`)."""
 
 AC_WORLD_COMMAND = ("/usr/bin/env", "bash", "/azerothcore/entrypoint.sh", "worldserver")
-"""The CoA worldserver image's own ENTRYPOINT + CMD (`apps/docker/Dockerfile:148,192` at 98570f24).
+"""The CoA worldserver image's own ENTRYPOINT + CMD (`apps/docker/Dockerfile:148,192` at a1e8c99e).
 A compose `entrypoint:` drops the image's CMD, so the Windows sync renders this as `command:` and
 `exec`s it; `tests/test_coa_world_data.py` reads it off a copy of that Dockerfile."""
 

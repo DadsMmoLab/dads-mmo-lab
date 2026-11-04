@@ -196,7 +196,7 @@ def test_a_stopped_import_whose_importer_would_not_end_says_so_after_the_stop(
     assert isinstance(raised.value, TrueAfterStop), type(raised.value)
     assert not isinstance(raised.value, InstallStopped), "a Stop that left a writer is not clean"
     said = str(raised.value)
-    assert IMPORTER in said and f"docker rm -f {IMPORTER}" in said, said
+    assert IMPORTER in said and f"docker rm -f -v {IMPORTER}" in said, said
 
 
 @pytest.mark.parametrize("before", [PARTIAL, ABSENT], ids=["partial", "absent"])
@@ -547,7 +547,7 @@ def test_repair_refuses_while_an_importer_it_could_not_end_runs(
     with pytest.raises(docker.DockerRefusal) as refused:
         docker.repair_import(SPEC, tmp_path, lambda: asked.append("probe") or PARTIAL)
     assert asked == [], asked
-    assert f"docker rm -f {IMPORTER}" in str(refused.value), refused.value
+    assert f"docker rm -f -v {IMPORTER}" in str(refused.value), refused.value
 
 
 # ---------------------------------------------------------------- the server-data download
@@ -577,7 +577,7 @@ def test_a_download_left_running_is_ended_before_another_starts_and_refused_if_n
         list(engine(rec, end_one_shot=end_one_shot).run(InstallOptions(server_dir=tmp_path / "s")))
     assert f"one-shot:{DOWNLOADER}" not in rec.calls, rec.calls
     assert "server-data download" in str(raised.value), raised.value
-    assert f"docker rm -f {DOWNLOADER}" in str(raised.value), raised.value
+    assert f"docker rm -f -v {DOWNLOADER}" in str(raised.value), raised.value
 
 
 def test_a_stopped_download_whose_container_would_not_end_is_not_a_clean_stop(

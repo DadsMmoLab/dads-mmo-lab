@@ -2,7 +2,7 @@
 
 A catalog entry's `client.packs` names zips of patch files, addons and DLLs
 (`catalog.ClientPack`). This module only GETS them and proves them; unpacking
-into a ready-to-play client is a later step's job. Two sources:
+into a ready-to-play client is a later step's job. Three sources:
 
 * **The server's own checkout** (`fetch_checkout`). Centurion keeps its client
   patches in its repo at the pinned commit, so they always match the server
@@ -17,7 +17,13 @@ into a ready-to-play client is a later step's job. Two sources:
   beside the zip, so a changed pack lands in a new folder instead of being
   mistaken for the old one. Resumable: an interrupted download keeps its
   `.part` and the next attempt asks for the rest with an HTTP `Range`.
-
+* **A GitHub repo's latest release** (`fetch_github_release`, T853), for packs
+  the makers publish as release assets (ConsolePort: the controller add-on for
+  the 3.3.5a client). The tag names the version and the cache folder, so a new
+  release is picked up at the same moments a `version_url` pack's new version
+  is: each Play's fetch (its step 1b) and its Update button's shared apply.
+  The release's own `digest` (`sha256:<hex>`) proves the asset — the catalog
+  pins none — and a release without one is refused unused.
 **What proves a file.** The pack's checksum where it has one; a URL pack may
 have none, because the server's site may publish none, and then the size the
 server declared, the zip's own CRCs (`ZipFile.testzip`) and the recorded
@@ -54,6 +60,7 @@ import zipfile
 import zlib
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -925,7 +932,14 @@ def unavailable_line(pack: ClientPack, url: str, code: int) -> str:
 
     The default is the old line about the server's site, kept word for word so
     the HD packs read as before. The plan (step 6) pins Lumenveil's own line.
+    A github_release pack whose release (or asset) is gone reads as a url
+    pack's 404 does: an optional pack then writes its note and Play goes on.
     """
+    if pack.source.kind == "github_release":
+        return (
+            f"{pack.label} is not available from the server's site right now (HTTP {code} "
+            f"for {url}). Try again later."
+        )
     if "lumenveil" in pack.id.casefold():
         return (
             f"{pack.label} is unavailable: its download page no longer has this version "
@@ -1220,6 +1234,449 @@ def _fetch_url(
     os.replace(part, dest)
     logger.info(f"client-packs: {pack.id} {version or ''} downloaded to {dest}")
     return Fetched(dest, version, sha256)
+
+
+_GITHUB_API = "https://api.github.com/repos"
+"""Where a github_release pack's latest release is read from (T853)."""
+
+GITHUB_RELEASE_MAX_BYTES = 64 * 1024 * 1024
+"""How large a github_release asset may be: proved with its whole bytes in hand (T853 review 1, G3).
+
+Counted against the release's own `size`, BEFORE the first byte is downloaded: an
+asset over it is refused as unavailable, whether or not a verified cache stands
+by — a verified cache is kept with the kept sentence (`_keep_cached`). (A url
+pack has no such bound: Lumenveil and the HD packs exceed it.)
+"""
+
+_GITHUB_API_ANSWER_MAX_BYTES = 64 * 1024
+"""How much of a GitHub latest-release answer is read: JSON with assets, never a zip."""
+_GITHUB_ASSET_HOSTS = frozenset(
+    {"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
+)
+"""Hosts a release asset's download may be redirected to (T853).
+
+The asset's own address (`github.com`, which redirects) and the two asset
+hosts Lumenveil's `redirect_hosts` names. Added to the entry's fence by
+`Client.hosts()`: a redirect anywhere else is refused.
+"""
+
+_DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
+"""A GitHub release asset's `digest`: exactly `sha256:<64 hex>`, case as sent."""
+
+
+def fetch_github_release(
+    pack: ClientPack,
+    *,
+    entry_id: str,
+    allowed_hosts: frozenset[str],
+    opener: Opener = _open,
+    progress: Progress | None = None,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> Fetched:
+    """`_fetch_github_release`, with an operating-system failure worded as a `PackError`."""
+    try:
+        return _fetch_github_release(
+            pack,
+            entry_id=entry_id,
+            allowed_hosts=allowed_hosts,
+            opener=opener,
+            progress=progress,
+            cancelled=cancelled,
+        )
+    except OSError as exc:
+        raise _os_refusal(pack, exc) from exc
+
+
+def _fetch_github_release(
+    pack: ClientPack,
+    *,
+    entry_id: str,
+    allowed_hosts: frozenset[str],
+    opener: Opener = _open,
+    progress: Progress | None = None,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> Fetched:
+    """A github_release pack's zip in `cache_dir()/<entry>/<pack>/<tag>/`, proved by digest.
+
+    The release answered first (`api.github.com`, in the entry's fence), because
+    its tag names the folder; a cached zip there is proved again against the
+    release's digest and used. Else the asset (redirecting only to the kind's
+    own hosts) downloads onto `<file>.part` (resumed from its size, bound by
+    the release's `size`), is proved (`sha256 == digest`); the note is staged
+    first (temp), then the zip is moved into its final name, then the note —
+    a NEW download counts as cached only when both the proved zip and its
+    note are in place. A `.part` that fails its proof is deleted, and a
+    digest mismatch deletes the cache file too. Over
+    `GITHUB_RELEASE_MAX_BYTES` the asset is refused as unavailable before any
+    download, keeping a verified cache with the kept sentence (`_keep_cached`).
+    A release the answer cannot name (GONE from the API, or no network, too long,
+    not JSON, no tag), or that names no proved file for this pack, falls back to
+    the newest verified cache with the kept sentence (`_keep_cached`), and without
+    one refuses in the url pack's own words.
+    """
+    source = pack.source
+    if source.kind != "github_release" or source.repo is None or source.asset is None:
+        raise PackError(f"{pack.label} does not come from a GitHub release.")
+    _refuse_unlisted(pack, f"{_GITHUB_API}/{source.repo}/releases/latest", allowed_hosts)
+    for name in (entry_id, pack.id):
+        if not _SAFE_NAME.match(name):
+            raise PackError(f"{pack.label}: {name!r} cannot name a cache folder.")
+    try:
+        version, assets = _read_release(pack, source.repo, opener, allowed_hosts)
+        size, digest, download = _pick_asset(pack, assets)
+    except PackError as exc:
+        if _is_release_outage(exc) or isinstance(exc, _MissingAsset):
+            return _keep_cached(pack, entry_id, exc.args[0])
+        raise
+    if size > GITHUB_RELEASE_MAX_BYTES:
+        return _keep_cached(
+            pack,
+            entry_id,
+            f"{pack.label}: its latest release is {_size_text(size)} "
+            f"({pack.source.asset}), over the {_size_text(GITHUB_RELEASE_MAX_BYTES)} "
+            "Yu'lon downloads, so Yu'lon will not use it.",
+        )
+    _refuse_unlisted(pack, download, allowed_hosts)
+    host = urllib.parse.urlsplit(download).hostname or ""
+    if host not in _GITHUB_ASSET_HOSTS:
+        raise PackError(
+            f"{pack.label} would be fetched from {host!r}, which is not a plain https "
+            "address on a host this server's catalog entry names, so Yu'lon did not ask it."
+        )
+    folder = cache_dir() / entry_id / pack.id / version
+    dest = folder / source.asset
+    if dest.is_file():
+        try:
+            proved = Fetched(dest, version, _prove(pack, dest, expected=("sha256", digest)))
+            _note_fetch(folder, tag=version, asset=source.asset, size=size, digest=digest)
+            return proved
+        except PackError:
+            logger.info(f"client-packs: cached {dest} no longer proves; downloading it again")
+            dest.unlink(missing_ok=True)
+    folder.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    have = part.stat().st_size if part.is_file() else 0
+    if have > size:
+        part.unlink()
+        have = 0
+    _refuse_without_room(pack, folder, size - have)
+    if have < size:
+        _download(
+            pack,
+            download,
+            part,
+            have,
+            size,
+            opener=opener,
+            hosts=allowed_hosts,
+            progress=progress,
+            cancelled=cancelled,
+        )
+    try:
+        sha256 = _prove(pack, part, expected=("sha256", digest))
+    except PackError:
+        part.unlink(missing_ok=True)
+        raise
+    _stage_fetch_note(folder, tag=version, asset=source.asset, size=size, digest=digest)
+    os.replace(part, dest)
+    logger.info(f"client-packs: {pack.id} {version} downloaded to {dest}")
+    _commit_fetch_note(folder)
+    return Fetched(dest, version, sha256)
+
+
+_OUTAGE = "github-release-outage"
+"""Second `PackError` arg marking a broken release answer (kept-version fallback)."""
+
+
+def _is_release_outage(exc: BaseException) -> bool:
+    """Whether `exc` is a broken release answer, rather than a refusal naming the release."""
+    return isinstance(exc, PackError) and len(exc.args) > 1 and exc.args[1] == _OUTAGE
+
+
+def _read_release(
+    pack: ClientPack, repo: str, opener: Opener, hosts: frozenset[str]
+) -> tuple[str, Any]:
+    """`(tag, assets)` for `repo`'s latest release (T853).
+
+    The tag is the pack's version (through `_checked_version`: it names the
+    cache folder); `assets` is the release's file list, whatever shape it is —
+    the missing-asset refusal below decides, not this. A broken answer
+    (unreachable, too long, not JSON, no tag): the cached version stands with
+    the kept sentence (`_fetch_github_release`), and without one this raises
+    `PackError` in a plain sentence.
+    """
+    try:
+        return _read_release_answer(pack, repo, opener, hosts)
+    except PackUnavailable as exc:
+        # GONE from the API (a deleted repo, a release taken down): G2's kept
+        # version, or the url pack's own unavailable words without one.
+        raise _MissingAsset(exc.args[0]) from exc
+    except PackError as exc:
+        if _is_release_outage(exc):
+            raise
+        raise PackError(exc.args[0], _OUTAGE) from exc
+
+
+def _read_release_answer(
+    pack: ClientPack, repo: str, opener: Opener, hosts: frozenset[str]
+) -> tuple[str, Any]:
+    """The release answer read and parsed: raises plain `PackError` on any break."""
+    assert pack.source.repo == repo and pack.source.asset is not None  # the only caller checks
+    url = f"{_GITHUB_API}/{repo}/releases/latest"
+    data = b""
+    with _Deadline(STALL_SECONDS) as watcher:
+        response = _request(pack, opener, url, watcher, method="GET", headers={}, hosts=hosts)
+        try:
+            while len(data) <= _GITHUB_API_ANSWER_MAX_BYTES:
+                try:
+                    chunk = response.read1(_GITHUB_API_ANSWER_MAX_BYTES + 1 - len(data))
+                except Exception as exc:
+                    raise PackError(
+                        f"{pack.label}: its latest release could not be read ({exc}). Try again."
+                    ) from exc
+                if watcher.fired:
+                    raise PackError(f"{pack.label}: its latest release did not arrive. Try again.")
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            _close(response)
+    if len(data) > _GITHUB_API_ANSWER_MAX_BYTES:
+        raise PackError(f"{pack.label}: its latest release answer is too long. Try again.")
+    try:
+        release = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise PackError(f"{pack.label}: its latest release answer is not JSON. Try again.") from exc
+    if not isinstance(release, dict):
+        raise PackError(f"{pack.label}: its latest release answer is not JSON. Try again.")
+    tag = release.get("tag_name")
+    if not isinstance(tag, str) or not tag:
+        raise PackError(f"{pack.label}: its latest release names no version. Try again later.")
+    return _checked_version(pack, tag.encode("utf-8"), url), release.get("assets")
+
+
+def _pick_asset(pack: ClientPack, assets: Any) -> tuple[int, str, str]:
+    """`(size, digest, download)` for the asset `pack` names in a release's `assets` (T853).
+
+    A release that names no such asset, no download for it, no checksum for
+    it, or no size raises `_MissingAsset`: the digest is not a reason to stop
+    Play for everyone — the fetch falls back to the verified cache, and
+    without one refuses as a url pack's 404 does. Not an outage: a broken
+    release answer and a missing file stay distinct.
+    """
+    assert pack.source.asset is not None  # the only caller checks
+    if not isinstance(assets, list):
+        raise _MissingAsset(
+            f"{pack.label}: its latest release holds no files: no {pack.source.asset} asset. "
+            "Try again later."
+        )
+    asset: Mapping[str, Any] | None = None
+    for entry in assets:
+        if isinstance(entry, dict) and entry.get("name") == pack.source.asset:
+            asset = entry
+            break
+    if asset is None:
+        raise _MissingAsset(
+            f"{pack.label}: its latest release has no {pack.source.asset} asset. Try again later."
+        )
+    download = asset.get("browser_download_url")
+    if not isinstance(download, str) or not download:
+        raise _MissingAsset(
+            f"{pack.label}: its latest release has no {pack.source.asset} asset. Try again later."
+        )
+    digest = asset.get("digest")
+    match = _DIGEST.match(digest) if isinstance(digest, str) else None
+    if match is None:
+        raise _MissingAsset(
+            f"{pack.label}: its latest release published no checksum for {pack.source.asset}, "
+            "so Yu'lon will not use it."
+        )
+    size = asset.get("size")
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        raise _MissingAsset(
+            f"{pack.label}: its latest release did not say how large {pack.source.asset} is, "
+            "so Yu'lon cannot download it safely. Try again later."
+        )
+    return size, match.group(1), download
+
+
+class _MissingAsset(PackError):
+    """The release answers, but the pack's file is not proved by it (T853 review 1, G2).
+
+    No asset of that name (or no download for it), no checksum, or no size: the
+    digest is not a reason to stop Play for everyone. The fetch falls back to
+    the verified cache, keeps it with the kept sentence, and without one raises
+    the same `PackUnavailable` a url pack's 404 raises.
+    """
+
+
+_META_NAME = ".yulon-github-release.json"
+"""The note a successful verified fetch leaves in its cache folder (T853 review 1, G1)."""
+
+
+def _read_meta(folder: Path) -> dict[str, Any] | None:
+    """The cache folder's fetch note, or None when it says nothing usable."""
+    try:
+        raw = json.loads((folder / _META_NAME).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _note_fetch(folder: Path, *, tag: str, asset: str, size: int, digest: str) -> None:
+    """Leave the fetch note: what was verified, against the release's own digest, and when.
+
+    Through a sibling temp and `os.replace`, only after a complete write: a
+    failure keeps the previous valid note, never a truncated one. Best effort
+    (a cache that could not be noted is no reason to refuse Play): a failure
+    is logged, and the folder simply does not count as verified.
+    """
+    text = (
+        json.dumps(
+            {
+                "tag": tag,
+                "asset": asset,
+                "size": size,
+                "sha256": digest,
+                "verified_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    tmp = folder / (_META_NAME + ".yulon-tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, folder / _META_NAME)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.warning("client-packs: could not note the verified fetch in %s (%s)", folder, exc)
+
+
+def _fetch_note_text(*, tag: str, asset: str, size: int, digest: str) -> str:
+    """The fetch note's bytes for one verified download, before it is staged."""
+    return (
+        json.dumps(
+            {
+                "tag": tag,
+                "asset": asset,
+                "size": size,
+                "sha256": digest,
+                "verified_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+
+def _stage_fetch_note(folder: Path, *, tag: str, asset: str, size: int, digest: str) -> None:
+    """Stage the fetch note's temp: the new download counts as cached only with it.
+
+    Written (not yet committed) BEFORE the proved zip is moved into its final
+    name; `_commit_fetch_note` moves it after. If the note cannot even be
+    staged, the fetch still returns the proved zip for THIS Play but logs that
+    it will not be usable offline — the note is what makes the folder count
+    as a verified cached version.
+    """
+    tmp = folder / (_META_NAME + ".yulon-tmp")
+    try:
+        tmp.write_text(
+            _fetch_note_text(tag=tag, asset=asset, size=size, digest=digest), encoding="utf-8"
+        )
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.warning(
+            "client-packs: downloaded %s but could not note the verified fetch in %s (%s); "
+            "it will not be usable offline",
+            asset,
+            folder,
+            exc,
+        )
+
+
+def _commit_fetch_note(folder: Path) -> None:
+    """Move the staged fetch note into place; a missing stage is passed over."""
+    tmp = folder / (_META_NAME + ".yulon-tmp")
+    if not tmp.is_file():
+        return
+    try:
+        os.replace(tmp, folder / _META_NAME)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.warning("client-packs: could not note the verified fetch in %s (%s)", folder, exc)
+
+
+def _keep_cached(pack: ClientPack, entry_id: str, why: str) -> Fetched:
+    """The newest verified cached version, kept with the kept sentence (T853 review 1, G1-G2).
+
+    Only folders a successful verified fetch noted (`_note_fetch`) count: the
+    note's `verified_at` picks the newest, and the zip must still hash to the
+    note's own sha256 — a tampered-but-valid zip is skipped, a folder without
+    a note is ignored. Without one, the same `PackUnavailable` a url pack's
+    404 raises — the refusal itself (`why`) in it, so an optional pack writes
+    its note and Play goes on.
+    """
+    found = _newest_cached(pack, entry_id)
+    if found is None:
+        raise PackUnavailable(why) from None
+    logger.info("Could not use %s's newest release (%s); kept %s.", pack.label, why, found.version)
+    return found
+
+
+def _newest_cached(pack: ClientPack, entry_id: str) -> Fetched | None:
+    """The newest verified cached version of a github_release pack, or None (T853 review 1, G1).
+
+    Reads the pack's cache folder the way `prune_cache` does — only one-plain-
+    name folders, never through a link — and only folders with a fetch note
+    (`_note_fetch`) count, newest `verified_at` first. Each zip is proved
+    against the note's own sha256 (the release's digest at fetch time), never
+    against the archive's own CRCs alone: a tampered-but-valid zip is skipped,
+    and a folder without a note is not a cached version at all.
+    """
+    folder = cache_dir() / entry_id / pack.id
+    try:
+        children = list(folder.iterdir())
+    except OSError:
+        return None
+    assert pack.source.asset is not None  # the only caller checks
+    noted: list[tuple[str, Path]] = []
+    for child in children:
+        if play_client._is_link(child) or not child.is_dir():
+            continue
+        meta = _read_meta(child)
+        if (
+            meta is None
+            or meta.get("asset") != pack.source.asset
+            or not isinstance(meta.get("sha256"), str)
+            or not isinstance(meta.get("verified_at"), str)
+        ):
+            continue
+        noted.append((meta["verified_at"], child))
+    for _, child in sorted(noted, key=lambda item: item[0], reverse=True):
+        meta = _read_meta(child)
+        assert meta is not None  # listed only noted folders
+        digest = meta["sha256"]
+        assert isinstance(digest, str)
+        dest = child / pack.source.asset
+        if not dest.is_file() or play_client._is_link(dest):
+            continue
+        try:
+            return Fetched(dest, child.name, _prove(pack, dest, expected=("sha256", digest)))
+        except PackError:
+            continue
+    return None
 
 
 # --- Installing, recording and removing packs in a ready-to-play client ------------------------

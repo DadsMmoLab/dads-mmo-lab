@@ -23,17 +23,19 @@ binding because every fact in it is this core's. Three kinds:
   finds into the server (`-DMODULES=static`, `ConfigureModules.cmake`), and
   Yu'lon's image recipe lays `<server>/modules/` over the core's, so a module
   cloned or copied there is built in at the next Rebuild. The loader's name is
-  the FOLDER's (`Add<folder>Scripts`), so the folder keeps the author's name and
-  the name has to be exactly `mod-<x>` or `tw-mod-<x>` (lower case: the shared
-  Tortoise modules' names). Its `conf/*.conf.dist` goes to `etc/modules/<n>.conf`
-  at once, because a world built with a module whose settings file is missing,
-  or has no `[Section]`, does not start (`Config.cpp:207-231`).
+  the FOLDER's (`Add<folder>Scripts`), so the folder keeps the author's name
+  exactly, capitals included (T861). Its `conf/*.conf.dist` goes to
+  `etc/modules/<n>.conf` at once, because a world built with a module whose
+  settings file is missing, or has no `[Section]`, does not start
+  (`Config.cpp:207-231`).
 
-The name decides the kind because a link's content is unknown until it is
-cloned, and the kind decides the folder it is cloned to (`apply.CLONE_DIRS`).
-A repository named like a server module that holds no C++ in `src/` is read as a
-database package or add-on in `modules/`, which the core ignores (no `src/`, no
-module), and one that holds C++ but is not named like one is refused.
+The CONTENTS decide the kind since T861. A folder is read before it is copied:
+C++ in `src/` makes it a server module, anything else an add-on and/or database
+package. A LINK is always typed "module" and cloned into `modules/<folder>`: its
+contents are unknown until it is cloned, and the core ignores a folder there with
+no C++ in `src/`, which is the path a non-C++ repository already took when it was
+named like a module. `complete()` then sets `build.rebuild` from what the clone
+holds, so an add-on or SQL-only link asks for no rebuild.
 """
 
 from __future__ import annotations
@@ -42,8 +44,6 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-
-from pydantic import TypeAdapter, ValidationError
 
 from yulon import addon_archive, addon_layout
 from yulon.apply import CompletionRefused
@@ -54,30 +54,10 @@ from yulon.manifest import (
     Db,
     Manifest,
     ManifestType,
-    Slug,
     is_inside_path,
     parse_manifest,
 )
-from yulon.module_source import NOTHING_CHANGED, DeriveError
-
-_SLUG: TypeAdapter[str] = TypeAdapter(Slug)
-
-_SERVER_MODULE_NAME = re.compile(r"(tw-)?mod-[a-z0-9-]{1,64}")
-"""The names the shared Tortoise server modules carry (`tw-mod-*`, `mod-*-twow`, `mod-twow-*`).
-
-Matched whole and in lower case, NOT lower-cased first (WotLK's rule lower-cases the
-id; here the id is the loader's name, which comes from the folder: `Add<folder,
-non-alphanumerics to _>Scripts`, `modules/README.md:73-74`, so a renamed folder no
-longer links)."""
-
-_LOOKS_LIKE_A_SERVER_MODULE = re.compile(r"(tw-)?mod-", re.IGNORECASE)
-"""A name that starts like one: refused when it is not exactly one, never taken as an add-on.
-
-`TW-Mod-A` is a server module's name typed in another case, and taking it as an
-add-on would put a C++ module beside the add-ons."""
-
-_MAX_ID = 64
-"""As WotLK's `mod-[a-z0-9-]{1,64}`: an id is a folder name and a list key."""
+from yulon.module_source import id_for_folder
 
 CONF_SUFFIX = ".conf.dist"
 MODULE_CONF_DIR = "etc/modules"
@@ -111,34 +91,19 @@ LINK_DESCRIPTION = "Custom mod (cloned from a link you provided)."
 FOLDER_DESCRIPTION = "Custom mod (copied from a folder you provided)."
 
 WHAT_IS_READ = (
-    "Yu'lon installs three things on Tortoise: a server module (a repository named mod-<name> "
-    "or tw-mod-<name>, with C++ in src/ and its settings file in conf/), an add-on (a folder "
+    "Yu'lon installs three things on Tortoise: a server module (C++ in a folder's src/, "
+    "whatever the folder is called, with its settings file in conf/), an add-on (a folder "
     "holding a .toc file, which names it, at the top or under addons/ or Interface/AddOns/) "
     "and database changes (.sql files directly inside data/sql/auth, data/sql/character or "
     "data/sql/world)."
 )
 
-SERVER_MODULE_NAME_RULE = (
-    "a server module's repository must be named exactly mod-<name> or tw-mod-<name>, in lower "
-    "case letters, digits and hyphens (up to 64 after the prefix)"
-)
-"""The rule in one clause, for the refusals: the server finds a module by its folder's name."""
-
 _SECTION = re.compile(r"^[ \t]*\[[^\]\r\n]+\]", re.MULTILINE)
-
-
-def is_server_module_name(name: str) -> bool:
-    """Is `name` exactly a server module's repository name (`mod-<x>` / `tw-mod-<x>`)?"""
-    return _SERVER_MODULE_NAME.fullmatch(name) is not None
-
-
-def _kind_of(name: str) -> ManifestType:
-    return "module" if is_server_module_name(name) else "mod"
 
 
 @dataclass(frozen=True)
 class TortoiseLayout:
-    """`module_source.Layout` for this core: the name rule, the folder check, the build."""
+    """`module_source.Layout` for this core: the folder check and the build (T861)."""
 
     link_description: str = LINK_DESCRIPTION
     folder_description: str = FOLDER_DESCRIPTION
@@ -146,30 +111,15 @@ class TortoiseLayout:
     """Add-on folder names the shipped items use (lower case) → the shipped item's name."""
 
     def identify(self, basename: str, *, folder: bool) -> tuple[ManifestType, str, str]:
-        if is_server_module_name(basename):
-            return "module", basename, basename
-        if _LOOKS_LIKE_A_SERVER_MODULE.match(basename):
-            raise DeriveError(
-                f"{basename} is named like a Tortoise server module, but "
-                f"{SERVER_MODULE_NAME_RULE}: "
-                "the server finds a module by the name of its folder, so Yu'lon cannot rename "
-                f"it to fit. {NOTHING_CHANGED}"
-            )
-        item_id = re.sub(r"[^a-z0-9]+", "-", basename.lower()).strip("-")
-        try:
-            if len(item_id) > _MAX_ID:
-                raise ValueError(item_id)
-            _SLUG.validate_python(item_id)
-        except (ValidationError, ValueError):
-            what = "folder" if folder else "repository"
-            raise DeriveError(
-                f"The {what} is named {basename!r}, which gives Yu'lon no name to keep it "
-                f"under: it needs letters or digits, at most {_MAX_ID}. {NOTHING_CHANGED}"
-            ) from None
-        return "mod", item_id, basename
+        """This core derives no kind from a name: a link is a module, a folder is read."""
+        return "module", id_for_folder(basename), basename
+
+    def kind_for_folder(self, path: Path) -> ManifestType:
+        """A folder with C++ in `src/` is a server module; anything else is a mod."""
+        return "module" if _has_cpp_in_src(path) else "mod"
 
     def refuse_folder(self, path: Path, name: str) -> str | None:
-        found = read_package(path, name, self.shipped_addons, _kind_of(name))
+        found = read_package(path, name, self.shipped_addons, self.kind_for_folder(path))
         return found if isinstance(found, str) else None
 
     def build(self, kind: ManifestType) -> Build:
@@ -205,18 +155,11 @@ def read_package(
     A pure read; the same answer for a folder before it is copied and for a
     clone once it landed, so the folder route refuses early and both routes
     agree. A refusal is a sentence without a closing clause: whether anything
-    was changed is the caller's to say. `kind` is what the NAME made of it
-    (`TortoiseLayout.identify`).
+    was changed is the caller's to say. `kind` is what the CONTENTS made of it
+    (`TortoiseLayout.kind_for_folder`) or the link route's "module".
     """
     cpp_in_src = _has_cpp_in_src(root)
-    if kind != "module":
-        cpp = _first_cpp(root)
-        if cpp is not None:
-            return (
-                f"{name} holds C++ source ({cpp.relative_to(root).as_posix()}), so it is a "
-                f"server module, and {SERVER_MODULE_NAME_RULE}; this one is named {name}."
-            )
-    elif not cpp_in_src:
+    if kind == "module" and not cpp_in_src:
         elsewhere = _first_cpp(root)
         if elsewhere is not None:
             return (

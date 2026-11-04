@@ -848,16 +848,28 @@ def test_a_server_with_no_extras_says_so(qapp: object, ps: _Ps, tmp_path: Path) 
     assert "no extras" in window.extras_note.text()
 
 
-def test_the_shipped_wotlk_entry_offers_lumenveil_as_its_only_extra(
+def test_the_shipped_wotlk_entry_offers_lumenveil_and_consoleport(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """T809 W4: on Windows the launcher shows the shipped Lumenveil extra and its credit."""
     monkeypatch.setattr(client_packs.platform, "detect", lambda: "windows")
     window, _view, _ = _launcher(ps, tmp_path)
-    assert list(window.pack_boxes) == ["lumenveil"]
+    assert list(window.pack_boxes) == ["lumenveil", "consoleport"]
     assert window.pack_boxes["lumenveil"].text() == "Lumenveil 0.1.0"
+    assert "Controller support (ConsolePort)" in window.pack_boxes["consoleport"].text()
     assert "Lumenveil" in window.extras_note.text() and "GPL-2.0" in window.extras_note.text()
+    assert "ConsolePort" in window.extras_note.text()
     assert window.update_buttons == {}, "a fresh copy is current: no Update button"
+
+
+def test_the_shipped_wotlk_entry_offers_consoleport_on_every_platform(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T853: the controller add-on is a pure addons zip, so Linux/macOS offer it too."""
+    for here in ("linux", "macos", "windows"):
+        monkeypatch.setattr(client_packs.platform, "detect", lambda here=here: here)
+        window, _view, _ = _launcher(ps, tmp_path / here)
+        assert "consoleport" in window.pack_boxes, here
 
 
 def test_an_updated_lumenveil_shows_an_update_row_on_the_launcher(
@@ -911,8 +923,8 @@ def test_the_shipped_wotlk_entry_hides_lumenveil_off_windows(
     for here in ("linux", "macos"):
         monkeypatch.setattr(client_packs.platform, "detect", lambda here=here: here)
         window, _view, _ = _launcher(ps, tmp_path / here)
-        assert window.pack_boxes == {}, here
-        assert "no extras" in window.extras_note.text(), here
+        assert list(window.pack_boxes) == ["consoleport"], here
+        assert "no extras" not in window.extras_note.text(), here
 
 
 def test_the_addons_in_the_client_are_listed_and_their_folder_opens(

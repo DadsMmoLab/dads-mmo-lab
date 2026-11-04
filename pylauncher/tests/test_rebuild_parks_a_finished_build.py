@@ -608,7 +608,8 @@ def test_remove_kept_build_releases_the_names_and_forgets_the_record(tmp_path: P
     assert "after" not in daemon.names.values(), daemon.names
     assert native.read_parked_build(server_dir) is None
     assert all(daemon.names[ref] == "before" for ref in _refs(server_dir)), daemon.names
-    assert said.startswith("The kept build was removed"), said
+    assert said.ok is True, said
+    assert said.line.startswith("The kept build was removed"), said
 
 
 def test_remove_kept_build_says_which_names_docker_kept(tmp_path: Path) -> None:
@@ -623,8 +624,9 @@ def test_remove_kept_build_says_which_names_docker_kept(tmp_path: Path) -> None:
     said = engine(rec, **_seams_of(rec, daemon, remove_image=remove_image)).remove_kept_build(
         InstallOptions(server_dir=server_dir)
     )
-    assert stuck in said and "read-only" not in said, said
-    assert "was not removed" in said, said
+    assert said.ok is False, said
+    assert stuck in said.line and "read-only" not in said.line, said
+    assert "was not removed" in said.line, said
     assert native.read_parked_build(server_dir) is not None, "the record went, the name stayed"
 
 
@@ -635,6 +637,23 @@ def test_the_kept_build_route_is_offered_except_inside_wsl(tmp_path: Path) -> No
     assert route is not None
     assert route.check() is None, "no record, no note"
     assert install_wiring.kept_build_for_app(ENTRY, tmp_path, wsl_distro="Ubuntu") is None
+
+
+def test_the_kept_build_size_is_asked_on_the_distro_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4: `wsl_distro` reaches `docker.image_facts()` (here: the caller's own, passed through)."""
+    from yulon import docker, install_wiring
+
+    seen: list[str | None] = []
+
+    def facts(names: object, *, wsl_distro: str | None = None) -> tuple[docker.ImageFact, ...]:
+        seen.append(wsl_distro)
+        return (docker.ImageFact(image_id="sha256:aaa", size=7, project=None),)
+
+    monkeypatch.setattr(docker, "image_facts", facts)
+    assert install_wiring._kept_build_bytes(ENTRY, tmp_path, wsl_distro="Ubuntu") == 7
+    assert seen == ["Ubuntu"], seen
 
 
 def test_kept_names_that_do_not_hold_the_build_once_tagged_are_not_recorded(
@@ -716,10 +735,11 @@ def test_remove_kept_build_keeps_the_record_when_docker_does_not_answer(tmp_path
     said = engine(
         rec, **_seams_of(rec, daemon, image_id=lambda ref: None, remove_image=silent)
     ).remove_kept_build(InstallOptions(server_dir=server_dir))
+    assert said.ok is False, said
+    assert "was not removed" in said.line, said
+    assert not said.line.startswith("The kept build was removed"), said
     assert native.read_parked_build(server_dir) is not None, "the record went with the names kept"
     assert _parked_on(daemon, server_dir) == {"after"}, daemon.names
-    assert "was not removed" in said, said
-    assert not said.startswith("The kept build was removed"), said
 
 
 def test_a_mismatched_kept_build_keeps_its_record_while_docker_keeps_its_names(
@@ -745,10 +765,11 @@ def test_a_mismatched_kept_build_keeps_its_record_while_docker_keeps_its_names(
 
 # -- WotLK in normal use: only what its Dockerfile reads counts (T230) --------
 
-WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-3f2969dd"
-"""mod-playerbots/azerothcore-wotlk at commit 3f2969ddb0da42b48b4fca050c02b19163ba1e20 (the
-catalog's pin for wow-wotlk since T824; read at 7f12e89e 2026-10-05, the same bytes at f19a1879
-2026-10-08, at 2a2211cd 2026-10-10, at 8a4e76ea 2026-10-17 and at 3f2969dd 2026-10-28), byte for
+WOTLK_DATA = Path(__file__).resolve().parent / "data" / "azerothcore-wotlk-93333d6a"
+"""mod-playerbots/azerothcore-wotlk at commit 93333d6a9eb00fdf0179adde30da3c17618207d6 (the
+catalog's pin for wow-wotlk since T860; read at 7f12e89e 2026-10-05, the same bytes at f19a1879
+2026-10-08, at 2a2211cd 2026-10-10, at 8a4e76ea 2026-10-17, at 3f2969dd 2026-10-28 and at
+93333d6a 2026-11-02), byte for
 byte: the root `.dockerignore`, `apps/docker/Dockerfile` and `src/cmake/genrev.cmake`. WotLK
 renders none of its own, so these are what Docker builds the server folder with."""
 UPSTREAM_DOCKERIGNORE = WOTLK_DATA / "dockerignore"

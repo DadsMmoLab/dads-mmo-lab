@@ -103,6 +103,7 @@ from yulon import (
     default_addons,
     docker,
     docker_advice,
+    docker_space,
     forgetting,
     gaming_mode,
     hd_patches,
@@ -128,6 +129,7 @@ from yulon import (
     server_time_zone,
     serverlock,
     sql_log_offer,
+    steam_input,
     stop_choice,
     table_repair,
     teardown,
@@ -185,6 +187,7 @@ from yulon.controller_wow_centurion import characters as centurion_characters
 from yulon.controller_wow_centurion import console as centurion_console
 from yulon.controller_wow_centurion import controller as centurion_controller
 from yulon.controller_wow_centurion import maintenance as centurion_maintenance
+from yulon.controller_wow_coa import modules as coa_modules
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import console as tbc_console
 from yulon.controller_wow_tbc import controller as tbc_controller
@@ -1270,7 +1273,7 @@ class ClientOptionsBox(QWidget):
         required = sum(
             pack.size_hint or 0
             for pack in client.packs
-            if not pack.optional and pack.source.kind == "url"
+            if not pack.optional and pack.source.kind in ("url", "github_release")
         )
         self.required_label = QLabel("", self)
         self.required_label.setWordWrap(True)
@@ -1296,7 +1299,7 @@ class ClientOptionsBox(QWidget):
             if gone and pack.id not in installed:
                 check.setChecked(False)
                 check.setEnabled(False)
-            if pack.source.kind == "url":
+            if pack.source.kind in ("url", "github_release"):
                 self._sizes[pack.id] = pack.size_hint or 0
             check.toggled.connect(self._update_extra)
             self.pack_boxes[pack.id] = check
@@ -1335,7 +1338,10 @@ class ClientOptionsBox(QWidget):
         if pack.size_hint:
             text += f" ({size_text(pack.size_hint)})"
         if gone:
-            text += " — unavailable: the server's site no longer has it"
+            if pack.source.kind == "github_release":
+                text += " — unavailable: its GitHub release is not available right now"
+            else:
+                text += " — unavailable: the server's site no longer has it"
         return text
 
     def _update_extra(self) -> None:
@@ -2297,6 +2303,11 @@ class ControllerServices:
     `None` lists the folder the way it was listed before: file names only, no Delete or
     Clean up. Every shipped entry wires it.
     """
+    docker_space: docker_space.Seam | None = None
+    """This install's Docker space, for the Free Docker space press (T864).
+
+    `None` hides the press.
+    """
     dashboard: Callable[[], dashboard_module.Verdict] | None = None
     """One tick of this install's dashboard, or `None` for a game whose block is unmeasured.
 
@@ -2573,7 +2584,9 @@ class ControllerServices:
     A fresh install (`put_default_addons_in()`) and every Play (`_prepare_client()`) put
     each one in through `default_addons.put_in()`, unless the player removed it:
     the Modules tab's own Remove is remembered per server (`_module_done()`). Empty for
-    every game but Tortoise, which names its two Sagiroth addons.
+    every game but Tortoise, which names its two Sagiroth addons, and Conquest of Azeroth,
+    which names SquidBots Lite (T870). The folder is not part of this answer: whether
+    anything may be written into it is the write paths' own question (T870 review round 1).
     """
     module_forget: Callable[[Manifest], bool] | None = None
     """Drop this app's record of a custom module, answering whether there was one.
@@ -3066,12 +3079,19 @@ def _with_client_addons(
         except Exception as exc:  # noqa: BLE001 - the route refuses; the log says why
             logger.warning(f"could not read {entry.id}'s shipped add-ons: {exc}")
             unreadable = " ".join(str(exc).split()) or type(exc).__name__
+    # T855: the merged mod list, own tree included, so a player-brought add-on
+    # deriving exactly the shipped `yulon-consoleport` id is refused (T855-D1).
+    # The folder-name refusal is narrower: a shipped item's add-on folders count
+    # as "Yu'lon installs this" only while that item is installed and completed
+    # for this server, so a player's own ConsolePort keeps working once the
+    # shipped one is gone (T855-D2).
     route = client_addons.ClientAddons(
         applier=applier,
         game=entry.id,
         interface=interface,
         shipped=client_addons.shipped_addons(shipped),
         shipped_ids=tuple(m.id for m in shipped),
+        shipped_items=tuple(shipped),
         shipped_unreadable=unreadable,
     )
     route.pack_addons = lambda: client_addons.pack_addon_names(
@@ -3089,6 +3109,37 @@ def _with_client_addons(
             services.module_forget if services.module_forget is not None else route.forget
         ),
     )
+
+
+def _outside_addons(entry: CatalogEntry) -> list[Manifest] | None:
+    """The add-ons the player brought for this game; `None` when a record cannot be read.
+
+    `None` is "unknown", never "not the player's" (T870 C2, review round 3): a write path
+    that treats it as an empty list could put the shipped copy over one the player brought.
+    `ManifestStore` raises for an index it cannot parse, but SKIPS an individual user record
+    it cannot parse, so the skip list is part of the answer: one damaged record of the
+    player's leaves the question unanswerable. The one log line is here, and the callers
+    skip their write without a player-facing failure.
+    """
+    skipped: list[str] = []
+    try:
+        records = ManifestStore(
+            Path(os.devnull), entry.id, wotlk_modules.user_manifests_dir(), shipped=False
+        ).load_all("mod", skipped=skipped)
+        outside = [m for m in records if client_addons.is_client_addon(m)]
+    except Exception as exc:  # noqa: BLE001 - unknown is the player's, never a refusal
+        logger.warning(
+            f"could not read the add-ons brought for {entry.id}: {exc}; "
+            "no default add-on is written for it"
+        )
+        return None
+    if skipped:
+        logger.warning(
+            f"could not read {len(skipped)} of the add-ons brought for {entry.id} "
+            f"({skipped[0]}); no default add-on is written for it"
+        )
+        return None
+    return outside
 
 
 def _with_take_back(services: ControllerServices) -> ControllerServices:
@@ -3533,14 +3584,25 @@ def _move_services(
     )
     alone = _database_alone(entry.container_spec(), server_dir, wsl_distro=wsl_distro)
 
-    def load_manifest(kind: ManifestType, item_id: str) -> Manifest | None:
+    def load_manifest(kind: ManifestType, item_id_or_folder: str) -> Manifest | None:
         if store is None:
             return None
         try:
-            return store.load(kind, item_id)
-        except Exception as exc:  # noqa: BLE001 - not a module this tab can name: said by the pack
-            logger.info(f"no description of {kind}/{item_id} for the move: {exc}")
-            return None
+            return store.load(kind, item_id_or_folder)
+        except Exception as exc:  # noqa: BLE001 - a folder is not always an id
+            # T861: the move reads CLONE FOLDERS, which can be the author's exact name.
+            try:
+                return next(
+                    (
+                        manifest
+                        for manifest in store.load_all(kind)
+                        if apply_module.clone_folder(manifest) == item_id_or_folder
+                    ),
+                    None,
+                )
+            except Exception:  # noqa: BLE001 - not a module this tab can name: said by the pack
+                logger.info(f"no description of {kind}/{item_id_or_folder} for the move: {exc}")
+                return None
 
     def whole() -> move.ServerFacts:
         """What a whole-server package holds besides the databases (T601 level 2)."""
@@ -3625,6 +3687,22 @@ def _steam_seam(
     """
     if platform.detect() != "linux":
         return None
+    play_dir = client_dir
+    read_layout_choice: Callable[[], bool] | None
+    if entry.id == "wow-coa":
+        # T855: CoA has no ready-to-play client and no pack record — its
+        # switch is the Modules tab's own install record, read at press time
+        # off the GUI thread like T853's. A removed module reads not installed.
+        read_layout_choice = partial(steam_input.consoleport_module_installed, server_dir)
+    else:
+        read_layout_choice = (
+            # T853: the ready-to-play client's recorded ConsolePort choice, read at
+            # press time off the GUI thread — never at tab build. No ready-to-play
+            # client (or no record) writes no layout.
+            partial(steam_input.consoleport_chosen, play_dir)
+            if play_dir is not None
+            else None
+        )
     return steam_module.SteamShortcuts(
         game=entry.name,
         server_dir=server_dir,
@@ -3636,6 +3714,7 @@ def _steam_seam(
         # Steam Deck Gaming Mode: the Server tile starts the server through `yulon --server`
         # and stops it when the game closes, and a third tile stops it (`gaming_mode`).
         gaming=partial(_wow_gaming_scripts, entry, server_dir),
+        controller_layout=read_layout_choice,
     )
 
 
@@ -3767,6 +3846,8 @@ def _assemble(
         live_channel = getattr(channel_setup, "live_channel", None)
         if callable(live_channel):
             docker.save_through_channel(spec.world, server_dir, live_channel)
+    # T864: hoisted for the Docker space seam below, which frees the kept build.
+    kept_build = install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro)
     return ControllerServices(
         client_dir=client_dir,
         steam=_steam_seam(entry, server_dir, client_dir),
@@ -3838,6 +3919,9 @@ def _assemble(
         interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
         forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
         shelf=backup_shelf.Seam(server_dir, entry.id, spec=spec, wsl_distro=wsl_distro),
+        docker_space=docker_space.Seam(
+            server_dir, spec=spec, wsl_distro=wsl_distro, kept_build=kept_build
+        ),
         dashboard=dashboard,
         log_snapshot=log_snapshot,
         uninstall=uninstall,
@@ -3973,7 +4057,7 @@ def _assemble(
         ),
         # T224. Here for T106's reason: every native install can keep a build, and
         # the distro (D4) is a fact of the install, answered in `install_wiring`.
-        kept_build=install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        kept_build=kept_build,
         # T99. HERE for the same reason: where a game keeps its bot count is a
         # catalog fact. Files only, so a server inside a WSL distro is served too.
         bot_population=botpop.bot_count_route(
@@ -4304,22 +4388,30 @@ def _for_wotlk(
 
     Every seam is bound to `entry`'s own containers, never to WotLK's
     `docker_ctl.SPEC`, so a second AzerothCore server beside WotLK is managed
-    as itself (T552). The module seams read `manifests/wow-wotlk/`, so an
-    entry that names another tree is refused rather than handed WotLK's.
+    as itself (T552). The module seams read `_azeroth_manifest_store()` below:
+    the `manifests_from` tree when the entry names one, layered with its own
+    tree when `manifests/<entry id>/` is on disk (CoA, T855-B), so an entry
+    that names a tree this build does not know is refused rather than handed
+    WotLK's. WotLK and Unbound read WotLK's tree exactly as before.
     """
-    if entry.has_manifests and entry.manifest_game() != wotlk_modules.GAME:
-        raise UnsupportedGameError(
-            f"{entry.name} ({entry.id}) reads the modules of manifests/{entry.manifest_game()}/, "
-            f"and this build's AzerothCore tab only knows manifests/{wotlk_modules.GAME}/. "
-            "Nothing was opened."
-        )
+    if entry.has_manifests:
+        # The resolver refuses an entry naming an unknown tree; keep the refusal
+        # before any seam is built so nothing half-wired is handed back.
+        tab_store: ManifestStore | None = _azeroth_manifest_store(entry)
+    else:
+        tab_store = None
     spec = entry.container_spec()
-    # The shipped manifests are WotLK's for every server here; the modules the
-    # user ADDED are this server's own, under its game id (T554: a Remove on
-    # WoW Unbound never drops WotLK's record). For WotLK both are `wow-wotlk`.
+    # The shipped manifests are the entry's borrowed tree layered with its own
+    # (T855-B); the modules the user ADDED are this server's own, under its
+    # game id (T554: a Remove on WoW Unbound never drops WotLK's record). For
+    # WotLK all three are `wow-wotlk`.
     user_game = entry.id
-    record_backed = _record_backed_keys(wotlk_modules.store(user_game=user_game))
-    settings_mods = _settings_mods(wotlk_modules.store(user_game=user_game))
+    # The same store the tab lists, closed over lazily: the closures below only
+    # run when `entry.has_manifests`, so the fallback is never read — it only
+    # keeps their construction total.
+    listed_store = tab_store if tab_store is not None else wotlk_modules.store(user_game=user_game)
+    record_backed = _record_backed_keys(listed_store)
+    settings_mods = _settings_mods(listed_store)
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -4458,11 +4550,21 @@ def _for_wotlk(
                 server_dir, press=press, spec=spec, wsl_distro=wsl_distro, label=entry.name
             ),
             db_container=spec.db,
+            # T861: an id-only clone lookup asks THIS game's store.
+            user_game=user_game,
         )
         if entry.has_manifests
         else None
     )
-    return _assemble(
+    # T870 D3, as review round 1 corrected it: CoA NAMES SquidBots Lite whatever the folder
+    # is, so a Remove in a folder that does not (yet) hold the game is still the player's
+    # Remove and is remembered (`_module_done()`). Whether anything may be WRITTEN there is
+    # the folder's own answer, asked by each write path (`_default_addons_folder()`): the
+    # WotLK-family applier is handed the raw client folder (Tortoise's gets T30's
+    # `_client_dir_for_addons`), so a press-less write needs `Interface/` or the entry's exe.
+    coa = entry.id == coa_modules.GAME and module_applier is not None
+    default_ids = coa_modules.DEFAULT_ADDONS if coa else ()
+    services = _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
@@ -4621,8 +4723,10 @@ def _for_wotlk(
             scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
             names_are_names=entry.id in commands.NAME_LOOKUP_TREES,
         ),
-        store=wotlk_modules.store(user_game=user_game) if entry.has_manifests else None,
+        store=tab_store,
         applier=module_applier,
+        # T870: CoA's default add-on (SquidBots Lite), and nothing for every other game here.
+        default_addons=default_ids,
         # The other half of installing a module, and until now the half with no
         # button: `applier` clones the module and activates its conf, leaving
         # `data/sql/db-world/*.sql` "to ac-db-import on next start" — and no
@@ -4784,6 +4888,39 @@ def _for_wotlk(
             realm_type=_realm_type_of(entry, server_dir),
         ),
     )
+    # T870 D5: CoA's "Update the server to latest…" ends by bringing SquidBots Lite to the
+    # newest release, Tortoise's T814 pairing. `to_pin` is untouched (the way back leaves it
+    # alone), and a finished press never fails on the add-on. The add-on route is added to
+    # `services` later by `for_entry()` (`_with_client_addons`), so D6's question reads the
+    # player's records the way that route reads them rather than closing over a route.
+    if (
+        coa
+        and module_applier is not None
+        and services.store is not None
+        and services.update_to_latest is not None
+    ):
+        store = services.store
+        applier = module_applier
+        services = replace(
+            services,
+            update_to_latest=coa_modules.follow_with_addon(
+                services.update_to_latest,
+                lambda: default_addons.follow_server_update(
+                    server_dir,
+                    applier,
+                    lambda: store.load_all("mod"),
+                    coa_modules.ADDON_ID,
+                    place=lambda: default_addons.client_place(
+                        client_dir,
+                        applier.client_dir if _a_game_client(entry, applier.client_dir) else None,
+                    ),
+                    players_own=lambda: default_addons.players_own_or_unknown(
+                        coa_modules.ADDON_ID, store.load_all("mod"), _outside_addons(entry)
+                    ),
+                ),
+            ),
+        )
+    return services
 
 
 def _for_tbc(
@@ -5195,7 +5332,7 @@ def _for_centurion(
     client_dir: Path | None,
     wsl_distro: str | None,
 ) -> ControllerServices:
-    """Centurion (TrinityCore, T179), through `controller_wow_centurion`.
+    """Centurion and Mists of Pandaria (TrinityCore, T179/T850), via `controller_wow_centurion`.
 
     Every seam is the entry's: the package takes the entry rather than reading
     the shipped catalog, because `wow-centurion` lands there only in T179 Task 7.
@@ -5205,7 +5342,8 @@ def _for_centurion(
     bots ride on `observability`; Accounts on `accounts.level`; Characters on
     `play`. What is not offered is said where it would be: My Party (the
     registry's note), the Modules tab (`NO_ADDON_MODULES`), and every Characters
-    verb Centurion withholds (`centurion_characters.withheld`).
+    verb this tree withholds (`centurion_characters.withheld`, keyed per id --
+    Centurion's five are its own live check's, MoP offers none yet).
 
     No `import_probe`: the import is the install engine's marker-gated SQL plan,
     and the Repair button's only action, `docker.repair_import()`, refuses an
@@ -5365,6 +5503,21 @@ def _has_interface(client_dir: Path) -> bool:
     """The client has its `Interface/` folder, whatever its case (`interface/` too, T261)."""
     found = client_names.find(client_dir, ADDONS_PARENT)
     return found is not None and found.is_dir()
+
+
+def _a_game_client(entry: CatalogEntry, client_dir: Path | None) -> bool:
+    """The folder holds the game: its `Interface/` or one of the entry's exes, any case (T870 D3).
+
+    `None` is False and an unreadable folder is False: this never raises.
+    """
+    if client_dir is None:
+        return False
+    try:
+        if _has_interface(client_dir):
+            return True
+        return any(client_names.find(client_dir, exe) is not None for exe in entry.client.exe_names)
+    except OSError:
+        return False
 
 
 def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
@@ -5779,6 +5932,13 @@ def _for_tortoise(
                 lambda: store.load_all("mod"),
                 tortoise_modules.ADDON_ID,
                 place=lambda: default_addons.client_place(client_dir, module_applier.client_dir),
+                # T870 D6, review round 1: the same rule CoA's follow carries. A player who
+                # brought TortoiseBots Manager themselves has a record writing this addon's
+                # own folder, and "Update the server to latest…" must not clone the shipped
+                # one over it.
+                players_own=lambda: default_addons.players_own_or_unknown(
+                    tortoise_modules.ADDON_ID, store.load_all("mod"), _outside_addons(entry)
+                ),
             ),
         )
     return replace(
@@ -5807,6 +5967,34 @@ def _knowing_its_server_sources(
     return services
 
 
+def _azeroth_manifest_store(entry: CatalogEntry) -> ManifestStore:
+    """The one resolver from an AzerothCore entry to its manifest tree (T855-B).
+
+    An entry reads the `manifests_from` tree when it names one (Unbound and CoA
+    both read WotLK's) and its own tree when `manifests/<entry id>/` is on disk:
+    each index is the borrowed list followed by the own tree's items, and an own
+    item with the same id as a borrowed one replaces it (T855-B; none collide
+    today). Item files are looked up in the own tree first, then the borrowed
+    one. An entry with no own tree (Unbound) reads exactly its borrowed lists;
+    an entry with no `manifests_from` (WotLK) reads exactly its own tree — both
+    byte-for-byte as before. An entry naming a tree this build does not know is
+    refused rather than handed WotLK's.
+    """
+    from yulon import resources as _resources
+
+    borrowed = entry.manifest_game()
+    if borrowed != wotlk_modules.GAME:
+        raise UnsupportedGameError(
+            f"{entry.name} ({entry.id}) reads the modules of manifests/{borrowed}/, "
+            "and this build's AzerothCore tab has no store for that tree. "
+            "Nothing was opened."
+        )
+    own = entry.id if (_resources.manifests_dir() / entry.id).is_dir() else None
+    store = wotlk_modules.store(user_game=entry.id, own=own if own != borrowed else None)
+    assert isinstance(store, ManifestStore)
+    return store
+
+
 def manifest_store_for(entry: CatalogEntry) -> ManifestStore | None:
     """The Modules tab's manifest store for a server of `entry`, as its factory builds it (T601).
 
@@ -5816,7 +6004,7 @@ def manifest_store_for(entry: CatalogEntry) -> ManifestStore | None:
     if not entry.has_manifests:
         return None
     if _FACTORIES.get(entry.id) is _for_wotlk:
-        return wotlk_modules.store(user_game=entry.id)
+        return _azeroth_manifest_store(entry)
     stores: dict[str, Callable[[], ManifestStore]] = {
         "wow-tbc": tbc_modules.store,
         "wow-vanilla": vanilla_modules.store,
@@ -5838,6 +6026,10 @@ _FACTORIES: dict[str, _Factory] = {
     # T179: the `trinitycore` family's first game. Its catalog entry is T179
     # Task 7's; until it ships, nothing in the catalog reaches this row.
     "wow-centurion": _for_centurion,
+    # T850: Mists of Pandaria is the same family and the same package, entry-driven
+    # like Unbound and CoA are over WotLK's; its own per-tree facts (the Characters
+    # verbs nobody has checked yet) live in `centurion_characters`.
+    "wow-mop": _for_centurion,
 }
 """Catalog id → the wiring for that game. `for_entry()` is the only reader.
 
@@ -6111,6 +6303,52 @@ def ask_backup_choice(
     if answer == QMessageBox.StandardButton.Save:
         return UpdateChoice.WITHOUT_BACKUP
     return UpdateChoice.CANCEL
+
+
+class StartChoice(enum.Enum):
+    """What the T857 Start question was answered with. Three, and `CANCEL` is the default.
+
+    `ask_start_choice()`'s own shape for the same two reasons it gives: a
+    relabelled standard button keeps its platform position and its keyboard
+    role, and anything the dialog does not recognise -- `No` included, and
+    `NoButton`, which is what Escape and the window's close button answer --
+    falls through to `CANCEL`.
+    """
+
+    SWITCH_AND_START = "switch-and-start"
+    START_ACTIVE = "start-active"
+    CANCEL = "cancel"
+
+
+def ask_start_choice(
+    parent: QWidget | None, title: str, text: str, *, switch_label: str, start_label: str
+) -> StartChoice:
+    """A three-way "switch first / start as is / Cancel" question, defaulting to Cancel.
+
+    T857: Start (and Restart) with the realm-type combo on a type that is not
+    the active one asks whether to switch first, since Start alone starts the
+    active type. `Yes` is the switch, `Save` the start-as-is, `Cancel` nothing.
+    """
+    box = FittedMessageBox(
+        QMessageBox.Icon.Question,
+        title,
+        text,
+        QMessageBox.StandardButton.Yes
+        | QMessageBox.StandardButton.Save
+        | QMessageBox.StandardButton.Cancel,
+        parent,
+    )
+    _relabel(box, QMessageBox.StandardButton.Yes, switch_label)
+    _relabel(box, QMessageBox.StandardButton.Save, start_label)
+    _relabel(box, QMessageBox.StandardButton.Cancel, "Cancel")
+    box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+    box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+    answer = box.exec()
+    if answer == QMessageBox.StandardButton.Yes:
+        return StartChoice.SWITCH_AND_START
+    if answer == QMessageBox.StandardButton.Save:
+        return StartChoice.START_ACTIVE
+    return StartChoice.CANCEL
 
 
 def _relabel(box: QMessageBox, which: QMessageBox.StandardButton, text: str) -> None:
@@ -6423,6 +6661,10 @@ NETWORK_HINT = (
 RESTORE_PICK = "Pick a backup in the list, then press Show restore plan."
 RESTORE_NO_BACKUPS = "There are no backups yet. Press Back up now to make one."
 RESTORE_REFUSED = "This backup cannot be restored right now; the plan in the Restore box says why."
+FREE_DOCKER_SPACE_WAITS_FOR_DISTRO = (
+    f"{server_build_presses.FREE_DOCKER_SPACE} waits for this server's WSL distro: "
+    "Docker is read once it is running."
+)
 RESTORE_WAITS_FOR_DISTRO = (
     "Restore waits for this server's WSL distro: the backups are listed once it is running."
 )
@@ -6495,6 +6737,16 @@ MAINTENANCE_BACKUP_FAILED = "The backup did not finish. Details below says why."
 DELETE_BACKUP_LABEL = "Delete\u2026"
 READING_BACKUPS = "Reading backups\u2026"
 CLEAN_UP_LABEL = "Clean up\u2026"
+FREE_DOCKER_SPACE_LABEL = server_build_presses.FREE_DOCKER_SPACE
+DOCKER_SPACE_JOB = "the Docker clean-up"
+DOCKER_SPACE_READING = "Reading what Docker holds…"
+DOCKER_SPACE_FREEING = "Freeing up Docker's space…"
+DOCKER_SPACE_NOTHING = "Nothing was ticked, so nothing was removed."
+DOCKER_SPACE_FAILED = "Docker space was not freed. Details below says why."
+DOCKER_SPACE_BACKUPS_POINTER = (
+    f"Old database copies are not kept in Docker: {CLEAN_UP_LABEL} in the Backups box on this tab "
+    "removes them."
+)
 DELETE_PICK = "Pick a backup to delete."
 CLEAN_UP_NO_FOLDER_ACCESS = "Yu'lon cannot list the backups yet."
 MAINTENANCE_DELETE_FAILED = "The backups were not deleted. Details below says why."
@@ -8797,22 +9049,22 @@ CUSTOM_MODULE_NO_ADDONS_LINE = "this server has no add-on modules"
 
 MODULE_LINK_TIP = (
     "Paste an https link to a module repository on github.com, gitlab.com or codeberg.org. "
-    "Its name must start with mod-. The module is cloned into this server's modules folder; "
-    "it does nothing until the server is rebuilt."
+    "Any repository name works (capitals included): it is cloned under the name its author "
+    "gave it into this server's modules folder, and does nothing until the server is rebuilt."
 )
 """Named before the press, the way `MODULE_SQL_TIP` is.
 
-Three refusals a user meets before anything happens — the host, the `mod-`
-name, and the fact that a clone is inert until a rebuild — said where they cost
-nothing rather than after a dialog has been filled in. The rust page's version
-of this was the four-word hint `mod-* repos only`
-(`ModuleManager.svelte:1491`).
+Three refusals a user meets before anything happens — the host, a name the core
+keeps for its build system, and the fact that a clone is inert until a rebuild —
+said where they cost nothing rather than after a dialog has been filled in. The
+`mod-` prefix is not one of them since T861: both cores find a module by its
+folder, whatever it is called.
 """
 
 MODULE_FOLDER_TIP = (
-    "Choose a folder on this computer holding a module (its name must start with mod-). "
-    "It is copied into this server's modules folder; the original is not touched, and it "
-    "does nothing until the server is rebuilt."
+    "Choose a folder on this computer holding a module. Any name works: it is copied under "
+    "that name into this server's modules folder, the original is not touched, and it does "
+    "nothing until the server is rebuilt."
 )
 """As `MODULE_LINK_TIP`, plus the one thing a copy has to promise: the folder
 the user points at is read, never moved and never written into."""
@@ -8829,20 +9081,19 @@ card's sentence (`CUSTOM_MODULE_NO_ROUTE_NOTE`) and no buttons.
 
 TORTOISE_LINK_TIP = (
     "Paste an https link to a repository on github.com, gitlab.com or codeberg.org holding a "
-    "server module (its repository is named mod-<name> or tw-mod-<name>, in lower case: it is "
-    "built into the server the next time it is rebuilt), a client add-on (a .toc file) or "
-    "database changes (.sql files in data/sql/auth, character or world). Database changes "
-    "need the world server stopped, and Yu'lon backs up the databases they change first."
+    "server module (any name works: C++ in src/ is built into the server the next time it is "
+    "rebuilt), a client add-on (a .toc file) or database changes (.sql files in data/sql/auth, "
+    "character or world). Database changes need the world server stopped, and Yu'lon backs up "
+    "the databases they change first."
 )
-"""Tortoise's link tooltip (T596): the three kinds it takes, the name rule and the rebuild
-a server module waits for, the stop-the-world rule and the backup."""
+"""Tortoise's link tooltip (T596): the three kinds it takes, that any name works (T861), the
+rebuild a server module waits for, the stop-the-world rule and the backup."""
 
 TORTOISE_FOLDER_TIP = (
-    "Choose a folder on this computer holding a server module (named mod-<name> or "
-    "tw-mod-<name>, in lower case; built in when the server is next rebuilt), a client add-on or "
-    "database changes, laid out as for a link. It is copied; the original is not touched. "
-    "Database changes need the world server stopped, and Yu'lon backs up the databases they "
-    "change first."
+    "Choose a folder on this computer holding a server module (any name works: C++ in src/ is "
+    "built in when the server is next rebuilt), a client add-on or database changes, laid out "
+    "as for a link. It is copied; the original is not touched. Database changes need the world "
+    "server stopped, and Yu'lon backs up the databases they change first."
 )
 """As `TORTOISE_LINK_TIP`, for a folder: read before it is copied, never written into."""
 
@@ -9251,6 +9502,10 @@ class ControllerView(QWidget):
         # Play's two waits: a Start it asked for, and a Refresh it asked for.
         self._play_after_start = False
         self._play_after_refresh = False
+        # T857 review round 2: counts every server-action job launched
+        # (`_set_busy(True, ...)`), so a question that runs a nested event loop can
+        # tell that a job started -- and maybe finished -- while it was open.
+        self._action_generation = 0
         # T672: the wait for the realm between that Start and the game, which no button waits on.
         self._play_realm_wait: threading.Event | None = None
         self._play_realm_number = 0
@@ -10630,6 +10885,9 @@ class ControllerView(QWidget):
             return
         self._distro = state
         self._show_the_distro()
+        # T864 review: a distro stopped while the tab is open must grey the
+        # press at that moment, not only once something re-lists the backups.
+        self._settle_docker_space_button()
         if state != "running":
             # The last verdict ("up -- 0 players…") described a world this
             # distro no longer runs, and it sat above "world down" and the
@@ -11067,7 +11325,9 @@ class ControllerView(QWidget):
             return
 
         current = coa_realm.active(entry, self.services.controller.server_dir).id
-        self.realm_type_label.setText("Realm type: each keeps its own characters.")
+        self.realm_type_label.setText(
+            "Realm type — pick one, then press Switch realm type… (each keeps its own characters)."
+        )
         self.realm_type_label.setVisible(True)
         box = self.realm_type_choice
         box.blockSignals(True)
@@ -11098,15 +11358,19 @@ class ControllerView(QWidget):
     @Slot()
     def switch_realm_type(self) -> None:
         """Ask, then stop, switch and start again on the worker thread (T812 C3b)."""
+        self._switch_realm_type_asked()
+
+    def _switch_realm_type_asked(self) -> bool:
+        """`switch_realm_type()`'s own question answered yes; False answers nothing."""
         switch = self.services.realm_switch
         if switch is None or self._busy:
-            return
+            return False
         from yulon import coa_realm
 
         target = self.realm_type_choice.currentData()
         types = {realm.id: realm for realm in coa_realm.types_of(self.entry)}
         if target not in types:
-            return
+            return False
         realm = types[target]
         from yulon import coa_switch
 
@@ -11114,6 +11378,18 @@ class ControllerView(QWidget):
             "Switch realm type",
             coa_switch.confirm_text(realm.label, realm.realm_name),
         ):
+            return False
+        self._run_the_realm_switch(target)
+        return True
+
+    def _run_the_realm_switch(self, target: str) -> None:
+        """Stop, switch to `target` and start again on the worker thread, unasked (T857).
+
+        The switch the Start question runs: it stops the server, switches and
+        starts again, so Start must not start a second time after it.
+        """
+        switch = self.services.realm_switch
+        if switch is None or self._busy:
             return
         self.problem_label.setText("")
         self._set_busy(True, "Switch realm type")
@@ -11132,6 +11408,12 @@ class ControllerView(QWidget):
         self.problem_label.setText(said)
         self._show_realm_type()
         self.refresh_status()
+        if self._play_after_start:
+            # T857 review: Play asked for this Start ("Start and play"), and the
+            # answer was "Switch and start": continue Play the same step a
+            # finished start runs, not a copy of it.
+            self._play_after_start = False
+            self._play_wait_for_the_realm()
 
     @Slot(object)
     def _realm_switch_failed(self, exc: object) -> None:
@@ -11141,6 +11423,26 @@ class ControllerView(QWidget):
         self.action_failed.emit(str(exc))
         self._show_realm_type()
         self.refresh_status()
+        if self._play_after_start:
+            # T857 review: Play's Start became this switch, and the switch
+            # refused: Play is over with the failure ("Nothing was started.",
+            # the sentence the switch's own question carries).
+            self._play_after_start = False
+            self._play_end(self._play_sentence_after_a_failed_switch(exc))
+
+    def _play_sentence_after_a_failed_switch(self, exc: object) -> str:
+        """Play's sentence for a refused switch: the old type may be running again.
+
+        `coa_switch` starts the ORIGINAL type again when it refused before
+        writing anything, and marks that exception `server_restarted`; then
+        "Nothing was started." would be untrue.
+        """
+        if getattr(exc, "server_restarted", False):
+            from yulon import coa_realm
+
+            label = coa_realm.active(self.entry, self.services.controller.server_dir).label
+            return f"The realm type was not switched; the server is running {label} again."
+        return "Nothing was started."
 
     def reextract_map_data(self) -> bool:
         """Extract the map data again from the player's client; streams into the log panel.
@@ -11966,6 +12268,8 @@ class ControllerView(QWidget):
             self._stop_update_refresh()  # T621
             self._end_the_world_wait()  # T382: the press that starts now owns the server
             self._end_the_play_realm_wait("busy")  # T672: and Play's wait for it ends too
+        if busy:
+            self._action_generation += 1
         self._busy = busy
         self._busy_job = job if busy else ""
         # T179: the movement-map job's Start is held while any press runs.
@@ -12165,16 +12469,36 @@ class ControllerView(QWidget):
         return self._hold_ends_at is not None and self._status_ask_out >= self._hold_ends_at
 
     @Slot()
-    def start_server(self) -> None:
+    def start_server(self) -> bool | None:
         """Start the install; a README §12 conflict is shown, never a raw Docker error.
 
         Refused while another action holds the tab, like `restart_from_server_tab()`
         (T690): the tray's and the flyout's Start reach this after their row was built,
         and a Start on top of a running job unlocks the tab when it ends while the first
         job still runs.
+
+        T857: with the realm-type combo on a type that is not the active one,
+        one question first: switch first, start the active type, or nothing.
+        True when a Start job was launched, False when the guard refused, None
+        when "Switch and start" ran the switch instead (so a caller that waits
+        on the start, like Play, can carry or end its own wait).
+        """
+        return self._start_server(play=False)
+
+    def _start_server(self, *, play: bool) -> bool | None:
+        """`start_server()`; `play` says Play asked for this Start (T857 review round 2).
+
+        Play's wait (`_play_after_start`) is set only where the job is launched,
+        after the realm-type question: a nested tray Start that finishes while
+        the box is open must not consume it.
         """
         if self._busy:
-            return
+            return False
+        verdict = self._start_over_a_realm_type_mismatch(play=play)
+        if verdict is None:
+            return None
+        if not verdict:
+            return False
         self._disarm_actions()
         self._nothing_to_remove = False
         self._update_forget_visibility()
@@ -12183,7 +12507,81 @@ class ControllerView(QWidget):
         self._set_busy(True, "Start")
         self.status_label.setText("Starting…")
         self._hold_badge("starting")
+        if play:
+            self._play_after_start = True
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
+        return True
+
+    def _start_over_a_realm_type_mismatch(self, *, play: bool = False) -> bool | None:
+        """True when Start may start, False on Cancel, None when the switch runs (T857).
+
+        An entry with realm types (`services.realm_switch`) and the combo on a
+        type that is not the active one asks one three-way question: switch
+        first (then the switch starts again itself), start the active type, or
+        Cancel. Every other press -- no realm types, the combo on the active
+        type -- starts unchanged, with no box.
+
+        The box runs its own event loop (`QMessageBox.exec`), and the tray's
+        Start/Restart/Stop presses reach this same slot while it is open, so a
+        job may hold the tab by the time the answer lands. Both answers are
+        re-checked against `_busy` after the box, exactly as
+        `_play_stopped_by_another_action()` does for Play's own questions: if
+        busy, start nothing and say the other action's sentence.
+
+        T857 review round 2: `_busy` alone is not enough -- a tray Start that
+        starts AND finishes while the box is open leaves it clear again. So the
+        view's action generation is read before the box and compared after: any
+        job launched meanwhile refuses the answer. Cancel is refused silently
+        (it asked for nothing); only an answer that wanted something says so.
+        `play`: Play asked for this press, so a switch carries its wait.
+        """
+        switch = self.services.realm_switch
+        if switch is None or not hasattr(self, "realm_type_choice"):
+            return True
+        from yulon import coa_realm
+
+        types = {realm.id: realm for realm in coa_realm.types_of(self.entry)}
+        if not types:
+            return True
+        active = coa_realm.active(self.entry, self.services.controller.server_dir)
+        chosen_id = self.realm_type_choice.currentData()
+        chosen = types.get(chosen_id, active)
+        if chosen is None or chosen.id == active.id:
+            return True
+        generation = self._action_generation
+        answer = ask_start_choice(
+            self,
+            f"Start as {chosen.label}?",
+            f"The list is on {chosen.label}, but this server runs {active.label}. "
+            "Switch realm type first? Each type keeps its own characters.",
+            switch_label="Switch and start",
+            start_label=f"Start {active.label}",
+        )
+        # A job may have started while the question was open (the tray's
+        # Start/Restart/Stop, like Play's own questions): start nothing over it.
+        if answer is StartChoice.CANCEL:
+            return False
+        if self._busy or self._action_generation != generation:
+            show_information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish, then press "
+                "this again. Nothing was started.",
+            )
+            return False
+        if answer is StartChoice.SWITCH_AND_START:
+            if play:
+                self._play_after_start = True
+            self._run_the_realm_switch(chosen.id)
+            return None
+        if answer is StartChoice.START_ACTIVE:
+            box = self.realm_type_choice
+            box.blockSignals(True)
+            box.setCurrentIndex(max(0, box.findData(active.id)))
+            box.blockSignals(False)
+            self._set_realm_switch_button()
+            return True
+        return False
 
     @Slot()
     def stop_server(self) -> bool:
@@ -12341,15 +12739,26 @@ class ControllerView(QWidget):
         self.problem_label.setText(f"The reservation could not be removed: {exc}")
 
     @Slot()
-    def restart_from_server_tab(self) -> None:
+    def restart_from_server_tab(self) -> bool | None:
         """Stop the server, saving every character, and start it again: one press (T559).
 
         The Tuning tab's restart (`_do_restart()`), so one job and one lifecycle
         command; without its question, as Stop has none. Live only while Stop is
         (the tray's menu can call this after its row was built).
+
+        T857: with the realm-type combo on another type, the same one question
+        Start asks -- switch first, start the active type, or nothing. True when
+        a Restart job was launched, False when the guard refused, None when
+        "Switch and start" ran the switch instead (so a caller that waits on
+        the restart, like Play, can carry or end its own wait).
         """
         if self._busy or not self.restart_button.isEnabled():
-            return
+            return False
+        verdict = self._start_over_a_realm_type_mismatch()
+        if verdict is None:
+            return None
+        if not verdict:
+            return False
         self._disarm_actions()
         self.problem_label.setText("")
         self._stop_forced = ""
@@ -12358,6 +12767,7 @@ class ControllerView(QWidget):
         self.status_label.setText(RESTART_STOPPING)
         self._hold_badge("stopping")
         self._run(self._restart_job, self._restart_done, self._restart_failed)
+        return True
 
     def _restart_job(self) -> bool:
         """The worker half: `_do_restart()`, saying when the Stop is done and the Start begins."""
@@ -14531,8 +14941,11 @@ class ControllerView(QWidget):
             return
         if self._play_stopped_by_another_action():
             return
-        self._play_after_start = True
-        self.start_server()
+        launched = self._start_server(play=True)
+        if launched is None:
+            return  # "Switch and start": the switch holds the tab, carrying the Play
+        if not launched:
+            self._play_end("Nothing was started.")
 
     def _play_check_stale(self) -> None:
         marker = self._play_still_usable()
@@ -14594,7 +15007,7 @@ class ControllerView(QWidget):
         # its display and account choices are Config.wtf keys only the pipeline writes.
         if (
             has_client_data(self.entry.client)
-            or bool(self.services.default_addons)
+            or (bool(self.services.default_addons) and self._default_addons_folder() is not None)
             or self._has_outside_addons()
             or (
                 recorded is not None
@@ -14763,6 +15176,14 @@ class ControllerView(QWidget):
                         progress=self._download_progress(pack),
                         cancelled=cancelled,
                     )
+                elif kind == "github_release":
+                    fetched = client_packs.fetch_github_release(
+                        pack,
+                        entry_id=game,
+                        allowed_hosts=client.pack_hosts(pack),
+                        progress=self._download_progress(pack),
+                        cancelled=cancelled,
+                    )
                 else:
                     assert_never(kind)
             except client_packs.Cancelled:
@@ -14770,10 +15191,17 @@ class ControllerView(QWidget):
             except client_packs.PackUnavailable as exc:
                 if pack.optional:
                     unavailable.add(pack.id)
-                    notes.append(
-                        f"{pack.label} is unavailable: the server's site no longer has it. "
-                        "What is installed stays until you switch it off."
-                    )
+                    if pack.source.kind == "github_release":
+                        notes.append(
+                            f"{pack.label} is unavailable: "
+                            "its GitHub release is not available right now. "
+                            "What is installed stays until you switch it off."
+                        )
+                    else:
+                        notes.append(
+                            f"{pack.label} is unavailable: the server's site no longer has it. "
+                            "What is installed stays until you switch it off."
+                        )
                     continue
                 raise _PackStopped(pack, str(exc)) from exc
             except client_packs.PackError as exc:
@@ -14967,7 +15395,8 @@ class ControllerView(QWidget):
                     ) from exc
             # The catalog's `always` is the server's own: `launcher_config_keys` dropped every
             # pick it sets except a typed address's `realmList`/`patchList`, which win (lead
-            # ruling). A pick, or a removal, also takes a seed's place.
+            # ruling). A pick, or a removal, also takes a seed's place. The catalog's own
+            # `remove` (`portal`, T850 A5) goes in beside the picks' removals.
             taken = {key.casefold() for key in (*picked, *removed)}
             cfg = cfg.model_copy(
                 update={
@@ -14979,11 +15408,25 @@ class ControllerView(QWidget):
                 }
             )
             client_config.merge_config_wtf(
-                play, cfg, first_run=not record.config_seeded, remove=removed
+                play, cfg, first_run=not record.config_seeded, remove=(*removed, *cfg.remove)
             )
             seeded = True
             save()
         return _Prepared(tuple(notes), frozenset(unavailable))
+
+    def _default_addons_folder(self) -> Path | None:
+        """The folder this game's default add-ons are written into, when it holds the game.
+
+        T870 D3, moved here by review round 1. `services.default_addons` names the add-ons
+        whatever the folder is -- a Remove in a folder that is not a game client yet is
+        still the player's Remove, so it must be remembered -- and every path that WRITES
+        asks this instead. `Interface/` (any case) or one of the entry's exes is the
+        evidence; a folder showing neither gets nothing written into it, the same way
+        `put_in()` already leaves alone a client whose folder is not set at all.
+        """
+        applier = self.services.applier
+        folder = None if applier is None else applier.client_dir
+        return folder if _a_game_client(self.entry, folder) else None
 
     def _default_addons_work(self, say: Callable[[str], None], *, clone: bool) -> tuple[str, ...]:
         """Off the GUI thread: this game's default client addons, put in (T612).
@@ -14992,20 +15435,41 @@ class ControllerView(QWidget):
         is what the tab shows installed and what its Remove takes back. `clone=False` is Play:
         no git and no network, only the files a clone on disk has and the client lacks.
         `clone=True` (a fresh install, a tab opening) also installs an add-on with no clone.
-        Never raises: the lines come back as Play notes.
+        A default whose folder the player's own add-on already writes is left out (T870 D6),
+        and a record that cannot be read at all -- the index or one damaged item -- leaves the
+        player possibly owning it, so nothing is written. Never raises: the lines come back
+        as Play notes.
         """
         services = self.services
         ids = services.default_addons
-        if not ids or services.applier is None or services.store is None:
+        applier = services.applier
+        if not ids or applier is None or services.store is None:
+            return ()
+        if self._default_addons_folder() is None:
             return ()
         try:
+            # T870 D6, review round 2 C2, round 3: a copy the player brought wins over a
+            # default that writes the same folder, and ANY record that cannot be read --
+            # the index or one damaged item -- means the player MAY own it, so nothing is
+            # written. Not `route.installed()`: it skips a damaged record silently, which
+            # is the answer this decision must not take.
+            outside = _outside_addons(self.entry)
+            if outside is None:
+                return ()
+            manifests = list(services.store.load_all("mod"))
+            ids = default_addons.ids_to_put_in(ids, manifests, outside)
+            if not ids:
+                return ()
             outcome = default_addons.put_in(
                 services.controller.server_dir,
-                services.applier,
-                services.store.load_all("mod"),
+                applier,
+                manifests,
                 ids,
                 clone=clone,
                 say=say,
+                # The write site asks too: this path can put back the files of an installed
+                # shipped clone, not only install (T870 review round 2 C1).
+                players_own=lambda item: default_addons.players_own(item, manifests, outside),
             )
         except Exception as exc:  # boundary: the addons are a courtesy, Play is the job
             logger.warning(f"default client addons: {exc}")
@@ -15057,7 +15521,7 @@ class ControllerView(QWidget):
         path: Play itself never clones. Nothing happens when they are all there, removed, or
         failed within the day.
         """
-        if self.services.default_addons:
+        if self.services.default_addons and self._default_addons_folder() is not None:
             QTimer.singleShot(milliseconds, self, self.put_default_addons_in)
 
     def put_default_addons_in(self) -> None:
@@ -15069,6 +15533,8 @@ class ControllerView(QWidget):
         files would go into is not this server's; the next Play puts them in then.
         """
         if not self.services.default_addons or getattr(self, "_closed", False):
+            return
+        if self._default_addons_folder() is None:
             return
         if self._busy or self._module_job_running() or self._play_pending:
             return
@@ -15168,6 +15634,14 @@ class ControllerView(QWidget):
                     pack,
                     entry_id=game,
                     allowed_hosts=client.hosts(),
+                    progress=self._download_progress(pack),
+                    cancelled=cancelled,
+                )
+            elif kind == "github_release":
+                fetched = client_packs.fetch_github_release(
+                    pack,
+                    entry_id=game,
+                    allowed_hosts=client.pack_hosts(pack),
                     progress=self._download_progress(pack),
                     cancelled=cancelled,
                 )
@@ -18779,6 +19253,13 @@ class ControllerView(QWidget):
         shelf_row = QHBoxLayout()
         shelf_row.addWidget(self.delete_backup_button)
         shelf_row.addWidget(self.clean_up_button)
+        # T864: Free Docker space, beside Clean up. Greyed with its reason on the
+        # same line as Restore's.
+        self.free_docker_space_button = QPushButton(FREE_DOCKER_SPACE_LABEL, tab)
+        self.free_docker_space_button.clicked.connect(self.free_docker_space)
+        self.free_docker_space_button.setVisible(self.services.docker_space is not None)
+        self._docker_space_job = ""
+        shelf_row.addWidget(self.free_docker_space_button)
         shelf_row.addStretch(1)
 
         self.maintenance_report = QPlainTextEdit(tab)
@@ -18796,8 +19277,10 @@ class ControllerView(QWidget):
         self.restore_reasons.setParent(backups)
         self.delete_backup_button.setParent(backups)
         self.clean_up_button.setParent(backups)
+        self.free_docker_space_button.setParent(backups)
         self.restore_reasons.watch(self.delete_backup_button)
         self.restore_reasons.watch(self.clean_up_button)
+        self.restore_reasons.watch(self.free_docker_space_button)
         backups_box = QVBoxLayout(backups)
         backups_box.addLayout(top)
         backups_box.addWidget(self.backup_list, 2)
@@ -18871,6 +19354,7 @@ class ControllerView(QWidget):
         """Re-list the backups directory. Reading a directory, not doing any work."""
         if self._waits_for_the_distro("backups", self.refresh_backups):
             set_enabled_why(self.restore_button, self._restore_waits_for())
+            self._settle_docker_space_button()
             return
         self._restore_plan = None
         self.backup_list.clear()
@@ -18998,6 +19482,7 @@ class ControllerView(QWidget):
 
     def _settle_shelf_buttons(self) -> None:
         """Grey Delete and Clean up with their reasons, or enable them (T604)."""
+        self._settle_docker_space_button()
         if self.services.shelf is None:
             return
         shelf = self._shelf
@@ -19018,6 +19503,104 @@ class ControllerView(QWidget):
                 delete = row.cannot_delete
         set_enabled_why(self.delete_backup_button, delete, self.restore_reasons)
         set_enabled_why(self.clean_up_button, clean, self.restore_reasons)
+
+    def _docker_space_waits_for(self) -> str | None:
+        """Why Free Docker space is greyed: its own job, a busy press, or the shelf's waits.
+
+        A WSL-backed server waits whenever its distro is not SAID to run -- not
+        only while the backups are listed (`_waiting_on_distro`). A tab opened
+        while the distro ran has nothing waiting, and a distro stopped since
+        then would be started again by `seam.read`'s `wsl -d`, bringing a
+        stopped server back (T133); `_distro_answered()` re-settles this button
+        on every answer.
+        """
+        if self._docker_space_job:
+            return wait_for(self._docker_space_job)
+        if self._busy:
+            return wait_for(self._busy_job)
+        if "backups" in self._waiting_on_distro:
+            return FREE_DOCKER_SPACE_WAITS_FOR_DISTRO
+        if self.services.controller.wsl_distro is not None and self._distro != "running":
+            return FREE_DOCKER_SPACE_WAITS_FOR_DISTRO
+        return self._shelf_waits_for()
+
+    def _settle_docker_space_button(self) -> None:
+        """Grey Free Docker space with its reason, or enable it (T864)."""
+        if self.services.docker_space is None:
+            return
+        set_enabled_why(
+            self.free_docker_space_button, self._docker_space_waits_for(), self.restore_reasons
+        )
+
+    @Slot()
+    def free_docker_space(self) -> None:
+        """Read what Docker holds, ask what goes, then free it on a worker (T864)."""
+        seam = self.services.docker_space
+        if seam is None:
+            return
+        waits = self._docker_space_waits_for()
+        if waits:
+            self.maintenance_report.setPlainText(waits)
+            return
+        self._docker_space_job = DOCKER_SPACE_JOB
+        self._settle_shelf_buttons()
+        self.maintenance_report.setPlainText(DOCKER_SPACE_READING)
+        self._run(seam.read, self._docker_space_read, self._docker_space_failed)
+
+    @Slot(object)
+    def _docker_space_read(self, result: object) -> None:
+        self._docker_space_job = ""
+        self._settle_shelf_buttons()
+        if not isinstance(result, docker_space.Space):
+            return
+        from yulon.ui.widgets.free_docker_space_dialog import FreeDockerSpaceDialog
+
+        seam = self.services.docker_space
+        if seam is None:
+            return
+        dialog = FreeDockerSpaceDialog(
+            result,
+            backups_pointer=DOCKER_SPACE_BACKUPS_POINTER,
+            windows=platform.detect() == "windows",
+            parent=self,
+        )
+        try:
+            agreed = dialog.exec() == int(QDialog.DialogCode.Accepted)
+            choice = dialog.choice()
+        finally:
+            dialog.deleteLater()
+        if not agreed:
+            self.maintenance_report.setPlainText("")
+            return
+        if not (choice.cache or choice.old_builds or choice.kept_build):
+            self.maintenance_report.setPlainText(DOCKER_SPACE_NOTHING)
+            return
+        # The dialog is modal but the tab is not frozen: a distro answer can land
+        # while it is open (T864 review round 3), and the seam's `read()` above is a
+        # `wsl -d` that would start a distro stopped since. Asked again here, the
+        # only answer that matters before the worker takes the lease.
+        waits = self._docker_space_waits_for()
+        if waits:
+            self.maintenance_report.setPlainText(waits)
+            return
+        self._docker_space_job = DOCKER_SPACE_JOB
+        self._settle_shelf_buttons()
+        self.maintenance_report.setPlainText(DOCKER_SPACE_FREEING)
+        self._run(lambda: seam.free(choice), self._docker_space_done, self._docker_space_failed)
+
+    @Slot(object)
+    def _docker_space_done(self, result: object) -> None:
+        self._docker_space_job = ""
+        self._settle_shelf_buttons()
+        if isinstance(result, docker_space.Freed):
+            self.maintenance_report.setPlainText("\n".join(result.lines))
+        self.check_kept_build()
+
+    @Slot(object)
+    def _docker_space_failed(self, exc: object) -> None:
+        self._docker_space_job = ""
+        self._maintenance_failed(exc, DOCKER_SPACE_FAILED)
+        self._settle_shelf_buttons()
 
     @Slot()
     def delete_selected_backup(self) -> None:
@@ -20115,7 +20698,17 @@ class ControllerView(QWidget):
         if reader is None:
             return None
         try:
-            return reader()
+            found = reader()
+            # T861: a clone folder can be the author's exact name (`mod-twow-QOL-followers/`)
+            # while the manifest's id is the lower-case slug. The listing is folders on disk;
+            # every row, chip and cache here is keyed by id, so the manifests say which is
+            # which -- and a folder no manifest names is read through its own claim, which is
+            # what an install that stopped before its record was saved has left (review round
+            # 2). Inside this `try` with `reader()`: either failing is the same "could not
+            # read" answer, not a reload that crashes.
+            return apply_module.folders_as_ids(
+                found, self._manifests.values(), self.services.controller.server_dir
+            )
         except Exception as exc:  # boundary: an unreadable folder must not kill the UI
             logger.warning(f"could not read which modules are installed: {exc}")
             return {}
@@ -20235,9 +20828,11 @@ class ControllerView(QWidget):
             # from the catalog alone, every installed module would read
             # "not installed" and offer Install.
             return
+        # T861: the manifests are read FIRST, because `_installed_clones()` asks them which
+        # folder belongs to which id. Neither read depends on the other's answer beyond that.
+        manifests, broken = self._load_manifests()
         answered = self._installed_clones()
         installed = answered if answered is not None else {}
-        manifests, broken = self._load_manifests()
         if answered is not None:
             self._forget_what_is_no_longer_installed(installed)
         self.modules_panel.set_rows(
@@ -20354,33 +20949,43 @@ class ControllerView(QWidget):
             row = widget.data
             if not row.installed or self._versions.has(server_dir, row.family, row.id):
                 continue
+            manifest = self._manifests.get((row.family, row.id))
+            folder = apply_module.clone_folder(manifest) if manifest is not None else row.id
             if platform.wsl_location(server_dir) is not None:
                 # T774: `docker run` per module must not run here. The row's
                 # key and clone path are bound now, on the GUI thread: the
                 # worker must not reach back into panel rows it may outlive.
                 self._run(
-                    self._version_job(server_dir, row.family, row.id),
+                    self._version_job(server_dir, row.family, row.id, folder),
                     self._version_read,
                     self._version_read_failed,
                 )
                 return
             self.modules_panel.set_version(
-                row.family, row.id, self._versions.fill(server_dir, row.family, row.id)
+                row.family,
+                row.id,
+                self._versions.fill(server_dir, row.family, row.id, folder),
             )
             QTimer.singleShot(0, self, self._fill_next_version)
             return
         self._filling_versions = False
 
-    def _version_job(self, server_dir: Path, family: str, item_id: str) -> Callable[[], object]:
+    def _version_job(
+        self, server_dir: Path, family: str, item_id: str, folder: str | None = None
+    ) -> Callable[[], object]:
         """One WSL version read as a job: the row's key plus its cached answer (T774).
 
         Bound here, on the GUI thread, so the worker takes no widget and no
         row: `fill()` caches by `(server_dir, family, item_id)` and the done
-        slot draws from the same key.
+        slot draws from the same key. `folder` is the clone's exact name (T861).
         """
 
         def read() -> tuple[str, str, str | None]:
-            return (family, item_id, self._versions.fill(server_dir, family, item_id))
+            return (
+                family,
+                item_id,
+                self._versions.fill(server_dir, family, item_id, folder),
+            )
 
         return read
 
@@ -22942,7 +23547,11 @@ class ControllerView(QWidget):
         moved = self._server_updated()
         for widget in self.modules_panel.rows():
             row = widget.data
-            if moved_by_server_update(row.family, row.id, moved):
+            # T861: the row is keyed by its ID, while the folder on disk can keep the
+            # author's capitals, so the predicate is handed the item's folder.
+            manifest = self._manifests.get((row.family, row.id))
+            folder = apply_module.clone_folder(manifest) if manifest is not None else row.id
+            if moved_by_server_update(row.family, row.id, moved, folder=folder):
                 self._behind.pop((row.family, row.id), None)
                 self._versions.forget(row.id)
 
@@ -23483,7 +24092,9 @@ class ControllerView(QWidget):
             core_files=self._tuning_core_files(),
             declared_files=tuple(dict.fromkeys(row.file for row in rows)),
             clone_dir=lambda manifest: (
-                server_dir / apply_module.CLONE_DIRS[manifest.type] / manifest.id
+                server_dir
+                / apply_module.CLONE_DIRS[manifest.type]
+                / apply_module.clone_folder(manifest)
             ),
         )
         # T302: the world conf's rates, read in the same pass -- one file, no job.
@@ -23886,7 +24497,8 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _kept_build_removed(self, result: object) -> None:
-        self.problem_label.setText(str(result))
+        line = result.line if isinstance(result, native.KeptBuildRemoved) else str(result)
+        self.problem_label.setText(line)
         self._set_busy(False)
         self.check_kept_build()
 

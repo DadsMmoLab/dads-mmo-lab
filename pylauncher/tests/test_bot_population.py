@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support_trinitycore import centurion_like
 from yulon import bot_population, channel_setup, resources, tuning
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
@@ -416,3 +417,50 @@ def test_the_wotlk_question_asks_for_a_recreate_and_changes_only_two_lines(
 
 def test_each_games_installed_count_is_read_off_the_catalog() -> None:
     assert {bot_population.installed_count(e) for e in (TBC, VANILLA, TORTOISE, WOTLK)} == {500}
+
+
+def test_a_second_cores_bot_count_keys_are_read_off_its_entry(tmp_path: Path) -> None:
+    """T850 A3: the Bots tab finds the count wherever the entry says its two keys are.
+
+    Centurion's `playerbots.conf` keeps `Playerbot.RandomPopulation.TargetMin`/`TargetMax`;
+    MoP's keeps AzerothCore's `AiPlayerbot.MinRandomBots`/`MaxRandomBots`. Both come from
+    the entry's `bot_count_keys`, never from a game id.
+    """
+    centurion = centurion_like()
+    assert bot_population.where(centurion) == ("etc/playerbots.conf", "conf")
+    assert bot_population.installed_count(centurion) == 150
+
+    mop = centurion_like(
+        bot_count_keys={"min": "AiPlayerbot.MinRandomBots", "max": "AiPlayerbot.MaxRandomBots"},
+        playerbots_keys={
+            "AiPlayerbot.Enabled": "1",
+            "AiPlayerbot.MinRandomBots": "150",
+            "AiPlayerbot.MaxRandomBots": "150",
+            "AiPlayerbot.RandomBotAccountCount": "200",
+        },
+    )
+    assert bot_population.where(mop) == ("etc/playerbots.conf", "conf")
+    assert bot_population.installed_count(mop) == 150
+
+    path = tmp_path / "etc" / "playerbots.conf"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "AiPlayerbot.Enabled = 1\n"
+        "AiPlayerbot.MinRandomBots = 150\n"
+        "AiPlayerbot.MaxRandomBots = 150\n",
+        encoding="utf-8",
+    )
+    reading = bot_population.read(mop, tmp_path)
+    assert (reading.min, reading.max, reading.problem) == (150, 150, None)
+
+    bot_population.write(mop, tmp_path, 40)
+
+    text = path.read_text(encoding="utf-8")
+    assert "AiPlayerbot.MinRandomBots = 40" in text
+    assert "AiPlayerbot.MaxRandomBots = 40" in text
+    assert "Playerbot.RandomPopulation" not in text
+    spec = bot_population.conf_keys(mop)
+    assert spec["AiPlayerbot.MinRandomBots"].label == "Random bots (lowest)"
+    assert spec["AiPlayerbot.MaxRandomBots"].label == "Random bots (highest)"
+    assert spec["AiPlayerbot.MinRandomBots"].type == "int"
+    assert spec["AiPlayerbot.MinRandomBots"].min == 0

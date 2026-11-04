@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -97,6 +97,56 @@ def test_a_rebuild_compiles_a_server_whose_images_are_all_already_there(
     said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     assert "build" in rec.calls, f"the rebuild skipped the compile: {rec.calls}"
     assert not any("skipping the compile" in line for line in said), said
+
+
+@pytest.mark.parametrize(
+    ("press", "named"),
+    [
+        (server_build_presses.UPDATE_TO_LATEST, True),
+        (server_build_presses.RETURN_TO_PIN, True),
+        (server_build_presses.REBUILD, False),
+    ],
+    ids=("update", "return", "rebuild"),
+)
+def test_a_rebuild_holds_its_server_under_the_press_that_started_it(
+    tmp_path: Path, press: str, named: bool
+) -> None:
+    """T864 review round 3: the update route's rebuild is not "Rebuild" to another Yu'lon.
+
+    `_staged()` is the one loop that takes the server's reservation on a stage
+    (`start-db`), and `rebuild()` used to hand it `REBUILD` whatever press it was
+    called under -- so an in-flight Update or Return said "Rebuild the server…"
+    in `docker.presses_running()`, which Free Docker space reads. Mutation:
+    `press=server_build_presses.REBUILD` again at that call.
+
+    The family below carries a `start-db` stage because NO rebuild stage tuple in
+    this repository has one today, and the press a loop carries is only recorded
+    where a reservation is taken. The stage is the family's own (`stage_named`),
+    run exactly as an install runs it, so what the probe reads is `_staged()`'s
+    own reservation and not a double of it.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    installer = engine(rec)
+    stages = installer.rebuild_stages()
+    seen: list[tuple[str, ...]] = []
+
+    def probe(_ctx: native.StageContext) -> Iterator[str]:
+        seen.append(docker.presses_running())
+        yield "probed"
+
+    installer.rebuild_stages = lambda: (  # type: ignore[method-assign]
+        installer.stage_named("start-db"),
+        native.Stage("probe", probe),
+        *stages,
+    )
+    list(installer.rebuild(InstallOptions(server_dir=server_dir), press=press))
+    assert seen, "the stage loop did not run"
+    if named:
+        assert press in seen[0], seen
+        assert server_build_presses.REBUILD not in seen[0], seen
+    else:
+        assert server_build_presses.REBUILD in seen[0], seen
 
 
 @pytest.mark.parametrize("images", [True, False, None], ids=("present", "gone", "unknown"))

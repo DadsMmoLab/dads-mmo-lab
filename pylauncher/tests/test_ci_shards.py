@@ -1,6 +1,6 @@
-"""CI cuts pytest into four slices per Python version; together they are the whole suite.
+"""CI cuts pytest into six slices per Python version; together they are the whole suite.
 
-`ci.yml` runs `pytest --shard-id N --num-shards 4` for N in 0..3 (`tests/conftest.py`). The
+`ci.yml` runs `pytest --shard-id N --num-shards 6` for N in 0..5 (`tests/conftest.py`). The
 split is only safe if every test lands in exactly one slice, in EVERY process of a run (under
 xdist each worker collects and filters on its own), and if a run without the options is
 untouched. Collected for real, in a subprocess, on a small file with many parametrized tests.
@@ -8,16 +8,19 @@ untouched. Collected for real, in a subprocess, on a small file with many parame
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import zlib
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+CI = ROOT.parent / ".github" / "workflows" / "ci.yml"
 TARGET = "tests/test_slow_marker_t183.py"
-SHARDS = 4
+SHARDS = 6
 
 
 def _collect(*options: str) -> list[str]:
@@ -46,7 +49,7 @@ def slices() -> list[list[str]]:
     return [_collect("--shard-id", str(n), "--num-shards", str(SHARDS)) for n in range(SHARDS)]
 
 
-def test_the_four_shards_together_cover_every_test_exactly_once(
+def test_the_six_shards_together_cover_every_test_exactly_once(
     whole: list[str], slices: list[list[str]]
 ) -> None:
     joined = [nodeid for part in slices for nodeid in part]
@@ -90,3 +93,31 @@ def test_a_shard_outside_the_count_is_refused() -> None:
     )
     assert result.returncode != 0
     assert "--shard-id 4" in result.stdout + result.stderr
+
+
+def test_ci_runs_exactly_the_shards_this_file_tests() -> None:
+    """The matrix and the pytest line cannot drift from SHARDS without a red test."""
+    ci = yaml.safe_load(CI.read_text(encoding="utf-8"))
+    job = ci["jobs"]["test"]
+    assert job["strategy"]["matrix"]["shard"] == list(range(SHARDS))
+    runs = [str(step.get("run", "")) for step in job["steps"]]
+    sharded = [run for run in runs if "--shard-id" in run]
+    assert len(sharded) == 1, runs
+    expected = re.escape(f"--shard-id ${{{{ matrix.shard }}}} --num-shards {SHARDS}")
+    assert re.search(rf"{expected}\b", sharded[0]), sharded[0]
+
+
+def test_the_checker_job_runs_on_both_pythons_with_every_pass() -> None:
+    """Before T868 mypy ran on 3.11 and 3.13; splitting the job must not drop either."""
+    ci = yaml.safe_load(CI.read_text(encoding="utf-8"))
+    job = ci["jobs"]["lint-type"]
+    assert job["strategy"]["matrix"]["python-version"] == ["3.11", "3.13"]
+    runs = [str(step.get("run", "")) for step in job["steps"]]
+    for command in (
+        "python -m ruff check .",
+        "python -m black --check .",
+        "python -m mypy yulon main.py",
+        "python -m mypy --platform win32 yulon main.py",
+        "python -m mypy --platform darwin yulon main.py",
+    ):
+        assert command in runs, (command, runs)

@@ -63,6 +63,12 @@ pyplan/upstream-cmangos-doodad-issue.md                       text eol=lf
 pylauncher/tests/fixtures/git-clone-progress.stderr           -text
 pylauncher/tests/data/centurion-rendered/**/*.yml  text eol=lf
 
+# The same for the TrinityCore family's second entry (T850, `wow-mop`): `write_mop_snapshots()`
+# writes the three compose files, the Dockerfile and the `.dockerignore` with `newline="\n"`,
+# and `test_composegen.py` compares them to what it renders, so a Windows checkout under
+# core.autocrlf=true must not grow CRLF in the compose files.
+pylauncher/tests/data/mop-rendered/**/*.yml  text eol=lf
+
 # mod-playerbots/azerothcore-wotlk's recipe files at the catalog pin, vendored byte for
 # byte: `test_build_context.py` checks their sha256 against the table `build_context`
 # recognises the recipe by (T230), so a CRLF checkout would fail it on Windows.

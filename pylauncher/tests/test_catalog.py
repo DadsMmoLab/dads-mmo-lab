@@ -34,17 +34,18 @@ V1_GAMES = (
     "wow-centurion",
     "wow-unbound",
     "wow-coa",
+    "wow-mop",
 )
-"""README §1's four v1 servers, Centurion after them (T179 Task 7), Unbound (T554) and CoA
-(T812)."""
+"""README §1's four v1 servers, Centurion after them (T179 Task 7), Unbound (T554), CoA
+(T812) and Mists of Pandaria (T850)."""
 
 
-def test_bundled_catalog_describes_exactly_the_seven_servers() -> None:
+def test_bundled_catalog_describes_exactly_the_eight_servers() -> None:
     """README §1: v1 scope is WoW WotLK / TBC / Vanilla / Tortoise, acronyms only.
 
     Plus Centurion (T179), the first server that is not one of the four, WoW Unbound
     (T554) and WoW Conquest of Azeroth (T812), each a WotLK of its own that runs
-    beside the first and so has ports of its own.
+    beside the first and so has ports of its own, and Mists of Pandaria (T850).
     """
     catalog = load_catalog()
     assert tuple(g.id for g in catalog.games) == V1_GAMES
@@ -237,17 +238,17 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
 
 GATE_PINS = {
     "wow-wotlk": {
-        "mod-playerbots/azerothcore-wotlk": "3f2969ddb0da42b48b4fca050c02b19163ba1e20",
-        "mod-playerbots/mod-playerbots": "e88cc4099e69f35126b28942a412ca702d20453b",
+        "mod-playerbots/azerothcore-wotlk": "93333d6a9eb00fdf0179adde30da3c17618207d6",
+        "mod-playerbots/mod-playerbots": "05a1f6fceb8a32aa879b13f5f48934c6e46a774c",
     },
     "wow-tbc": {
-        "cmangos/mangos-tbc": "37767e954241e346453260b8bc8c1fb2e2afdf7d",
-        "cmangos/playerbots": "6823423e07789c875f55a0fee9beeae0d3b69561",
+        "cmangos/mangos-tbc": "af6b4885647d4eca7802b68fccf52f0bccd8ed23",
+        "cmangos/playerbots": "de1b1823ab8352c6ebaeaa98cc576e1b2e2195d8",
         "cmangos/tbc-db": "1c54acd200540076c3078d22a66fd417d0f6dd60",
     },
     "wow-vanilla": {
-        "cmangos/mangos-classic": "5731249195520323cb5fb9aa29761d4f033272ce",
-        "cmangos/playerbots": "6823423e07789c875f55a0fee9beeae0d3b69561",
+        "cmangos/mangos-classic": "ff13624a4be74816796bc0f8555f03011438144e",
+        "cmangos/playerbots": "de1b1823ab8352c6ebaeaa98cc576e1b2e2195d8",
         "cmangos/classic-db": "603ece109099ce44a5447a1b1cffd65c7272d71c",
     },
 }
@@ -257,6 +258,15 @@ Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
 `dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26, 2026-10-08,
 2026-10-10 and 2026-10-17:
 
+* T860 (2026-11-02) moved all three to upstream's heads of that day WITHOUT a live gate:
+  `wow-wotlk` core `3f2969dd` -> `93333d6a` and module `e88cc409` -> `05a1f6f`; `wow-tbc`
+  `37767e95` -> `af6b4885`, `6823423e` -> `de1b1823`, `1c54acd2` unchanged; `wow-vanilla`
+  `57312491` -> `ff13624a`, `6823423e` -> `de1b1823`, `603ece10` unchanged -- the newest at
+  2026-11-02, not live-tested (owner decision: users report, we fall back). The 11 Server rates
+  keys were re-read in each `.conf.dist` at the new pin and all still exist. `wow-unbound`
+  shares both WotLK sources, `wow-tortoise` (`10393426` -> `33d0131a`, TortoiseBots `ff668fee`
+  -> `573c7919`, release v1.14.0) and `wow-centurion` (`351950fb` -> `0f7e3f59`) are pinned in
+  their own tests; their reasons were checked against the new revs, not against a live run.
 * T824 (2026-10-28) moved all three to upstream's heads of that day WITHOUT a live gate:
   `wow-wotlk` core `8a4e76ea` -> `3f2969dd` and module `d750b4b3` -> `e88cc409`; `wow-tbc`
   `15b6ddb4` -> `37767e95`, `da4419af` -> `6823423e`, `ebe51a83` -> `1c54acd2`; `wow-vanilla`
@@ -266,6 +276,7 @@ Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
   shares both WotLK sources, `wow-tortoise` (`10393426` -> `33d0131a`, TortoiseBots `ff668fee`
   -> `573c7919`, release v1.14.0) and `wow-centurion` (`25d3e6ef` -> `351950fb`) are pinned in
   their own tests; their reasons were checked against the new revs, not against a live run.
+
 * `wow-wotlk`: 2026-10-17 (v0.9.18), core `8a4e76ea` (16 Oct, 164 commits on) and module `d750b4b3`
   (12 commits on), pinned to the newest `Playerbot`/`master` tips without a live run: the owner's
   word, CI the only gate. Read from the two compares instead: no file under `data/sql/base`
@@ -404,8 +415,11 @@ def test_every_entry_says_whether_it_offers_the_update_to_latest_control() -> No
         "wow-tortoise": True,
         # T179 decision 2: code = pull + rebuild, world = changed tables re-imported.
         "wow-centurion": True,
-        # T812: CoA pins its fork and carries a patch; no update control until a gate proves one.
-        "wow-coa": False,
+        # T862: follows its newest release branch and paired bots tag.
+        "wow-coa": True,
+        # T850: MoP pins its fork; the world database comes from a release asset, not
+        # the checkout, so there is no snapshot for an update route to compare.
+        "wow-mop": False,
     }, offered
 
 

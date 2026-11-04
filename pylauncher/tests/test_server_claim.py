@@ -180,7 +180,7 @@ def test_a_leftover_of_this_users_own_is_named_with_its_command_and_never_remove
                 pytest.fail("went ahead")
         assert refused.value.holder.ours is True and refused.value.holder.here is False
         said = str(refused.value)
-        assert said.splitlines()[-1] == f"docker rm -f {name}", said
+        assert said.splitlines()[-1] == f"docker rm -f -v {name}", said
         assert "earlier run of this Yu'lon" in said, said
         assert name in fake_containers(fake_docker)
     finally:
@@ -381,7 +381,8 @@ def test_a_holder_that_is_being_removed_is_waited_for_not_refused_for(
     theirs = _another_process_holds(fake_docker, name, owner=docker.owner_id())
     try:
         removing = subprocess.run(
-            [str(fake_docker.parent / "fake-docker"), "rm", "-f", name + "-id"], capture_output=True
+            [str(fake_docker.parent / "fake-docker"), "rm", "-f", "-v", name + "-id"],
+            capture_output=True,
         )
         assert removing.returncode == 1  # "already in progress": it is `removing` now
         assert (fake_docker / "containers" / name).read_text(encoding="utf-8") == "removing"
@@ -525,7 +526,7 @@ def test_a_live_process_of_this_users_is_a_working_yulon_not_a_leftover(
     fake_docker: Path, server: Path
 ) -> None:
     """Same config folder, live pid on this computer: the refusal is "working on", with no
-    `docker rm -f` line (a headless run or a second window holds it, Opus review)."""
+    `docker rm -f -v` line (a headless run or a second window holds it, Opus review)."""
     name = _name(server)
     theirs = _another_process_holds(
         fake_docker, name, owner=docker.owner_id(), pid=str(os.getpid()), host=socket.gethostname()

@@ -14,7 +14,8 @@ and how it recovers from a compile it never saw finish.
 
 The header and binding excerpts are the measured bytes (line 113 of
 `src/PlayerbotAIConfig.h` at mod-playerbots 037c0141 and 79bd4281, line 115 at
-d750b4b3 and at e88cc409 (T824, read on GitHub 2026-10-28); lines 515 and
+d750b4b3, at e88cc409 (T824, read on GitHub 2026-10-28) and at 05a1f6f (T860, read on
+GitHub 2026-11-02, same members); lines 515 and
 528 of `src/LuaEngine/methods/Playerbots/PlayerBotAIMethods.h` at mod-ale cead0cb).
 """
 
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from collections.abc import Iterator
 from functools import partial
 from pathlib import Path
@@ -200,7 +202,10 @@ def test_putting_back_restores_every_byte_and_removes_the_record(tmp_path: Path)
     assert binding_bytes(tmp_path) == ALE_OLD.encode("utf-8")
     assert (tmp_path / BINDING).stat().st_mode & 0o777 == 0o640
     assert not (tmp_path / ale_playerbots.RECORD).exists()
-    assert any("PlayerBotAIMethods.h" in line for line in said), said
+    assert said == [
+        "mod-ale's changes for the compile were taken back out (1 file); its folder is as "
+        "mod-ale ships it."
+    ], said
 
 
 @pytest.mark.parametrize(
@@ -265,6 +270,12 @@ def test_a_left_over_record_restores_a_file_once_the_names_agree_again(tmp_path:
 
 
 def test_a_file_changed_since_the_bridge_wrote_it_is_never_overwritten(tmp_path: Path) -> None:
+    """T867-C C1: somebody's change is left, and its row STAYS in the record.
+
+    The old record was deleted here, which forgot the one file the put-back never
+    settled: the next compile would lay over it and lose the row for good. The row
+    now survives, and the summary does not claim the folder is as mod-ale ships it.
+    """
     lay(tmp_path, POST_RENAME_HEADER, ALE_OLD)
     list(ale_playerbots.bridge(tmp_path))
     theirs = b"// the player's own edit\n"
@@ -273,8 +284,76 @@ def test_a_file_changed_since_the_bridge_wrote_it_is_never_overwritten(tmp_path:
     said = ale_playerbots.put_back(tmp_path)
 
     assert binding_bytes(tmp_path) == theirs
-    assert not (tmp_path / ale_playerbots.RECORD).exists()
-    assert any("changed" in line for line in said), said
+    record = json.loads((tmp_path / ale_playerbots.RECORD).read_text(encoding="utf-8"))
+    assert list(record["files"]) == [BINDING]
+    assert record["files"][BINDING]["original"] == ALE_OLD
+    assert said == [
+        "mod-ale's changes for the compile were taken back out of 0 of 1 file.",
+        f"{BINDING} was changed during the build, so Yu'lon left it as it is; Remove and add "
+        "mod-ale again, or put it back by hand.",
+    ], said
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="permissions stop a read only as a non-root user on POSIX",
+)
+def test_a_file_that_cannot_be_read_keeps_its_row(tmp_path: Path) -> None:
+    """T867-C C1: unreadable is not "no file" and not "already back"."""
+    lay(tmp_path, POST_RENAME_HEADER, ALE_OLD)
+    list(ale_playerbots.bridge(tmp_path))
+    path = tmp_path / BINDING
+    os.chmod(path, 0)
+
+    said = ale_playerbots.put_back(tmp_path)
+
+    os.chmod(path, 0o600)
+    assert binding_bytes(tmp_path) == ALE_BRIDGED.encode("utf-8")
+    record = json.loads((tmp_path / ale_playerbots.RECORD).read_text(encoding="utf-8"))
+    assert list(record["files"]) == [BINDING]
+    assert any("could not be read" in line for line in said), said
+    assert not any("as mod-ale ships it" in line for line in said), said
+
+
+@pytest.mark.skipif(os.name != "posix", reason="modes are a POSIX fact")
+def test_a_row_from_before_modes_restores_a_missing_file_as_0644(tmp_path: Path) -> None:
+    """T867-D D2: records written before the mode was stored still come back readable."""
+    lay(tmp_path, POST_RENAME_HEADER, ALE_OLD)
+    list(ale_playerbots.bridge(tmp_path))
+    record = tmp_path / ale_playerbots.RECORD
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    for row in payload["files"].values():
+        row.pop("mode", None)
+    record.write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / BINDING).unlink()
+
+    ale_playerbots.put_back(tmp_path)
+
+    assert binding_bytes(tmp_path) == ALE_OLD.encode("utf-8")
+    assert stat.S_IMODE((tmp_path / BINDING).stat().st_mode) == 0o644
+    assert not record.exists()
+
+
+def test_a_leftover_record_stops_the_next_bridge_before_it_lays_anything(
+    tmp_path: Path,
+) -> None:
+    """T867-C C2: a record the put-back could not clear is not written over."""
+    lay(tmp_path, POST_RENAME_HEADER, ALE_OLD)
+    list(ale_playerbots.bridge(tmp_path))
+    theirs = b"// the player's own edit\n"
+    (tmp_path / BINDING).write_bytes(theirs)
+    ale_playerbots.put_back(tmp_path)
+    record = tmp_path / ale_playerbots.RECORD
+    before = record.read_bytes()
+
+    with pytest.raises(InstallerError) as raised:
+        list(ale_playerbots.bridge(tmp_path))
+
+    assert BINDING in str(raised.value)
+    assert "changed during the build" in str(raised.value)
+    assert "Nothing was built" in str(raised.value)
+    assert binding_bytes(tmp_path) == theirs
+    assert record.read_bytes() == before
 
 
 def test_a_record_yulon_cannot_read_refuses_before_the_compile(tmp_path: Path) -> None:

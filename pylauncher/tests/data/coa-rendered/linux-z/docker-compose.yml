@@ -326,6 +326,11 @@ services:
       # the SQL the checksum pass needs, nothing the load writes.
       - ./data/sql:/src/data/sql:ro:z
       - ./modules/mod-ascension:/src/modules/mod-ascension:ro:z
+    # T846: mysql:8.4 declares VOLUME /var/lib/mysql, and this one-shot only
+    # uses its client: a tmpfs there means Docker makes no anonymous volume
+    # that `compose down` (no `-v`, on purpose) would leave behind.
+    tmpfs:
+      - /var/lib/mysql
     depends_on:
       coa-database:
         condition: service_healthy

@@ -152,7 +152,7 @@ def test_a_stop_during_a_tool_ends_its_container_within_seconds(
     assert time.monotonic() - stopped < ENDS_WITHIN
     assert [run.returncode for run in got] == [docker.CANCELLED_RETURNCODE]
     assert fake_containers(state) == [], "the tool's container is still running"
-    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f {name}"]
+    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f -v {name}"]
     # T321: a container that was created before it started needs no second look.
     assert sleeps.slept == [], "a created container was asked about again"
 
@@ -176,7 +176,7 @@ def test_a_stopped_tool_whose_removal_is_already_in_progress_is_not_asked_about_
     assert not worker.is_alive(), "the stopped tool did not end"
     assert [run.returncode for run in got] == [docker.CANCELLED_RETURNCODE]
     assert got[0].container_left == ""
-    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f {name}"]
+    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f -v {name}"]
     assert sleeps.slept == [], "a created container's removal in progress was asked again"
 
 
@@ -214,7 +214,7 @@ def test_a_stop_during_the_create_waits_for_it_and_removes_what_it_made(
     name = _created(state)
     assert [run.returncode for run in got] == [docker.CANCELLED_RETURNCODE]
     assert not [call for call in fake_calls(state) if call.startswith("start ")], "started"
-    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f {name}"]
+    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f -v {name}"]
     assert fake_containers(state) == [], "the created container is still there"
     assert sleeps.slept == []
 
@@ -274,7 +274,7 @@ def test_a_create_that_timed_out_is_looked_for_twice_and_its_late_container_remo
     def the_daemon_finishes_the_create() -> None:
         name = _created(state)
         assert [call for call in fake_calls(state) if call.startswith("rm -f ")] == [
-            f"rm -f {name}"
+            f"rm -f -v {name}"
         ], "the ground: the first look came before the create"
         assert fake_containers(state) == []
         late.append(finish_late_create(state))
@@ -291,7 +291,7 @@ def test_a_create_that_timed_out_is_looked_for_twice_and_its_late_container_remo
     assert any("did not answer" in line for line in run.tail), run.tail
     assert not [call for call in fake_calls(state) if call.startswith("start ")], "started"
     removals = [call for call in fake_calls(state) if call.startswith("rm -f ")]
-    assert removals == [f"rm -f {name}", f"rm -f {name}"], removals
+    assert removals == [f"rm -f -v {name}", f"rm -f -v {name}"], removals
     assert fake_containers(state) == [], "the late container is still there"
 
 
@@ -336,7 +336,7 @@ def test_a_tool_container_that_will_not_go_is_named_in_the_run_log(
     assert said[-1] == docker.tool_container_left_line(
         name, "Error response from daemon: the daemon is shutting down"
     ), said[-1]
-    assert said[-1].endswith(f"\ndocker rm -f {name}"), "the command on a line of its own"
+    assert said[-1].endswith(f"\ndocker rm -f -v {name}"), "the command on a line of its own"
     assert got[0].container_left == name, "the caller must know the tool may still write"
 
 
@@ -352,7 +352,7 @@ def test_an_abandoned_tool_run_ends_its_container(fake_docker: tuple[Path, Path]
 
     name = _created(state)
     assert fake_containers(state) == []
-    assert f"rm -f {name}" in fake_calls(state)
+    assert f"rm -f -v {name}" in fake_calls(state)
 
 
 def test_an_abandoned_tool_whose_container_will_not_go_is_known_to_write_into_its_folder(
@@ -623,8 +623,8 @@ def test_a_left_container_is_removed_where_this_platform_removes_it(
 
     for line in lines:
         assert ("Docker Desktop's Containers list" in line) is desktop, line
-    assert f"docker rm -f {name}" in lines[0]
-    assert "docker rm -f yulon-git-0123456789ab" in lines[1]
+    assert f"docker rm -f -v {name}" in lines[0]
+    assert "docker rm -f -v yulon-git-0123456789ab" in lines[1]
     assert "docker rm" not in lines[2], "a command goes in the log, not on the player's line"
 
 
@@ -647,7 +647,7 @@ def test_a_tool_docker_would_not_start_has_its_created_container_removed(
     name = _created(state)
     assert run.returncode not in (0, docker.CANCELLED_RETURNCODE), run
     assert fake_containers(state) == [], "the created container was left behind"
-    assert f"rm -f {name}" in fake_calls(state)
+    assert f"rm -f -v {name}" in fake_calls(state)
     assert docker.tool_containers_writing_into(out).names == ()
 
 

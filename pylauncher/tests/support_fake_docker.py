@@ -371,9 +371,14 @@ if args[:1] == ["logs"]:
         stream.write("".join(kept if tail is None else kept[-tail:] if tail else []))
     sys.exit(0)
 if args[:2] == ["rm", "-f"]:
-    box = state / "containers" / args[2]
-    if not box.exists() and args[2].endswith("-id"):  # by the id `inspect` answered (T543)
-        box = state / "containers" / args[2][: -len("-id")]
+    rest = args[2:]
+    # T846: the app's own removals spell `rm -f -v <name>`; `-v` only takes the
+    # container's own anonymous volumes and changes nothing this fake tracks.
+    if rest[:1] == ["-v"]:
+        rest = rest[1:]
+    box = state / "containers" / rest[0]
+    if not box.exists() and rest[0].endswith("-id"):  # by the id `inspect` answered (T543)
+        box = state / "containers" / rest[0][: -len("-id")]
     if (state / "refuse-rm").exists():
         sys.stderr.write("Error response from daemon: the daemon is shutting down\\n")
         sys.exit(1)
@@ -393,7 +398,7 @@ if args[:2] == ["rm", "-f"]:
             stderr=subprocess.DEVNULL,
         )
         sys.stderr.write(
-            f"Error response from daemon: removal of container {{args[2]}} "
+            f"Error response from daemon: removal of container {{rest[0]}} "
             "is already in progress\\n"
         )
         sys.exit(1)
@@ -403,14 +408,14 @@ if args[:2] == ["rm", "-f"]:
         box.unlink()
         sys.stderr.write(
             "Error response from daemon: removal of container "
-            f"{{args[2]}} is already in progress\\n"
+            f"{{rest[0]}} is already in progress\\n"
         )
         sys.exit(1)
     if not box.exists():
-        sys.stderr.write(f"Error response from daemon: No such container: {{args[2]}}\\n")
+        sys.stderr.write(f"Error response from daemon: No such container: {{rest[0]}}\\n")
         sys.exit(1)
     box.unlink()
-    sys.stdout.write(args[2] + "\\n")
+    sys.stdout.write(rest[0] + "\\n")
 sys.exit(0)
 """
 

@@ -720,11 +720,13 @@ def test_the_production_container_gits_are_bare_and_there_are_no_others(
     native._git_tree_bytes(dest, "a" * 40, "sql/database_updates/world")
     assert len(seen) == ran + 1, "the tree-bytes route reached a container"
     ran = len(seen)
+    native._git_blob_id(dest, "b" * 40, "data/coa-world/baseline.json")
+    assert len(seen) == ran + 1, "the blob-id route reached a container"
+    ran = len(seen)
     native._git_is_ancestor(dest, "a" * 40, "b" * 40)
-    assert len(seen) == ran + 1, "the is-ancestor route reached a container"
     native.Seams()
 
-    assert made == [{}] * 15, "a production ContainerGit that carries a seam is not bare"
+    assert made == [{}] * 16, "a production ContainerGit that carries a seam is not bare"
 
     tree = ast.parse(Path(native.__file__).read_text(encoding="utf-8"))
     calls = [
@@ -3527,7 +3529,7 @@ def test_a_stopped_containerized_clone_ends_its_container_and_never_falls_back(
     assert not worker.is_alive(), "the stopped clone did not end"
     assert len(outcome) == 1 and isinstance(outcome[0], git.GitStopped), outcome
     assert fake_containers(state) == [], "the clone's container is still running"
-    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f {started}"]
+    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f -v {started}"]
     assert host == [], "a stopped clone was cloned again with host git"
     # T321: created under its name, then attached to; so "gone" needs no second look.
     docker_verbs = [call.split()[0] for call in fake_calls(state)]
@@ -3664,7 +3666,7 @@ def test_a_stop_just_before_the_clones_stream_starts_is_not_lost(
     (create,) = [c.split() for c in fake_calls(state) if c.startswith("create ")]
     name = create[create.index("--name") + 1]
     assert fake_containers(state) == [], "the clone's container is still there"
-    assert [c for c in fake_calls(state) if c.startswith("rm ")] == [f"rm -f {name}"]
+    assert [c for c in fake_calls(state) if c.startswith("rm ")] == [f"rm -f -v {name}"]
 
 
 def test_a_stopped_clone_whose_container_will_not_go_says_so_in_the_log(
@@ -3705,7 +3707,7 @@ def test_a_stopped_clone_whose_container_will_not_go_says_so_in_the_log(
     assert said[-1] == git.container_left_line(
         started, dest, "Error response from daemon: the daemon is shutting down"
     ), said[-1]
-    assert f"docker rm -f {started}" in said[-1]
+    assert f"docker rm -f -v {started}" in said[-1]
 
 
 def test_an_abandoned_containerized_clone_ends_its_container_too(
@@ -3726,7 +3728,7 @@ def test_an_abandoned_containerized_clone_ends_its_container_too(
     clone.close()  # type: ignore[attr-defined]
 
     assert fake_containers(state) == []
-    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f {started}"]
+    assert [call for call in fake_calls(state) if call.startswith("rm ")] == [f"rm -f -v {started}"]
     assert settle.slept == [], "T321: a created container is not asked about again"
 
 
@@ -3773,7 +3775,7 @@ def test_a_clone_that_fails_on_its_own_still_falls_back_and_ends_nothing(
     assert created[0][1:2] == ["create"] and "--name" in created[0]
     name = created[0][created[0].index("--name") + 1]
     assert ran == [["docker", "start", "-a", name]], ran
-    assert created[1:] == [["docker", "rm", "-f", name]], created
+    assert created[1:] == [["docker", "rm", "-f", "-v", name]], created
 
 
 def _stop_mid_clone(
@@ -3881,7 +3883,7 @@ def test_a_clone_create_that_timed_out_is_looked_for_twice_and_its_late_containe
     assert said[-1] == "host git cloned it" and len(host) == 1, said
     assert settle.slept == [container_end.LATE_CREATE_SETTLE], settle.slept
     removals = [call for call in fake_calls(state) if call.startswith("rm -f ")]
-    assert removals == [f"rm -f {late[0]}"] * 2, removals
+    assert removals == [f"rm -f -v {late[0]}"] * 2, removals
     assert not [call for call in fake_calls(state) if call.startswith("start ")], "started"
     assert fake_containers(state) == [], "the late container is still there"
     logged = [r.getMessage() for r in caplog.records if "clone container" in r.getMessage()]
@@ -4021,7 +4023,7 @@ def test_a_timed_out_clone_create_whose_late_container_will_not_go_is_said_not_c
     assert isinstance(failed.value, git.GitStopped) is stopped, failed.value
     assert fake_containers(state) == late, "the ground: the daemon kept it"
     assert said and said[-1].startswith(f"The clone's container {late[0]} could not be removed")
-    assert f"docker rm -f {late[0]}" in said[-1], said[-1]
+    assert f"docker rm -f -v {late[0]}" in said[-1], said[-1]
     assert ("after Stop" in said[-1]) is stopped, said[-1]
     if not stopped:
         # Cold review: a create that timed out is a daemon that hangs; `rm -f` hung too.

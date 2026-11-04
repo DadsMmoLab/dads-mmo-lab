@@ -488,7 +488,7 @@ def test_stop_during_the_clone_ends_its_container_and_tries_no_other_clone(
 
     assert list((state / "containers").iterdir()) == [], "the clone's container is still there"
     calls = (state / "calls.log").read_text(encoding="utf-8").splitlines()
-    assert f"rm -f {started.name}" in calls, calls
+    assert f"rm -f -v {started.name}" in calls, calls
     assert host_clones == [], "a stopped clone was cloned again with host git"
     assert len([call for call in calls if call.startswith("create ")]) == 1, calls
     assert panel.status_text() == "cancelled"

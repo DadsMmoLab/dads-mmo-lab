@@ -172,9 +172,14 @@ def _restarted_after_failed_switch(exc: BaseException, original: str) -> BaseExc
         f"{exc} The switch did not go through, and the server started again "
         f"on the {original} realm type."
     )
-    if isinstance(exc, coa_realm.RealmSwitchError):
-        return coa_realm.RealmSwitchError(message)
-    return RuntimeError(message)
+    restarted: BaseException = (
+        coa_realm.RealmSwitchError(message)
+        if isinstance(exc, coa_realm.RealmSwitchError)
+        else RuntimeError(message)
+    )
+    # T857: the view's Play reads this to say the server runs again (typed, not parsed).
+    restarted.server_restarted = True  # type: ignore[attr-defined]
+    return restarted
 
 
 def _stopped_after_failed_switch(exc: BaseException, extra: str = "") -> BaseException:
@@ -225,11 +230,16 @@ def install_hold(
 ) -> Callable[[str], AbstractContextManager[object]]:
     """The installer's hold as the tab's hold seam (T812 C3b).
 
-    The installer caller passes its own `reserved()` bound to the server dir
-    and the press it already holds (`native.INSTALL_PRESS` from `start-db`);
-    the import stage re-takes it so a Server tab switch (which holds the same
-    reservation from outside) is refused with the holder's sentence instead of
-    racing. A tiny adapter so the engine stays importable without Qt.
+    The caller passes its own `reserved()` bound to the server dir and the name
+    the hold is taken under: `native.INSTALL_PRESS` on every caller, because the
+    stage re-taking it is the install's `import` stage even when a repair, an
+    update or an adopt is what runs it. The import stage re-takes it so a Server
+    tab switch (which holds the same reservation from outside) is refused with
+    the holder's sentence instead of racing. Free Docker space reads that name
+    as "Install" and does NOT treat it as a build press: a repair's import
+    compiles nothing, and an install's compile is seen by `docker.builds_running()`
+    (T864 review round 3). A tiny adapter so the engine stays importable without
+    Qt.
     """
 
     def hold(_press: str) -> AbstractContextManager[object]:

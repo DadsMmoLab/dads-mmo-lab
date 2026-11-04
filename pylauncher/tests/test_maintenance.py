@@ -1521,6 +1521,8 @@ def test_every_game_hands_its_declared_client_to_the_dump_when_the_probe_cannot_
         "wow-tortoise": tortoise.mysql_for,
         # Centurion's package takes its entry (T179 Task 5).
         "wow-centurion": functools.partial(centurion.mysql_for, catalog.get("wow-centurion")),
+        # T850: MoP runs the same package, its own entry and containers.
+        "wow-mop": functools.partial(centurion.mysql_for, catalog.get("wow-mop")),
     }
     assert set(factories) == {
         game.id for game in catalog.games

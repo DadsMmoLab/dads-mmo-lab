@@ -191,6 +191,11 @@ DELETE_HOLDS_THE_DATABASES = (
     f"Old backups are being deleted on this server's {MAINTENANCE_TAB} tab. Wait for that "
     "to finish, then try again."
 )
+PRESS_FREE_DOCKER_SPACE = server_build_presses.FREE_DOCKER_SPACE
+FREE_DOCKER_SPACE_HOLDS = (
+    f"Docker space is being freed on this server's {MAINTENANCE_TAB} tab. Wait for that "
+    "to finish, then try again."
+)
 TUNING_RUNNING = (
     "A Tuning change is being saved or put back on this server's Tuning tab. Wait for it "
     "to finish, then try again. Nothing was removed."
@@ -268,7 +273,7 @@ def server_reservation_left(label: str, name: str, this_press: str) -> str:
     return (
         f"An earlier run of this Yu'lon left its reservation of {label} in Docker ({name}), "
         f"so nothing was changed. Remove it with the command below, then press "
-        f"\u201c{this_press}\u201d again.\ndocker rm -f {name}"
+        f"\u201c{this_press}\u201d again.\ndocker rm -f -v {name}"
     )
 
 

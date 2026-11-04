@@ -91,9 +91,9 @@ def test_create_refuses_a_password_set_password_would_refuse(game: str, password
 @pytest.mark.parametrize(
     ("game", "longest"),
     [
-        # MAX_ACCOUNT_STR, read at each catalog pin: AzerothCore 3f2969dd AccountMgr.h:34 (17);
-        # mangos-tbc 37767e95 and mangos-classic 57312491 src/game/Accounts/AccountMgr.h:34,
-        # tortoise-wow 33d0131a src/game/AccountMgr.h:50, TrinityCore112 351950fb
+        # MAX_ACCOUNT_STR, read at each catalog pin: AzerothCore 93333d6a AccountMgr.h:34 (17);
+        # mangos-tbc af6b4885 and mangos-classic ff13624a src/game/Accounts/AccountMgr.h:34,
+        # tortoise-wow 33d0131a src/game/AccountMgr.h:50, TrinityCore112 0f7e3f59
         # src/server/game/Accounts/AccountMgr.h:42 (16).
         ("wow-wotlk", 17),
         ("wow-tbc", 16),
@@ -204,3 +204,6 @@ def test_each_family_says_its_own_cores_longest_name() -> None:
     assert tbc_accounts.MAX_USERNAME == account_rules.name_max("mangos_srp6") == 16
     assert vanilla_accounts.MAX_USERNAME == account_rules.name_max("mangos_srp6") == 16
     assert wotlk_accounts.MAX_USERNAME == account_rules.name_max("azerothcore") == 17
+    # The MoP line's own `MAX_ACCOUNT_STR` (T850-C) is 16, not the 32 its
+    # `account.username` column holds: the CORE refuses the 17th character.
+    assert account_rules.name_max("trinitycore_sha") == 16

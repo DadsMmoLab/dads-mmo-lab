@@ -10,8 +10,12 @@ file chooses, and nothing here is read by the app.
 from __future__ import annotations
 
 import copy
+import hashlib
+import io
 import json
 import struct
+import zipfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -227,18 +231,21 @@ TRINITYCORE: dict[str, Any] = {
 }
 
 
-def centurion_like(
+def centurion_data(
     *,
     packs: list[dict[str, Any]] | None = None,
     rev: str | None = None,
     world_data_dirs: tuple[str, ...] = (),
-) -> CatalogEntry:
-    """A whole, valid `trinitycore` entry: generated password, SOAP channel published.
+    release_assets: Sequence[dict[str, Any]] = (),
+    extract: dict[str, Any] | None = None,
+    map_names: str | None = None,
+    bot_count_keys: dict[str, str] | None = None,
+    playerbots_keys: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """The entry DICT `centurion_like()` parses, so a test can break ONE rule in it.
 
-    `packs` are the client's packs (T181 shapes, none by default) and `rev` the
-    core source's pin, for the install engine's tests (Task 3). `world_data_dirs`
-    are the folders a Windows world server reads from its volume (T219); none by
-    default, so the entry binds `data/` on every platform.
+    Not parsed here on purpose: a refusal test needs a document that is valid in
+    every other respect, which is exactly what this returns untouched.
     """
     data = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
     entry: dict[str, Any] = copy.deepcopy(
@@ -323,6 +330,18 @@ def centurion_like(
     }
     entry["install"]["default_server_dir"] = "yulon-centurion"
     entry["install"]["password"] = {"mode": "generated", "file": ".db_password", "prefix": "tc-"}
+    trinitycore = copy.deepcopy(TRINITYCORE)
+    if extract is not None:
+        trinitycore["extract"] = {**trinitycore["extract"], **extract}
+    if map_names is not None:
+        trinitycore["map_names"] = map_names
+    if playerbots_keys is not None:
+        conf = trinitycore["conf"]
+        files = dict(conf["files"])
+        files["playerbots.conf"] = {**files["playerbots.conf"], "keys": playerbots_keys}
+        trinitycore["conf"] = {**conf, "files": files}
+    if bot_count_keys is not None:
+        trinitycore["conf"] = {**trinitycore["conf"], "bot_count_keys": bot_count_keys}
     entry["install"]["native"] = {
         "family": "trinitycore",
         "templates": "shared/trinitycore",
@@ -333,12 +352,107 @@ def centurion_like(
         "ready": {"world": "World initialized"},
         "update_to_latest": True,
         "trinitycore": {
-            **copy.deepcopy(TRINITYCORE),
+            **trinitycore,
             "world_data_dirs": list(world_data_dirs),
             **({"world_data_gb": 5} if world_data_dirs else {}),
+            **({"release_assets": list(release_assets)} if release_assets else {}),
         },
     }
-    return parse_catalog({"schema_version": 1, "games": [entry]}).get("wow-centurion")
+    return entry
+
+
+def centurion_like(
+    *,
+    packs: list[dict[str, Any]] | None = None,
+    rev: str | None = None,
+    world_data_dirs: tuple[str, ...] = (),
+    release_assets: Sequence[dict[str, Any]] = (),
+    extract: dict[str, Any] | None = None,
+    map_names: str | None = None,
+    bot_count_keys: dict[str, str] | None = None,
+    playerbots_keys: dict[str, str] | None = None,
+) -> CatalogEntry:
+    """A whole, valid `trinitycore` entry: generated password, SOAP channel published.
+
+    `packs` are the client's packs (T181 shapes, none by default) and `rev` the
+    core source's pin, for the install engine's tests (Task 3). `world_data_dirs`
+    are the folders a Windows world server reads from its volume (T219); none by
+    default, so the entry binds `data/` on every platform. `release_assets` are the
+    zips the entry's `fetch-release` stage downloads (T850-B); empty -- the default,
+    and every entry whose databases come from its checkout -- is the entry whose
+    `stages()` has no such stage.
+
+    The rest change what a SECOND core of the family needs, so a test can reach
+    those code paths without the shipped `wow-centurion` shape: `extract` is
+    merged over `TRINITYCORE["extract"]` (so `{"dbc_overlay_from": None}` drops
+    the overlay), `map_names` sets the file-naming pattern, `bot_count_keys` the
+    two keys the count is carried over in, and `playerbots_keys` the whole key set
+    of `playerbots.conf`. Every default is Centurion's.
+    """
+    document = centurion_data(
+        packs=packs,
+        rev=rev,
+        world_data_dirs=world_data_dirs,
+        release_assets=release_assets,
+        extract=extract,
+        map_names=map_names,
+        bot_count_keys=bot_count_keys,
+        playerbots_keys=playerbots_keys,
+    )
+    return parse_catalog({"schema_version": 1, "games": [document]}).get("wow-centurion")
+
+
+# -- a release asset's zip (T850-B) -------------------------------------------------------
+
+MOP_MEMBERS = ("auth.sql", "characters.sql", "playerbots.sql", "world.sql")
+"""The four `.sql` files at the ROOT of the MoP database asset, no folder (GAP §0)."""
+
+MOP_DATABASE_URL = (
+    "https://github.com/1LineAtaTime/LoA-Pandaria-Playerbots/releases/download/"
+    "v1.0.4/LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip"
+)
+"""The real asset's url (GAP §0, GitHub API 2026-11-01): a github.com host, so the
+`RELEASE_HOSTS` fence is exercised on the url it will really fetch."""
+
+
+def database_zip(
+    members: Sequence[str] = MOP_MEMBERS,
+    *,
+    bodies: Mapping[str, bytes] | None = None,
+    extra: Mapping[str, bytes] | None = None,
+) -> bytes:
+    """A database asset as the release serves one: every file at the zip's root.
+
+    `extra` adds members no `members` list names -- another server's dump, or a name
+    that climbs out of the folder -- which the unpack must ignore or refuse. Fixed
+    dates and deflate, so the bytes (and the size and sha256 `release_asset()` pins)
+    are the same on every run.
+    """
+    written: dict[str, bytes] = {name: f"-- {name}\n".encode() for name in members}
+    written.update(bodies or {})
+    written.update(extra or {})
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zipped:
+        for name, body in written.items():
+            zipped.writestr(zipfile.ZipInfo(name, date_time=(2026, 11, 1, 0, 0, 0)), body)
+    return buffer.getvalue()
+
+
+def release_asset(
+    zip_bytes: bytes,
+    *,
+    url: str = MOP_DATABASE_URL,
+    dest: str = "release/v1.0.4/db",
+    members: Sequence[str] = MOP_MEMBERS,
+) -> dict[str, Any]:
+    """One `release_assets` entry, pinning the zip `zip_bytes` IS (T850-B)."""
+    return {
+        "url": url,
+        "sha256": hashlib.sha256(zip_bytes).hexdigest(),
+        "size": len(zip_bytes),
+        "dest": dest,
+        "members": list(members),
+    }
 
 
 # -- the movement-map job's Docker (T179 Task 4) ------------------------------------------
@@ -393,7 +507,7 @@ class FakeMmapsDocker:
     under a name in use is refused with Docker's own conflict, which is how a
     second job at once would show. `answers=False` is a daemon that does not
     answer an inspect (`ContainerExit()` with nothing in it); `refuse_remove` makes
-    every `docker rm -f` fail. The world server's start time is `world_started_at`.
+    every `docker rm -f -v` fail. The world server's start time is `world_started_at`.
     """
 
     def __init__(self) -> None:

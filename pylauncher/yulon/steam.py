@@ -504,17 +504,22 @@ def client_executable(client_dir: Path, names: Sequence[str] = _CLIENT_EXE_PREFE
 
     `names` are the entry's lower-case `client.exe_names`, matched case-insensitively
     because the same folder shipped from Windows spells it `Wow.exe` (`Ascension.exe`
-    for Conquest of Azeroth). The default keeps 8.8's `WoW.exe` pick and fallback.
+    for Conquest of Azeroth). The FIRST name that exists in the folder wins, in the
+    order given: a folder holding both `Wow-64.exe` and `_Wow-64.exe` picks the one
+    the entry lists first, not the one whose name sorts first. The default keeps
+    8.8's `WoW.exe` pick and fallback.
 
     Falling back to the first name rather than refusing is deliberate and narrow: the
     folder is one the user picked and Yu'lon validated, and an entry pointing at
     the conventional name inside it is a thing they can see and correct. A
     folder Yu'lon was never given is a different case and refuses (`NO_CLIENT`).
     """
-    wanted = {name.lower() for name in names}
-    for candidate in sorted(client_dir.glob("*")):
-        if candidate.is_file() and candidate.name.lower() in wanted:
-            return candidate
+    files = [path for path in sorted(client_dir.glob("*")) if path.is_file()]
+    for name in names:
+        wanted = name.lower()
+        for candidate in files:
+            if candidate.name.lower() == wanted:
+                return candidate
     if tuple(names) == _CLIENT_EXE_PREFERENCE or not names:
         return client_dir / "WoW.exe"
     return client_dir / names[0]
@@ -991,6 +996,30 @@ class AddReport:
     compat_backup: Path | None
     scripts: tuple[Path, ...] = ()
     lib: str = ""
+    layout: str = ""
+    """The Steam Input sentence, or "": `controller_layout` fills it, nothing else does."""
+
+
+def _layout_sentence(reason: object) -> str:
+    """The report line for a refused layout step: no double period (round 2, N6).
+
+    The refusal text (`SteamRefusal`) ends its own sentence, so appending
+    another period wrote two. The reason's trailing "Nothing was written" (or
+    "Nothing of the layout was kept") clause is about the LAYOUT step, while
+    the press DID write the Steam tiles — keeping it would say nothing was
+    written when the tiles were added. It is cut there, and the line says so.
+    """
+    text = str(reason).rstrip()
+    for clause in ("Nothing of the layout was kept.", "Nothing was written."):
+        cut = text.find(clause)
+        if cut != -1:
+            text = text[:cut].rstrip(" .")
+            break
+    else:
+        text = text.rstrip(".")
+    return (
+        f"Steam Input: the controller layout was not set up ({text}); the Steam tiles were added."
+    )
 
 
 def confirmation(report: AddReport) -> str:
@@ -1004,14 +1033,19 @@ def confirmation(report: AddReport) -> str:
     where = "Updated in your Steam library" if report.replaced else "Added to your Steam library"
     if len(report.entries) == 3:
         client, server, stop = report.entries
-        return (
+        said = (
             f"{where}: “{server}” (starts the server and stops it when you close the game), "
             f"“{client}” (the game) and “{stop}”. Restart Steam to see them."
         )
-    client, server = report.entries
-    return (
-        f"{where}: “{client}” (the game) and “{server}” (this launcher). Restart Steam to see them."
-    )
+    else:
+        client, server = report.entries
+        said = (
+            f"{where}: “{client}” (the game) and “{server}” (this launcher). "
+            "Restart Steam to see them."
+        )
+    if report.layout:
+        said += f"\n{report.layout}"
+    return said
 
 
 def confirmation_details(report: AddReport) -> str:
@@ -1069,7 +1103,7 @@ class SteamShortcuts:
 
     game: str
     server_dir: Path
-    client_dir: Path | None
+    client_dir: Path | None = None
     exe_names: tuple[str, ...] = ("wow.exe",)
     """The entry's `client.exe_names`: which executable in the folder is the game (T812)."""
     wine_dll_overrides: str | None = None
@@ -1086,12 +1120,42 @@ class SteamShortcuts:
     """Gaming Mode (a WoW server on a Steam Deck): the Server tile runs the Lab's launcher
     in Konsole, which starts the server through Yu'lon and stops it when the game closes,
     and a third tile stops it. None keeps 8.8's two entries exactly as they were."""
+    config_dir: Path | None = None
+    """Where Yu'lon's own Steam Input record lives; `platform.config_dir()` unless given.
 
-    def add(self) -> AddReport:
+    A seam for the same reason `home` is: the record is app state, and a test
+    that reached the real config dir would write outside its own tree.
+    """
+    account_id: str | None = None
+    """The Steam account id for the controller config dir; `find_profile()` unless given."""
+    controller_layout: Callable[[], bool] | None = None
+    """Whether this press also writes the ConsolePort controller layout (T853).
+
+    A seam for the reason `launch_args` is: the answer lives in the ready-to-play
+    client's record (`choices["packs"]["consoleport"]`), which is read off the
+    GUI thread at press time, when `add()` runs — not at tab build. None keeps
+    the old explicit `controller_layout=` flag; a seam answering False writes
+    nothing, exactly as then.
+    """
+
+    def add(self, *, controller_layout: bool | None = None) -> AddReport:
         """Write the two entries, the artwork and the compatibility tool.
 
         Order matters and is checked by tests: every refusal happens before the
         first byte, and both backups are taken before either file is written.
+        `controller_layout` adds, for WoW game tiles only, the Steam Deck
+        controller layout for the GAME tile (`self.game`, never the
+        Server/Stop tiles): a ConsolePort pad layout under the same Steam-closed
+        window, after the same refusals. Off on Windows/macOS with the rest.
+        True writes it, False never does, and None (the default) asks this
+        press's `controller_layout` seam — None there writes nothing.
+        The layout is an EXTRA on top of the shortcuts: it is planned before
+        the first Steam write, and a planning or apply refusal never escapes
+        `add()` — the shortcuts still go ahead and the report carries
+        "Steam Input: the controller layout was not set up (<reason>); the
+        Steam tiles were added." Turning ConsolePort off later removes nothing
+        (the player may like the layout on its own); `steam_input.remove()`
+        stays available.
         """
         detected = self.platform_id()
         if detected != "linux":
@@ -1187,6 +1251,36 @@ class SteamShortcuts:
         with compat_path.open("r", encoding="utf-8", errors="surrogateescape", newline="") as fh:
             compat_text, _ = compat_mapping(fh.read(), appid=int(client_entry["appid"]), tool=tool)
 
+        write_layout = controller_layout
+        if write_layout is None:
+            write_layout = self.controller_layout() if self.controller_layout else False
+        # The layout is an EXTRA, planned before the first Steam write lands:
+        # its refusals (an unreadable configset, a missing template, a
+        # refusing configset shape) carry the press on to the shortcuts anyway
+        # and surface as the report line, never as an exception. Only the
+        # plan-time refusal is caught here; the apply after the shortcuts is
+        # caught again below (it can still fail on a write that was fine to
+        # plan).
+        layout_plan = None
+        layout_sentence = ""
+        if write_layout:
+            from yulon import steam_input
+            from yulon.steam import SteamRefusal as _PlanRefusal
+
+            account = self.account_id or config.parent.name
+            try:
+                layout_plan = steam_input.plan(
+                    steam_root,
+                    account,
+                    self.game,
+                    config_dir=self.config_dir,
+                )
+                steam_input.planned_texts(layout_plan)
+            except (_PlanRefusal, OSError) as exc:
+                layout_sentence = _layout_sentence(exc)
+                layout_plan = None
+                logger.info(f"steam input: {layout_sentence}")
+
         stamp = self.now().strftime("%Y%m%d-%H%M%S")
         try:
             backup = _backup(path, stamp)
@@ -1206,6 +1300,17 @@ class SteamShortcuts:
                 _write_artwork(stop_art, icon_png(SERVER_ACCENT))
             _write_compat(compat_path, compat_text)
             _write_shortcuts(path, payload)
+            if layout_plan is not None:
+                from yulon import steam_input as _steam_input
+                from yulon.steam import SteamRefusal as _SteamRefusal
+
+                try:
+                    layout_report = _steam_input.apply(layout_plan, steam_running=False)
+                except (_SteamRefusal, OSError) as exc:
+                    layout_sentence = _layout_sentence(exc)
+                else:
+                    layout_sentence = _steam_input.report_sentence(layout_report)
+                logger.info(f"steam input: {layout_sentence}")
         except OSError as exc:
             # `OSError` and not `PermissionError`: a read-only filesystem answers
             # EROFS, which is `OSError` and not a subclass of `PermissionError`,
@@ -1234,4 +1339,5 @@ class SteamShortcuts:
             compat_backup=compat_backup,
             scripts=(scripts.launcher, scripts.stop) if scripts is not None else (),
             lib=scripts.lib if scripts is not None else "",
+            layout=layout_sentence,
         )

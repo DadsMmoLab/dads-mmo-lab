@@ -673,9 +673,10 @@ def test_the_set_level_control_is_drawn_exactly_where_the_tree_has_the_command(
 
     assert with_control, "no tree drew the control, so one direction proved nothing"
     assert without_control, "no tree withheld it, so the other direction proved nothing"
-    # Centurion withheld it until T208's live check watched it work (2026-10-04); since
-    # then no shipped tree withholds it, and the branch above stays for the next one.
-    assert withheld == [], withheld
+    # Centurion withheld it until T208's live check watched it work (2026-10-04); since then
+    # the branch above stayed for the next tree that withholds it, and T850's Mists of
+    # Pandaria is that tree: every verb is held back until its own live check.
+    assert withheld == ["wow-mop"], withheld
 
 
 def test_where_the_control_is_absent_the_sentence_names_what_the_server_can_do(

@@ -109,6 +109,24 @@ def lay_patch_sources(entry: CatalogEntry) -> Callable[[Path], None]:
     return on_clone
 
 
+def advert_body(refs: dict[str, str]) -> bytes:
+    """A smart-HTTP `info/refs` body for `refs` (`{ref: sha}`), capabilities on the first (T862).
+
+    The service line, a flush, one pkt-line per ref with the capabilities after
+    `\\0` on the first, and a closing flush — the shape `git ls-remote` reads.
+    """
+    chunks = [b"001e# service=git-upload-pack\n", b"0000"]
+    names = sorted(refs)
+    for index, name in enumerate(names):
+        line = f"{refs[name]} {name}".encode("ascii")
+        if index == 0:
+            line += b"\0multi_ack thin-pack side-band ofs-delta deepen-since"
+        line += b"\n"
+        chunks.append(f"{len(line) + 4:04x}".encode("ascii") + line)
+    chunks.append(b"0000")
+    return b"".join(chunks)
+
+
 @dataclass
 class Recorder:
     """A whole machine's worth of doubles, and a record of what the engine did to it."""
@@ -137,6 +155,30 @@ class Recorder:
     build_cache: int | None = None
     """What `docker.build_cache_bytes()` answers (T203). `None`, "could not ask", by default."""
     build_cache_asked: int = 0
+    dangling_ids: tuple[str, ...] | None = ()
+    """What `dangling_image_ids()` answers (T864): ids of this install's dangling images."""
+    dangling_asked: list[str] = field(default_factory=list)
+    """Every project label `dangling_image_ids()` was asked with, in order (T864)."""
+    unused_answers: dict[str, str] = field(default_factory=dict)
+    """What `remove_unused_image()` answers per id; `""` (removed) unless stated (T864)."""
+    unused_removed: list[str] = field(default_factory=list)
+    """Every image id `remove_unused_image()` was asked to remove, in order (T864)."""
+    in_use_once: set[str] = field(default_factory=set)
+    """Image ids `remove_unused_image()` answers `IMAGE_IN_USE` for ONCE, then as usual.
+
+    T864-E: the shape of the bug is "the first ask is refused by a finished
+    one-shot container, and the second ask, after that container is removed,
+    succeeds". A double that could only ever answer one way could not show the
+    retry happening.
+    """
+    holders: dict[str, tuple[docker.ContainerRef, ...] | None] = field(default_factory=dict)
+    """What `containers_on()` answers per image (T864-E); a missing key is ()."""
+    holders_asked: list[str] = field(default_factory=list)
+    """Every image `containers_on()` was asked about, in order (T864-E)."""
+    containers_removed: list[str] = field(default_factory=list)
+    """Every container id `remove_finished_container()` removed, in order (T864-E)."""
+    container_answers: dict[str, str] = field(default_factory=dict)
+    """What `remove_finished_container()` answers per id; `""` (gone) unless stated."""
     folder_size: int | None = None
     """What `native.folder_bytes()` answers (T203 fix round 3). `None`, "could not measure"."""
     folder_asked: list[Path] = field(default_factory=list)
@@ -570,6 +612,22 @@ class Recorder:
     )
     """T179: `changed_lines()`'s answer per `(checkout, old, new, path)`; absent is None."""
 
+    adverts: dict[str, dict[str, str]] = field(default_factory=dict)
+    """T862: a git server's advertised refs per source `url` (the `info/refs` answer).
+
+    Answered in `upstream_get` with a pkt-line body `advert_body()` builds. A url not
+    named raises there, like a mirror that cannot be reached.
+    """
+
+    advert_errors: set[str] = field(default_factory=set)
+    """T862: urls whose `info/refs` answer fails, as an unreachable mirror would."""
+
+    blob_ids: dict[tuple[Path, str, str], str | None] = field(default_factory=dict)
+    """T862: `blob_id()`'s answer per `(checkout, commit, path)`; absent is "unchanged"."""
+
+    local_commit_branches: list[tuple[str, str | None]] = field(default_factory=list)
+    """T862: `(checkout name, branch)` of every `no_local_commits()` question, in order."""
+
     restore_error: Exception | None = None
     """What `restore_rev()` RAISES instead of moving the head, or None to move it.
 
@@ -580,8 +638,13 @@ class Recorder:
     """
 
     def upstream_get(self, url: str, accept: str) -> bytes:
-        """GitHub, as far as T124 asks it: one compare per source."""
+        """GitHub, as far as T124 asks it: one compare per source; T862's mirror listing too."""
         self.gets.append(url)
+        if url.endswith("/info/refs?service=git-upload-pack"):
+            base = url[: -len("/info/refs?service=git-upload-pack")]
+            if base in self.advert_errors or base not in self.adverts:
+                raise urllib.error.URLError("no network in this test")
+            return advert_body(self.adverts[base])
         for slug, (tag, sha) in self.releases.items():
             if url == f"https://api.github.com/repos/{slug}/releases/latest":
                 body = {"tag_name": tag, "draft": False, "prerelease": False}
@@ -621,9 +684,17 @@ class Recorder:
 
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
         self.calls.append(f"no-local-commits:{dest.name}")
+        self.local_commit_branches.append((dest.name, branch))
         if not self.git_reads:
             return None
         return dest not in self.diverged
+
+    def blob_id(self, dest: Path, rev: str, path: str) -> str | None:
+        """T862: the blob `path` is at `rev`; absent is "unchanged", None is git silent."""
+        self.calls.append(f"blob-id:{dest.name}:{rev[:7]}:{path}")
+        if not self.git_reads:
+            return None
+        return self.blob_ids.get((dest, rev, path), "f8f4001a" * 5)
 
     def commits_since(self, dest: Path, rev: str) -> int | None:
         self.calls.append(f"commits-since:{dest.name}")
@@ -1061,12 +1132,17 @@ class Recorder:
             is_ancestor=self.is_ancestor,
             file_lines=self.file_lines,
             tree_bytes=self.tree_bytes,
+            blob_id=self.blob_id,
             db_running=self.db_running,
             stop_db=self.stop_db,
             changed_lines=self.changed_lines,
             upstream_get=self.upstream_get,
             images_built=self.images_built,
             build_cache_bytes=self.build_cache_bytes,
+            dangling_image_ids=self.dangling_image_ids,
+            containers_on=self.containers_on,
+            remove_finished_container=self.remove_finished_container,
+            remove_unused_image=self.remove_unused_image,
             folder_bytes=self.folder_bytes,
             image_id=self.image_id,
             build=build,
@@ -1152,6 +1228,29 @@ class Recorder:
         """`docker.build_cache_bytes()`: answers `self.build_cache`, and counts the asks."""
         self.build_cache_asked += 1
         return self.build_cache
+
+    def dangling_image_ids(self, label: str) -> tuple[str, ...] | None:
+        """`docker.dangling_image_ids()`: answers `dangling_ids`, keeps the label (T864)."""
+        self.dangling_asked.append(label)
+        return self.dangling_ids
+
+    def remove_unused_image(self, image: str) -> str:
+        """`docker.remove_unused_image()`: answers `unused_answers`, keeps the id (T864)."""
+        self.unused_removed.append(image)
+        if image in self.in_use_once:
+            self.in_use_once.discard(image)
+            return docker.IMAGE_IN_USE
+        return self.unused_answers.get(image, "")
+
+    def containers_on(self, image: str) -> tuple[docker.ContainerRef, ...] | None:
+        """`docker.containers_on()`: `holders` per image, and what was asked."""
+        self.holders_asked.append(image)
+        return self.holders.get(image, ())
+
+    def remove_finished_container(self, container: str) -> str:
+        """`docker.remove_finished_container()`: `container_answers`, and each id asked."""
+        self.containers_removed.append(container)
+        return self.container_answers.get(container, "")
 
     def folder_bytes(self, folder: Path) -> int | None:
         """`native.folder_bytes()`: answers `self.folder_size`, and keeps what it was asked."""
