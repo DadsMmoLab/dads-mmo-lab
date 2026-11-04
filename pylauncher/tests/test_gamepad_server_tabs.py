@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QTabBar, QWidget
+from PySide6.QtWidgets import QWidget
 
 from tests.conftest import process_events
 from tests.test_controller_view import (
@@ -45,14 +45,6 @@ def ps(monkeypatch: pytest.MonkeyPatch) -> Any:
     return fake
 
 
-def _sub_bar(view: ControllerView) -> QTabBar:
-    from yulon.ui.controller_view import SUB_TABS_NAME
-
-    bar = view.window().findChild(QTabBar, None) if False else view._tabs.tabBar()
-    assert view._tabs.objectName() == SUB_TABS_NAME
-    return bar
-
-
 def _top_buttons(window: Any) -> list[QWidget]:
     """The focusable buttons of the window's top chrome (menu bar, pins)."""
     from PySide6.QtWidgets import QAbstractButton
@@ -71,6 +63,62 @@ def _first_page_button(view: ControllerView, window: Any) -> QWidget:
     stops = [w for w in _iter_focusable(window) if page.isAncestorOf(w)]
     assert stops, "the Server page has no focusable widget"
     return stops[0]
+
+
+def test_up_from_a_wide_page_button_reaches_the_narrow_centred_bar(qapp: object) -> None:
+    """Review round: UP always stops at a page's own tab row, wherever the focus stands.
+
+    A full-width top row whose LEFT button sits above-left, a QTabWidget with a
+    NARROW centred bar (the sub-tabs sheet), a wide button at the page's left
+    edge: UP from that button's geometric target is the top-left button, above
+    and outside the tab widget, so the ruling's rule sends the press to the bar
+    instead. No x-overlap test: neither the focus nor the target stands under
+    the bar.
+    """
+    from PySide6.QtWidgets import QApplication, QPushButton, QTabWidget
+
+    from yulon.ui.controller_view import SUB_TABS_NAME
+    from yulon.ui.gamepad import Direction, install_gamepad_navigation
+
+    win = QWidget()
+    win.resize(800, 500)
+    top_left = QPushButton("TopLeft", win)
+    top_left.setGeometry(0, 8, 140, 70)
+    top_mid = QPushButton("TopMid", win)
+    top_mid.setGeometry(330, 8, 140, 70)
+    top_right = QPushButton("TopRight", win)
+    top_right.setGeometry(660, 8, 140, 70)
+    tabs = QTabWidget(win)
+    tabs.setGeometry(0, 60, 800, 400)
+    tabs.setObjectName(SUB_TABS_NAME)
+    tabs.setStyleSheet(
+        f"QTabWidget#{SUB_TABS_NAME}::tab-bar {{ alignment: center; }} "
+        f"QTabWidget#{SUB_TABS_NAME} > QTabBar::tab {{ max-width: 16777215px; }}"
+    )
+    tabs.tabBar().setExpanding(False)
+    page = QWidget()
+    wide = QPushButton("Wide", page)
+    wide.setGeometry(0, 8, 300, 40)
+    tabs.addTab(page, "One")
+    tabs.addTab(QWidget(), "Two")
+    nav, keyboard, gamepad = install_gamepad_navigation(win)
+    win.show()
+    win.activateWindow()
+    process_events()
+    try:
+        bar = tabs.tabBar()
+        assert bar.isVisibleTo(win), "the bar is not a visible stop in the hand-built layout"
+        wide.setFocus()
+        process_events()
+        nav.navigate(Direction.UP)
+        process_events()
+        assert QApplication.focusWidget() is bar, "UP from the wide button missed the bar"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()
 
 
 def test_up_from_the_server_page_reaches_the_sub_tab_bar_before_the_top_menu(
@@ -161,10 +209,10 @@ def test_left_right_on_the_sub_tab_bar_walk_the_tabs_and_keep_focus(
         process_events()
 
 
-def test_right_at_the_last_tab_falls_through_and_a_disabled_tab_is_skipped(
+def test_right_skips_a_disabled_and_a_hidden_tab_and_falls_through_at_the_last(
     qapp: object, ps: Any, tmp_path: Any
 ) -> None:
-    """Decision 1 edges: at the last tab RIGHT leaves geometrically; disabled tabs are skipped."""
+    """Review round: RIGHT skips disabled AND hidden tabs; at the last tab it leaves the bar."""
     from PySide6.QtWidgets import QApplication, QPushButton
 
     from yulon.ui.gamepad import Direction, install_gamepad_navigation
@@ -180,8 +228,9 @@ def test_right_at_the_last_tab_falls_through_and_a_disabled_tab_is_skipped(
         bar = view._tabs.tabBar()
         count = view._tabs.count()
         assert count >= 4, f"only {count} sub-tabs: the walk proves nothing"
-        # Disabled tab is skipped.
+        # Disabled and hidden tabs are skipped.
         view._tabs.setTabEnabled(2, False)
+        view._tabs.setTabVisible(3, False)
         nav.invalidate()
         view._tabs.setCurrentIndex(0)
         bar.setFocus()
@@ -194,8 +243,9 @@ def test_right_at_the_last_tab_falls_through_and_a_disabled_tab_is_skipped(
         nav.navigate(Direction.RIGHT)
         process_events()
         assert (
-            view._tabs.currentIndex() == 3
-        ), f"RIGHT past disabled tab 2 is at {view._tabs.currentIndex()}, not 3"
+            view._tabs.currentIndex() == 4
+        ), f"RIGHT past disabled tab 2 and hidden tab 3 is at {view._tabs.currentIndex()}, not 4"
+        view._tabs.setTabVisible(3, True)
         # At the last tab, RIGHT leaves the bar geometrically (old behaviour).
         view._tabs.setTabEnabled(2, True)
         nav.invalidate()
@@ -360,6 +410,22 @@ def test_left_right_on_the_left_rail_walk_its_tabs(qapp: object, ps: Any, tmp_pa
         process_events()
         assert rail.currentIndex() == 1, f"RIGHT on the rail is at {rail.currentIndex()}, not 1"
         assert QApplication.focusWidget() is rail.tabBar(), "RIGHT left the rail bar"
+        # Review round: a hidden rail tab is skipped too. With the rail's only
+        # other tab hidden there is nowhere to walk to, so RIGHT leaves the bar
+        # instead of landing on the hidden tab.
+        rail.setTabVisible(1, False)
+        nav.invalidate()
+        rail.setCurrentIndex(0)
+        rail.tabBar().setFocus()
+        process_events()
+        nav.navigate(Direction.RIGHT)
+        process_events()
+        assert rail.currentIndex() == 0, "RIGHT walked the rail onto a hidden tab"
+        assert (
+            QApplication.focusWidget() is not rail.tabBar()
+        ), "RIGHT stayed on the rail bar with only a hidden tab ahead"
+        rail.setTabVisible(1, True)
+        nav.invalidate()
     finally:
         keyboard.stop()
         gamepad.stop()
@@ -368,38 +434,28 @@ def test_left_right_on_the_left_rail_walk_its_tabs(qapp: object, ps: Any, tmp_pa
         process_events()
 
 
-@pytest.mark.parametrize(
-    "theme_id",
-    [
-        "arthas",
-        "organic-dark",
-        "organic-light",
-        "gruvbox-dark-soft",
-        "gruvbox-dark-medium",
-        "gruvbox-dark-hard",
-        "gruvbox-light-soft",
-        "gruvbox-light-medium",
-        "gruvbox-light-hard",
-        "98x-light",
-        "98x-dark",
-        "ocean",
-        "ocean-dark",
-        "jungle",
-        "jungle-dark",
-        "floral",
-        "floral-dark",
-        "dracula-dark",
-        "dracula-light",
-    ],
-)
-def test_every_theme_marks_a_focused_tab(qapp: object, theme_id: str) -> None:
-    """Decision 3: every theme's sheet has a QTabBar focus rule using the focus-ring token."""
+def _bundled_theme_ids() -> list[str]:
+    """Every bundled theme id, so a new theme cannot miss the focus-ring rule."""
+    from yulon.ui.theme_spec import BUNDLED_THEME_ORDER
+
+    return list(BUNDLED_THEME_ORDER)
+
+
+@pytest.mark.parametrize("theme_id", _bundled_theme_ids())
+def test_every_theme_marks_the_focused_server_sub_tab(qapp: object, theme_id: str) -> None:
+    """Review round: every theme marks the focused SERVER sub-tab with the focus ring.
+
+    The D-pad's first stop above a server page is the sub-tabs bar, so the
+    `QTabWidget#server-sub-tabs > QTabBar::tab:focus` rule is what the player
+    sees when Left/Right will switch tabs. The list comes from the theme
+    registry, not a hard-coded copy, so it cannot drift out of date.
+    """
     from yulon.ui.theme import get_theme
     from yulon.ui.theme_qss import _build_qss
 
     spec = get_theme(theme_id)
     qss = _build_qss(1.0, theme_name=theme_id)
     assert (
-        "QTabBar::tab:focus" in qss or "QTabBar:focus" in qss
-    ), f"{theme_id}: no QTabBar focus rule"
+        "QTabWidget#server-sub-tabs > QTabBar::tab:focus" in qss
+    ), f"{theme_id}: no server-sub-tabs focus rule"
     assert spec.accent_bright in qss, f"{theme_id}: focus rule is not the focus-ring token"

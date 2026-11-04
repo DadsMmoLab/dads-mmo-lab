@@ -16,7 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
-- Controller and Steam Deck: the D-pad now reaches a server's tabs (Modules, Maintenance, Backups…); Left/Right on the tab row switch tabs.
+- Controller and Steam Deck: the D-pad now reaches a server's tabs; Left/Right on the tab row switch tabs.
 
 ### Changed
 

@@ -693,9 +693,10 @@ class Navigator(QObject):
         ):
             # T874: a focused tab bar is a stop of its own, and Left/Right walk
             # its tabs instead of leaving it. Only Qt classes: any QTabWidget
-            # (a server's sub-tabs, the rail) behaves the same. Disabled tabs
-            # are skipped; at the first/last tab the press falls through to the
-            # normal geometric move. Down still enters the page (T172's pin).
+            # (a server's sub-tabs, the rail) behaves the same. Disabled and
+            # hidden tabs are skipped; at the first/last tab the press falls
+            # through to the normal geometric move. Down still enters the page
+            # (T172's pin).
             tabs = current.parentWidget()
             if isinstance(tabs, QTabWidget) and tabs.tabBar() is current and tabs.count() >= 2:
                 index = tabs.currentIndex()
@@ -703,7 +704,7 @@ class Navigator(QObject):
                     following = [i for i in range(index + 1, tabs.count())]
                 else:
                     following = [i for i in range(index - 1, -1, -1)]
-                following = [i for i in following if tabs.isTabEnabled(i)]
+                following = [i for i in following if tabs.isTabEnabled(i) and tabs.isTabVisible(i)]
                 if following:
                     tabs.setCurrentIndex(following[0])
                     self.invalidate()
@@ -749,9 +750,11 @@ class Navigator(QObject):
         UP from a widget inside a QTabWidget page (any depth, through ScrollPage)
         whose bar is visible, focusable and above the widget: when `_pick` would
         go to a widget OUTSIDE that tab widget and above the bar, the bar is the
-        first stop above its own page, so the press goes to the bar instead. A
-        further UP from the bar then goes on as today. Only Qt classes: nothing
-        here names a server, a controller or a theme.
+        first stop above its own page, so the press goes to the bar instead. No
+        x-overlap test: a wide page button under a narrow centred bar still goes
+        up to it, even when neither the focus nor the geometric target stands
+        under the bar. A further UP from the bar then goes on as today. Only Qt
+        classes: nothing here names a server, a controller or a theme.
         """
         if direction is not Direction.UP or current is None or target is None:
             return target
@@ -787,14 +790,9 @@ class Navigator(QObject):
         target_edges = _shown_edges(target, root)
         if target_edges[1] >= bar_edges[3]:
             return target
-        origin_x = origin.x()
-        bar_left, _bar_top, bar_right, _bar_bottom = bar_edges
-        if bar_left <= origin_x <= bar_right:
-            return bar
-        target_left = target.mapTo(root, QPoint(0, 0)).x()
-        if bar_left <= target_left <= bar_right:
-            return bar
-        return target
+        # Review round: the bar is the first stop above its own page, wherever
+        # across the page the focus stands.
+        return bar
 
     def _way_back(
         self,
