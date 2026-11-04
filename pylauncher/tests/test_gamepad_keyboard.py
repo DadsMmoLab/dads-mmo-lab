@@ -476,6 +476,14 @@ def test_the_pad_follows_a_widget_shown_hidden_greyed_or_ungreyed_and_a_bumper(
     try:
         primed = _reached_from(navigator, start)
         assert shown_later not in primed and ungreyed_later not in primed
+        # T874: Left/Right on a tab bar switch tabs, so each walk above moves
+        # the tab; put it back and drop the walked list before the next case.
+        # Every case below needs tab 0 showing (its widgets are on tab 0), and
+        # the bumper case needs it again after its own priming walk, before
+        # `start.setFocus()`: setting the focus on a hidden page's widget is a
+        # silent no-op, and the bumper would then cycle from the wrong tab.
+        tabs.setCurrentIndex(0)
+        navigator.invalidate()
 
         shown_later.show()
         process_events()
@@ -483,12 +491,16 @@ def test_the_pad_follows_a_widget_shown_hidden_greyed_or_ungreyed_and_a_bumper(
         assert shown_later in _reached_from(
             navigator, start
         ), "a button shown after the walk is out of the pad's reach"
+        tabs.setCurrentIndex(0)
+        navigator.invalidate()
 
         ungreyed_later.setEnabled(True)
         process_events()
         assert ungreyed_later in _reached_from(
             navigator, start
         ), "a button ungreyed after the walk is out of the pad's reach"
+        tabs.setCurrentIndex(0)
+        navigator.invalidate()
 
         hidden_later.hide()
         process_events()
@@ -499,6 +511,8 @@ def test_the_pad_follows_a_widget_shown_hidden_greyed_or_ungreyed_and_a_bumper(
         ), "Down aimed at a button hidden since the walk and the focus went nowhere"
 
         _reached_from(navigator, start)
+        tabs.setCurrentIndex(0)
+        navigator.invalidate()
         start.setFocus()
         navigator.perform(Action.CYCLE_NEXT)
         process_events()
@@ -517,6 +531,35 @@ def test_the_pad_follows_a_widget_shown_hidden_greyed_or_ungreyed_and_a_bumper(
         win.close()
         win.deleteLater()
         process_events()
+
+
+def test_up_with_no_other_stop_is_a_no_move(placed: QWidget) -> None:
+    """A press with no stop except the focused one reports no-move (T874-B).
+
+    The focused widget is never a candidate -- not even for itself, since a
+    press goes past the box that holds the focus -- so with nothing else around
+    there is nothing to score, ahead or behind, and the only honest answer is
+    no-move, with the focus where it was. Here a lone button fills the window,
+    so UP has nothing ahead; without this, an edge wrap with a single scored
+    candidate would land back where it started while reporting handled.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui.gamepad import Direction
+
+    lone = _placed(placed, "Lone", 0, 0, 60, 30)
+    navigator, keyboard, gamepad = install_gamepad_navigation(placed)
+    placed.show()
+    placed.activateWindow()
+    process_events()
+    try:
+        lone.setFocus()
+        process_events()
+        assert navigator.navigate(Direction.UP) is False, "UP with nothing ahead reported handled"
+        assert QApplication.focusWidget() is lone, "UP with nothing ahead moved the focus"
+    finally:
+        keyboard.stop()
+        gamepad.stop()
 
 
 def test_down_from_a_tab_pages_top_row_enters_the_page_and_up_still_leaves_it(

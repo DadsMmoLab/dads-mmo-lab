@@ -475,6 +475,14 @@ QTabWidget#server-sub-tabs > QTabBar::tab:selected {{
     border-bottom: 2px solid {spec.accent_bright};
 }}
 
+/* A focused sub-tab bar is the D-pad's stop above its page (T874): the same
+   ice-blue focus ring the buttons use, so the player sees which tab the
+   Left/Right presses will switch. */
+QTabWidget#server-sub-tabs > QTabBar::tab:focus {{
+    border: 1px solid {spec.accent_bright};
+    border-bottom: 2px solid {spec.accent_bright};
+}}
+
 /* West (left sidebar) tabs — the realm rail.
    Selected by objectName (`sidebar-tabs` in main.py), never by a negation and
    never by the `:west` pseudo-state: Qt does not reliably honour positional
