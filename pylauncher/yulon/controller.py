@@ -826,7 +826,7 @@ class Controller:
 
         After every refusal and the dashboard step (`_before_the_servers_start`),
         before the zone file is read and `compose up` runs (`_start_servers`):
-        every Start of a CoA install, and never while a server container runs
+        every Start of a CoA install, and never while the world server runs
         (this Start refused, or stopped, anything in the way first). A failure
         never stops the Start; the hook says so itself.
         """
@@ -835,7 +835,7 @@ class Controller:
             return
         from yulon import coa_realm
 
-        coa_realm.drop_retired_bg_lines_at_start(entry, self.server_dir)
+        coa_realm.drop_retired_bg_lines_at_start(entry, self.server_dir, wsl_distro=self.wsl_distro)
 
     def _put_back_the_zone_file(self) -> str | None:
         """T171: a CMaNGOS server's zone file, put back before every start; the warning if not.

@@ -230,11 +230,12 @@ def drop_retired_bg_lines(entry: CatalogEntry, server_dir: Path) -> bool:
 
     Each line whose key is a retired key AND whose value is exactly "0" (the
     value Yu'lon wrote) is deleted, every other byte kept: the line scanner
-    (`catalog.compose_env`) finds the world's `environment:` lines, every
-    `playerbots_keys.reading_order` spelling counts, and a key named twice
-    keeps both lines (which of the two the server reads is not a choice this
-    can make). Any other value is left: a hand edit, logged once. Written
-    through the override's own atomic writer (`composegen._replace_whole`),
+    (`catalog.compose_env`) finds the world's `environment:` lines, and every
+    `playerbots_keys.reading_order` spelling counts as the same key. A key
+    named twice with "0" on every copy drops every copy (all are Yu'lon's
+    value); a key named twice with any other value keeps every copy (one is a
+    hand edit), logged once. Any other value is left: a hand edit, logged once.
+    Written through the override's own atomic writer (`composegen._replace_whole`),
     so a failed write leaves the file whole. Not for entries other than
     CoA (checked on `entry.id`): False. Returns whether it wrote.
     """
@@ -254,40 +255,53 @@ def drop_retired_bg_lines(entry: CatalogEntry, server_dir: Path) -> bool:
     prefix = playerbots_keys.module_prefix(server_dir)
     drop: set[int] = set()
     for name in RETIRED_BG_KEYS:
-        for spelling in playerbots_keys.reading_order(name, prefix, of_env=True):
-            spots = at.get(spelling, [])
-            if len(spots) == 1 and compose_env.env_value(lines[spots[0]]) == "0":
-                drop.add(spots[0])
-            elif len(spots) == 1:
-                logger.info(
-                    f"{entry.id}: kept a {spelling} line the player set to "
-                    f"{compose_env.env_value(lines[spots[0]])!r}"
-                )
+        spellings = playerbots_keys.reading_order(name, prefix, of_env=True)
+        found = [(spelling, index) for spelling in spellings for index in at.get(spelling, [])]
+        if not found:
+            continue
+        values = [compose_env.env_value(lines[index]) for _, index in found]
+        if all(value == "0" for value in values):
+            drop.update(index for _, index in found)
+        elif len(found) == 1:
+            logger.info(f"{entry.id}: kept a {found[0][0]} line the player set to {values[0]!r}")
+        else:
+            kept = next((found[i][0], values[i]) for i in range(len(found)) if values[i] != "0")
+            logger.info(
+                f"{entry.id}: kept {len(found)} {kept[0]} lines, "
+                f"one the player set to {kept[1]!r}"
+            )
     if not drop:
         return False
-    kept = [line for index, line in enumerate(lines) if index not in drop]
-    composegen._replace_whole(target, "\n".join(kept))
+    kept_lines = [line for index, line in enumerate(lines) if index not in drop]
+    composegen._replace_whole(target, "\n".join(kept_lines))
     return True
 
 
-def drop_retired_bg_lines_at_start(entry: CatalogEntry, server_dir: Path) -> None:
+def drop_retired_bg_lines_at_start(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> None:
     """Drop the retired battleground lines on the Start path, never stopping Start (T872-B B3).
 
     Called by `Controller.start()` after every refusal and before compose up, so
-    it runs for every Start of a CoA install. Never while a server container
-    runs (a Start with one up is refused, or stops it, first; the switch's own
-    `servers_running` seam is the same rule): rewriting the override compose
-    reads under a running worldserver would take effect only at the next
-    create. A failure to write logs a warning and Start goes on.
+    it runs for every Start of a CoA install. Only while NO worldserver runs: the
+    drop rewrites the override compose reads at its next create, and a world
+    already up would outlive the write and keep reading the old lines. The
+    database is up by design at this point (`refuse_a_missing_database` started
+    it and left it running), so the guard asks about the WORLD container only;
+    an auth or database container never holds the write back. `None` (Docker
+    would not say) is not "down": the write is skipped and logged once. A
+    failure to write logs a warning and Start goes on.
     """
     if entry.id != "wow-coa":
         return
     from yulon import docker
 
-    spec = entry.container_spec()
-    for container in (spec.db, spec.auth, spec.world):
-        if docker.world_running(container):
-            return
+    if docker.world_running(entry.container_spec().world, wsl_distro=wsl_distro) is not False:
+        logger.warning(
+            f"{entry.id}: the retired battleground lines were not dropped: "
+            "the world server may be running"
+        )
+        return
     try:
         drop_retired_bg_lines(entry, server_dir)
     except Exception as exc:  # noqa: BLE001 - a cleanup never refuses a start
