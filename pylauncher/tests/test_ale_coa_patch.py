@@ -152,12 +152,14 @@ def recording_build(
     return build
 
 
-def build_ctx(made: AzerothCoreInstaller, server_dir: Path) -> native.StageContext:
+def build_ctx(
+    made: AzerothCoreInstaller, server_dir: Path, completed: tuple[str, ...] = ()
+) -> native.StageContext:
     """The install's own `build` stage context, with the skip rule out of play."""
     return native.StageContext(
         server_dir=server_dir,
         client_dir=None,
-        state=native.InstallState(made.entry.id, made._install_id(server_dir)),
+        state=native.InstallState(made.entry.id, made._install_id(server_dir), completed=completed),
         cancel=None,
         secrets=native.Secrets(db_password="pw"),
         force_build=True,
@@ -276,6 +278,92 @@ def test_a_press_closed_at_the_patch_line_still_puts_upstreams_files_back(
 
     assert tree_bytes(server_dir) == {name: text.encode("utf-8") for name, text in UPSTREAM.items()}
     assert not (server_dir / ale_playerbots.RECORD).exists()
+
+
+# -- a put-back that cannot settle every row keeps its record (T867-C) --------
+
+
+def test_a_file_deleted_during_the_compile_is_written_back_from_the_record(
+    tmp_path: Path,
+) -> None:
+    """C1: a clone needs the file, and the record is the only copy of its text left."""
+    rec, server_dir, made = installed(tmp_path)
+    lay_mod_ale(server_dir, UPSTREAM)
+    rec.images = True
+
+    def build(*args: object, **kwargs: object) -> docker.AttachedRun:
+        (server_dir / ALE / SC_PATH).unlink()
+        rec.calls.append("build")
+        return docker.AttachedRun(0, ("built",))
+
+    made._seams = rec.seams(build=build)
+
+    said = list(made.rebuild(InstallOptions(server_dir=server_dir)))
+
+    assert (server_dir / ALE / SC_PATH).read_text(encoding="utf-8") == UPSTREAM[SC_PATH]
+    assert not (server_dir / ale_playerbots.RECORD).exists()
+    assert [line for line in said if line.startswith("mod-ale's changes for the compile")] == [
+        "mod-ale's changes for the compile were taken back out (11 files); its folder is as "
+        "mod-ale ships it."
+    ], said
+
+
+def test_a_mixed_put_back_says_how_many_came_back_not_that_the_folder_is_clean(
+    tmp_path: Path,
+) -> None:
+    """C3: one file somebody changed during the build, ten put back."""
+    rec, server_dir, made = installed(tmp_path)
+    lay_mod_ale(server_dir, UPSTREAM)
+    rec.images = True
+    theirs = "// the player's own edit\n"
+
+    def build(*args: object, **kwargs: object) -> docker.AttachedRun:
+        (server_dir / ALE / SC_PATH).write_text(theirs, encoding="utf-8")
+        rec.calls.append("build")
+        return docker.AttachedRun(0, ("built",))
+
+    made._seams = rec.seams(build=build)
+
+    said = list(made.rebuild(InstallOptions(server_dir=server_dir)))
+
+    summaries = [line for line in said if line.startswith("mod-ale's changes for the compile")]
+    assert summaries == [
+        "mod-ale's changes for the compile were taken back out of 10 of 11 files."
+    ], said
+    assert not any("as mod-ale ships it" in line for line in said), said
+    assert any(
+        line.startswith(f"{ALE}/{SC_PATH} was changed during the build, so Yu'lon left it as it is")
+        for line in said
+    ), said
+    assert (server_dir / ALE / SC_PATH).read_text(encoding="utf-8") == theirs
+    record = json.loads((server_dir / ale_playerbots.RECORD).read_text(encoding="utf-8"))
+    assert list(record["files"]) == [f"{ALE}/{SC_PATH}"]
+
+
+def test_a_record_a_failed_put_back_left_stops_the_next_stage_build(tmp_path: Path) -> None:
+    """C2: the next compile refuses rather than write over the row it could not settle."""
+    rec, server_dir, made = installed(tmp_path)
+    lay_mod_ale(server_dir, UPSTREAM)
+    list(ale_playerbots.bridge(server_dir, PATCHES))
+    theirs = "// the player's own edit\n"
+    target = server_dir / ALE / SC_PATH
+    target.write_text(theirs, encoding="utf-8")
+    ale_playerbots.put_back(server_dir)
+    record = server_dir / ale_playerbots.RECORD
+    before = record.read_bytes()
+    seen: dict[str, bytes] = {}
+    made._seams = rec.seams(build=recording_build(rec, server_dir, seen, []))
+    rec.calls.clear()
+
+    with pytest.raises(InstallerError) as raised:
+        list(made.stage_named("build").run(build_ctx(made, server_dir)))
+
+    said = str(raised.value)
+    assert f"{ALE}/{SC_PATH}" in said, said
+    assert "changed during the build" in said and "Nothing was built" in said, said
+    assert seen == {} and "build" not in rec.calls
+    assert record.read_bytes() == before
+    assert target.read_text(encoding="utf-8") == theirs
 
 
 # -- a mod-ale the patch no longer fits stops before anything is written ------
@@ -472,8 +560,77 @@ def test_a_linked_file_the_patch_names_refuses_with_nothing_written(tmp_path: Pa
     with pytest.raises(InstallerError) as raised:
         ale_playerbots.bridge(server_dir, PATCHES)
 
-    assert SC_PATH in str(raised.value) and "Nothing was built" in str(raised.value)
+    said = str(raised.value)
+    assert SC_PATH in said and "Nothing was built" in said
+    assert str(link) in said and "is a link" in said, said
+    assert "mod-ale has changed since" not in said, said
     assert outside.read_text(encoding="utf-8") == UPSTREAM[SC_PATH]
     assert link.is_symlink()
     assert not (server_dir / ale_playerbots.RECORD).exists()
     assert tree_bytes(server_dir) == {name: text.encode("utf-8") for name, text in laid.items()}
+
+
+@pytest.mark.skipif(
+    platform.system() == "Windows", reason="a Windows link needs privileges to make"
+)
+def test_a_linked_mod_ale_folder_the_patch_names_refuses_naming_the_link(
+    tmp_path: Path,
+) -> None:
+    """C4: a folder on the way, not only the file, gets the link's own sentence."""
+    server_dir = tmp_path / "server"
+    outside = tmp_path / "outside"
+    lay_mod_ale(outside, UPSTREAM)
+    (server_dir / "modules").mkdir(parents=True)
+    link = server_dir / ALE
+    link.symlink_to(outside / ALE, target_is_directory=True)
+
+    with pytest.raises(InstallerError) as raised:
+        ale_playerbots.bridge(server_dir, PATCHES)
+
+    said = str(raised.value)
+    assert str(link) in said and "is a link" in said, said
+    assert "mod-ale has changed since" not in said, said
+    assert tree_bytes(outside) == {name: text.encode("utf-8") for name, text in UPSTREAM.items()}
+    assert not (server_dir / ale_playerbots.RECORD).exists()
+
+
+def test_a_crafted_hunk_path_is_refused_before_the_mirror_is_written(tmp_path: Path) -> None:
+    """C4: `..` and an absolute path never reach the temporary mirror."""
+    server_dir = tmp_path / "server"
+    lay_mod_ale(server_dir, UPSTREAM)
+    before = tree_bytes(server_dir)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("theirs\n", encoding="utf-8")
+
+    for path in ("../../outside.txt", str(victim)):
+        crafted = f"--- a/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+        with pytest.raises(InstallerError) as raised:
+            ale_playerbots.bridge(
+                server_dir, (ale_playerbots.CompilePatch("crafted", crafted, "Fits it."),)
+            )
+        assert path in str(raised.value), str(raised.value)
+        assert "outside mod-ale" in str(raised.value), str(raised.value)
+
+    assert victim.read_text(encoding="utf-8") == "theirs\n"
+    assert tree_bytes(server_dir) == before
+    assert not (server_dir / ale_playerbots.RECORD).exists()
+
+
+def test_a_refusal_says_the_server_keeps_its_build_only_when_one_exists(
+    tmp_path: Path,
+) -> None:
+    """C4: a first install has no build to keep, and the sentence must not invent one."""
+    made = make(scratch_entry(module_patches=MODULE_PATCHES), Recorder(images=False))
+    server_dir = tmp_path / "server"
+    lay_mod_ale(server_dir, _broken(UPSTREAM, SC_PATH))
+
+    with pytest.raises(InstallerError) as first:
+        list(made.stage_named("build").run(build_ctx(made, server_dir)))
+
+    assert "Nothing was built" in str(first.value)
+    assert "keeps the build it has" not in str(first.value), str(first.value)
+
+    with pytest.raises(InstallerError) as again:
+        list(made.stage_named("build").run(build_ctx(made, server_dir, completed=("build",))))
+
+    assert "keeps the build it has" in str(again.value), str(again.value)

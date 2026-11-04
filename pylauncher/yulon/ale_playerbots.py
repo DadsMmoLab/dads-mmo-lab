@@ -119,15 +119,34 @@ PATCHED = (
 PATCH_REFUSED = (
     "mod-ale has changed since this version of Yu'lon was made, and the fix Yu'lon needs to "
     "build it on {server} no longer fits it, so the build stopped before it began. Nothing was "
-    "built and mod-ale was not changed; your server keeps the build it has. Update Yu'lon to get "
-    "a fix that fits this mod-ale, or press Remove on mod-ale's row on the Modules tab and then "
-    "{rebuild} to build without it. What no longer fits: {detail}"
+    "built and mod-ale was not changed{kept}. Update Yu'lon to get a fix that fits this mod-ale, "
+    "or press Remove on mod-ale's row on the Modules tab and then {rebuild} to build without it. "
+    "What no longer fits: {detail}"
 )
 """The refusal for a patch that no longer fits the module on disk (T867).
 
 Both ways out are named: updating Yu'lon, or removing the module. The T557
 put-back is deliberately not started -- this is not a compile error, and its
 own sentences would stack on top of this one (D5).
+
+`{kept}` is "; your server keeps the build it has" only when a build exists
+(the state record says the `build` stage finished, or the daemon holds the
+images): on a first install there is no build to keep, and saying there was
+would be a claim about a folder that has never compiled (T867-C C4).
+"""
+
+_KEPT_BUILD = "; your server keeps the build it has"
+
+LINK_REFUSED = (
+    "{link} is a link, and Yu'lon does not write or compile mod-ale through a link, so the "
+    "build stopped before it began. Nothing was built and mod-ale was not changed. Put the file "
+    "mod-ale ships back in its place (or remove the link), and press {rebuild} again."
+)
+"""The refusal for a mod-ale file or folder the patch names that is a link (T867-C C4).
+
+Its own sentence, not `PATCH_REFUSED`'s: the module has not changed under the
+fix, the folder is arranged in a way Yu'lon never writes through, and the two
+asks (update/remove the module, put the file back) are different.
 """
 
 _PUT_BACK = (
@@ -135,6 +154,35 @@ _PUT_BACK = (
     "as mod-ale ships it."
 )
 """One line for a clean put-back (T867's OQ6): every file came back, so say it once."""
+
+_PARTLY_BACK = (
+    "mod-ale's changes for the compile were taken back out of {clean} of {total} {files}."
+)
+"""The same line when a row was kept (T867-C C3): it never claims the folder is as shipped."""
+
+_CHANGED = (
+    "{relative} was changed during the build, so Yu'lon left it as it is; Remove and add "
+    "mod-ale again, or put it back by hand."
+)
+"""A row whose file is neither what the bridge wrote nor what mod-ale ships (T867-C C1)."""
+
+_UNREADABLE = (
+    "{relative} could not be read, so Yu'lon left it as it is; Remove and add mod-ale again, "
+    "or put it back by hand."
+)
+"""A row whose file exists but cannot be read (T867-C C1); the row is kept."""
+
+_MISPLACED = (
+    "{relative} is not where the record says Yu'lon put it, so it was left as it is; Remove and "
+    "add mod-ale again, or put it back by hand."
+)
+"""A record path that is not a safe slot under this server's own mod-ale (T867-C C1)."""
+
+_NOT_PUT = (
+    "Yu'lon could not put {relative} back as mod-ale ships it ({error}); the next build puts it "
+    "back first."
+)
+"""A file the put-back tried to write and could not (T867-C C1); the row is kept."""
 
 
 @dataclass(frozen=True)
@@ -214,14 +262,19 @@ def _read_text(path: Path) -> str | None:
         return None
 
 
-def _linked_on_the_way(server_dir: Path, relative: str) -> bool:
-    """Is any part of `relative`, walked down from `server_dir`, a link? (cold review)"""
+def _link_on_the_way(server_dir: Path, relative: str) -> str | None:
+    """The first part of `relative`, walked down from `server_dir`, that is a link."""
     here = server_dir
     for part in PurePosixPath(relative).parts:
         here = here / part
         if here.is_symlink():
-            return True
-    return False
+            return str(here)
+    return None
+
+
+def _linked_on_the_way(server_dir: Path, relative: str) -> bool:
+    """Is any part of `relative`, walked down from `server_dir`, a link? (cold review)"""
+    return _link_on_the_way(server_dir, relative) is not None
 
 
 def _under_mod_ale(server_dir: Path, path: Path) -> bool:
@@ -262,19 +315,20 @@ def _header_text(server_dir: Path, relative: str) -> str | None:
     return _read_text(path)
 
 
-def _refuse_patch(server: str, detail: str) -> NoReturn:
+def _refuse_patch(server: str, detail: str, has_build: bool = False) -> NoReturn:
     """Stop the press before the compile: mod-ale changed under a fix Yu'lon carries."""
     raise InstallerError(
         PATCH_REFUSED.format(
             server=server,
             rebuild=server_build_presses.under_server_build(server_build_presses.REBUILD),
             detail=detail,
+            kept=_KEPT_BUILD if has_build else "",
         )
     )
 
 
 def _laid(
-    server_dir: Path, patches: Sequence[CompilePatch], server: str
+    server_dir: Path, patches: Sequence[CompilePatch], server: str, has_build: bool = False
 ) -> tuple[dict[str, str], tuple[str, ...]]:
     """Lay `patches` over the files on disk, in memory, before anything is written (T867).
 
@@ -286,7 +340,11 @@ def _laid(
     patched text is read back here rather than written into the module.
 
     Every path is asked of `_inside()`, which is the record's own rule: under
-    `modules/mod-ale/`, no `..`, no link on the way, a file that exists. A file
+    `modules/mod-ale/`, no `..`, no link on the way, a file that exists. A path
+    that is absolute, or carries `..`, is refused before the mirror is made
+    (T867-C C4): a crafted patch never gets a write outside the temporary folder.
+    A link on the way refuses with `LINK_REFUSED`, its own sentence naming the
+    link, rather than `PATCH_REFUSED`'s "mod-ale has changed" (T867-C C4). A file
     the patch CREATES is refused: `put_back()` could only unlink it, and a
     tracked clone would still call that a change.
 
@@ -301,26 +359,48 @@ def _laid(
         try:
             hunks = patch.parse(spec.text)
         except patch.PatchError as exc:
-            _refuse_patch(server, str(exc))
+            _refuse_patch(server, str(exc), has_build)
         for hunk in hunks:
             if hunk.creates:
                 _refuse_patch(
                     server,
                     f"{spec.name} would create {hunk.path}, which Yu'lon cannot put back",
+                    has_build,
+                )
+            named_path = PurePosixPath(hunk.path)
+            if (
+                named_path.is_absolute()
+                or Path(hunk.path).is_absolute()
+                or ".." in named_path.parts
+            ):
+                _refuse_patch(
+                    server,
+                    f"{spec.name} names {hunk.path}, which is outside mod-ale",
+                    has_build,
                 )
         named: dict[str, str] = {}
         for hunk in hunks:
             relative = f"{ALE}/{hunk.path}"
+            link = _link_on_the_way(server_dir, relative)
+            if link is not None:
+                raise InstallerError(
+                    LINK_REFUSED.format(
+                        link=link,
+                        rebuild=server_build_presses.under_server_build(
+                            server_build_presses.REBUILD
+                        ),
+                    )
+                )
             path = _inside(server_dir, relative)
             if path is None:
-                _refuse_patch(server, f"mod-ale has no {hunk.path} as Yu'lon expects it")
+                _refuse_patch(server, f"mod-ale has no {hunk.path} as Yu'lon expects it", has_build)
             if hunk.path in named:
                 continue
             text = overlay.get(relative)
             if text is None:
                 text = _read_text(path)
             if text is None:
-                _refuse_patch(server, f"{relative} is not a text file Yu'lon can read")
+                _refuse_patch(server, f"{relative} is not a text file Yu'lon can read", has_build)
             named[hunk.path] = text
         with tempfile.TemporaryDirectory(prefix="yulon-ale-patch-") as folder:
             mirror = Path(folder)
@@ -331,7 +411,7 @@ def _laid(
             try:
                 patch.apply(spec.text, mirror, name=spec.name)
             except patch.PatchError as exc:
-                _refuse_patch(server, str(exc))
+                _refuse_patch(server, str(exc), has_build)
             for inside, was in named.items():
                 target = mirror.joinpath(*PurePosixPath(inside).parts)
                 after = target.read_bytes().decode("utf-8")
@@ -422,13 +502,15 @@ def _read_record(server_dir: Path) -> dict[str, dict[str, str]] | None:
         return None
 
 
-def _inside(server_dir: Path, relative: str) -> Path | None:
-    """A record's path as a file inside `server_dir`/modules/mod-ale, or None (cold review).
+def _slot(server_dir: Path, relative: str) -> Path | None:
+    """Where a record's path belongs inside `server_dir`/modules/mod-ale, or None.
 
     The record is a file in the server folder, so its paths are not trusted: relative,
     under `modules/mod-ale/`, no `..`, no link on ANY part of the way down (a linked
-    `modules/mod-ale` would otherwise be written through), and resolving inside the
-    resolved `modules/mod-ale`.
+    `modules/mod-ale` would otherwise be written through), and its folder resolving
+    inside the resolved `modules/mod-ale`. Unlike `_inside()`, the file may be ABSENT:
+    a row whose file was deleted during the compile still has a place to go back to
+    (T867-C C1).
     """
     parts = PurePosixPath(relative)
     if parts.is_absolute() or Path(relative).is_absolute():
@@ -438,7 +520,21 @@ def _inside(server_dir: Path, relative: str) -> Path | None:
     if _linked_on_the_way(server_dir, relative):
         return None
     path = server_dir / relative
-    if not path.is_file() or not _under_mod_ale(server_dir, path):
+    if not _under_mod_ale(server_dir, path.parent):
+        return None
+    if path.exists() and not path.is_file():
+        return None
+    return path
+
+
+def _inside(server_dir: Path, relative: str) -> Path | None:
+    """A record's path as a file inside `server_dir`/modules/mod-ale, or None (cold review).
+
+    The slot's rules, and the file must be there: this is the read side. Writing a
+    row whose file is gone goes through `_slot()`.
+    """
+    path = _slot(server_dir, relative)
+    if path is None or not path.is_file():
         return None
     return path
 
@@ -446,13 +542,23 @@ def _inside(server_dir: Path, relative: str) -> Path | None:
 def put_back(server_dir: Path) -> list[str]:
     """Put every file the record names back as mod-ale ships it; never raises (T645).
 
-    Called in the compile's `finally`, so it must not hide the build's own outcome: a
-    file that cannot be written is said, and the record is kept for the next compile.
-    A file whose bytes are no longer the ones the bridge wrote is somebody's: kept.
+    Called in the compile's `finally`, so it must not hide the build's own outcome.
+    Every row that did not end with mod-ale's text on disk stays in the record
+    (T867-C C1), so the next compile cannot quietly drop it:
+
+    * a file still holding what the bridge wrote is put back;
+    * a file already holding mod-ale's text is back, and is not written again;
+    * a file that is gone is written back from the record -- a clone needs it, and
+      the record is the only copy left;
+    * a file that is unreadable, no longer either text (somebody changed it during
+      the compile), or no longer where the record put it is LEFT AS IT IS and its
+      row is kept. `bridge()` refuses to compile over such a record.
 
     Files that came back clean fold into ONE line (T867): a module with eleven
-    patched files would otherwise write eleven lines after every compile. A file
-    that could not be put back keeps its own line, after that summary.
+    patched files would otherwise write eleven lines after every compile. Only when
+    every row is back does that line say the folder is as mod-ale ships it; a kept
+    row makes it say how many came back instead, followed by the per-file lines
+    (T867-C C3).
     """
     files = _read_record(server_dir)
     if not files:
@@ -460,30 +566,52 @@ def put_back(server_dir: Path) -> list[str]:
     problems: list[str] = []
     kept: dict[str, dict[str, str]] = {}
     clean = 0
+    total = len(files)
     for relative, row in files.items():
         path = _inside(server_dir, relative)
-        now = _read_text(path) if path is not None else None
-        if path is None or now is None:
-            problems.append(f"{relative} is not there as the bridge left it; nothing to put back.")
+        if path is None:
+            slot = _slot(server_dir, relative)
+            if slot is None:
+                kept[relative] = row
+                problems.append(_MISPLACED.format(relative=relative))
+                continue
+            try:
+                conf.replace_file(slot, row["original"])
+            except InstallerError as exc:
+                logger.warning(f"could not put {slot} back: {exc}")
+                kept[relative] = row
+                problems.append(_NOT_PUT.format(relative=relative, error=exc))
+                continue
+            clean += 1
             continue
-        if _digest(now) != row["bridged_sha256"]:
-            problems.append(
-                f"{relative} has changed since Yu'lon bridged it for the compile, so it is "
-                "left as it is."
-            )
+        now = _read_text(path)
+        if now is None:
+            kept[relative] = row
+            problems.append(_UNREADABLE.format(relative=relative))
+            continue
+        digest = _digest(now)
+        if digest == _digest(row["original"]):
+            clean += 1
+            continue
+        if digest != row["bridged_sha256"]:
+            kept[relative] = row
+            problems.append(_CHANGED.format(relative=relative))
             continue
         try:
             conf.replace_file(path, row["original"])
         except InstallerError as exc:
             logger.warning(f"could not put {path} back: {exc}")
             kept[relative] = row
-            problems.append(
-                f"Yu'lon could not put {relative} back as mod-ale ships it ({exc}); the next "
-                "build puts it back first."
-            )
+            problems.append(_NOT_PUT.format(relative=relative, error=exc))
             continue
         clean += 1
-    said = [_PUT_BACK.format(count=clean, files="file" if clean == 1 else "files")] if clean else []
+    files_word = "file" if total == 1 else "files"
+    if kept:
+        said = [_PARTLY_BACK.format(clean=clean, total=total, files=files_word)]
+    elif clean:
+        said = [_PUT_BACK.format(count=clean, files="file" if clean == 1 else "files")]
+    else:
+        said = []
     said.extend(problems)
     record = server_dir / RECORD
     try:
@@ -497,28 +625,38 @@ def put_back(server_dir: Path) -> list[str]:
 
 
 def bridge(
-    server_dir: Path, patches: Sequence[CompilePatch] = (), *, server: str = "this server"
+    server_dir: Path,
+    patches: Sequence[CompilePatch] = (),
+    *,
+    server: str = "this server",
+    has_build: bool = False,
 ) -> list[str]:
     """Rewrite mod-ale's config and session-check names for the compile (T732), and lay
     Yu'lon's own fixes into it first (T867).
 
-    A record left by a compile that never finished is put back first. Then every
-    `patches` entry is laid over the text on disk, in memory, and the name bridge
-    plans over the result, so the two share one record and one `put_back()`. The
-    patch goes first because PlayerMethods.h is touched by both, and the bridge
-    would destroy the patch's pre-image (`IsHeadless()` -> `IsBot()`). Nothing to
-    lay and nothing to bridge says nothing. A list and not a generator (cold review
-    of db5da4df): every write is done when this returns, so the caller holds its
-    `finally` around the lines and a consumer that closes the press at one of them
-    still reaches `put_back()`.
+    A record left by a compile that never finished is put back first. If a row STAYS in
+    it -- a file somebody changed, or one Yu'lon could not read or write -- this refuses
+    before laying anything (T867-C C2): the next compile would otherwise overwrite the
+    record that put-back just narrowed, forgetting the row it could not settle. The
+    refusal carries that row's own sentence and names the file. Then every `patches`
+    entry is laid over the text on disk, in memory, and the name bridge plans over the
+    result, so the two share one record and one `put_back()`. The patch goes first
+    because PlayerMethods.h is touched by both, and the bridge would destroy the
+    patch's pre-image (`IsHeadless()` -> `IsBot()`). Nothing to lay and nothing to
+    bridge says nothing. A list and not a generator (cold review of db5da4df): every
+    write is done when this returns, so the caller holds its `finally` around the lines
+    and a consumer that closes the press at one of them still reaches `put_back()`.
 
     The patch file is never read here: a caller that has no mod-ale passes none
     (D3), and one with a patch it cannot read learns that before this is called.
+    `has_build` is only for the refusal's sentence: True when a build already exists
+    (the state record or an image), so it may say the server keeps it (T867-C C4).
 
     Raises:
-        InstallerError: an old record that cannot be read, a patch whose hunks no
-            longer fit mod-ale (nothing written), or a file that cannot be written;
-            every file already rewritten is put back first. Nothing was built.
+        InstallerError: an old record that cannot be read, a record a put-back could
+            not clear (nothing written), a patch whose hunks no longer fit mod-ale or
+            name a link (nothing written), or a file that cannot be written; every
+            file already rewritten is put back first. Nothing was built.
     """
     old = _read_record(server_dir)
     if old is None:
@@ -529,10 +667,27 @@ def bridge(
             "this again. Nothing was built."
         )
     said = put_back(server_dir) if old else []
+    left = _read_record(server_dir)
+    if left is None:
+        raise InstallerError(
+            f"Yu'lon could not read {server_dir / RECORD} after putting mod-ale back, so it "
+            "cannot tell whether a file is still changed. Put modules/mod-ale back as git has "
+            "it, delete that file, and press this again. Nothing was built."
+        )
+    if left:
+        first = next(iter(left))
+        reason = next(
+            (line for line in said if line.startswith(first)),
+            _CHANGED.format(relative=first),
+        )
+        raise InstallerError(
+            f"Yu'lon could not put all of mod-ale back after an earlier build, so it stopped "
+            f"before this one: {reason} Nothing was built."
+        )
     overlay: dict[str, str] = {}
     changed: tuple[str, ...] = ()
     if patches and (server_dir / ALE).is_dir():
-        overlay, changed = _laid(server_dir, patches, server)
+        overlay, changed = _laid(server_dir, patches, server, has_build)
     planned = _plan(server_dir, overlay)
     if not planned:
         return said

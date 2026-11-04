@@ -269,6 +269,12 @@ def test_a_left_over_record_restores_a_file_once_the_names_agree_again(tmp_path:
 
 
 def test_a_file_changed_since_the_bridge_wrote_it_is_never_overwritten(tmp_path: Path) -> None:
+    """T867-C C1: somebody's change is left, and its row STAYS in the record.
+
+    The old record was deleted here, which forgot the one file the put-back never
+    settled: the next compile would lay over it and lose the row for good. The row
+    now survives, and the summary does not claim the folder is as mod-ale ships it.
+    """
     lay(tmp_path, POST_RENAME_HEADER, ALE_OLD)
     list(ale_playerbots.bridge(tmp_path))
     theirs = b"// the player's own edit\n"
@@ -277,8 +283,57 @@ def test_a_file_changed_since_the_bridge_wrote_it_is_never_overwritten(tmp_path:
     said = ale_playerbots.put_back(tmp_path)
 
     assert binding_bytes(tmp_path) == theirs
-    assert not (tmp_path / ale_playerbots.RECORD).exists()
-    assert any("changed" in line for line in said), said
+    record = json.loads((tmp_path / ale_playerbots.RECORD).read_text(encoding="utf-8"))
+    assert list(record["files"]) == [BINDING]
+    assert record["files"][BINDING]["original"] == ALE_OLD
+    assert said == [
+        "mod-ale's changes for the compile were taken back out of 0 of 1 file.",
+        f"{BINDING} was changed during the build, so Yu'lon left it as it is; Remove and add "
+        "mod-ale again, or put it back by hand.",
+    ], said
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="permissions stop a read only as a non-root user on POSIX",
+)
+def test_a_file_that_cannot_be_read_keeps_its_row(tmp_path: Path) -> None:
+    """T867-C C1: unreadable is not "no file" and not "already back"."""
+    lay(tmp_path, POST_RENAME_HEADER, ALE_OLD)
+    list(ale_playerbots.bridge(tmp_path))
+    path = tmp_path / BINDING
+    os.chmod(path, 0)
+
+    said = ale_playerbots.put_back(tmp_path)
+
+    os.chmod(path, 0o600)
+    assert binding_bytes(tmp_path) == ALE_BRIDGED.encode("utf-8")
+    record = json.loads((tmp_path / ale_playerbots.RECORD).read_text(encoding="utf-8"))
+    assert list(record["files"]) == [BINDING]
+    assert any("could not be read" in line for line in said), said
+    assert not any("as mod-ale ships it" in line for line in said), said
+
+
+def test_a_leftover_record_stops_the_next_bridge_before_it_lays_anything(
+    tmp_path: Path,
+) -> None:
+    """T867-C C2: a record the put-back could not clear is not written over."""
+    lay(tmp_path, POST_RENAME_HEADER, ALE_OLD)
+    list(ale_playerbots.bridge(tmp_path))
+    theirs = b"// the player's own edit\n"
+    (tmp_path / BINDING).write_bytes(theirs)
+    ale_playerbots.put_back(tmp_path)
+    record = tmp_path / ale_playerbots.RECORD
+    before = record.read_bytes()
+
+    with pytest.raises(InstallerError) as raised:
+        list(ale_playerbots.bridge(tmp_path))
+
+    assert BINDING in str(raised.value)
+    assert "changed during the build" in str(raised.value)
+    assert "Nothing was built" in str(raised.value)
+    assert binding_bytes(tmp_path) == theirs
+    assert record.read_bytes() == before
 
 
 def test_a_record_yulon_cannot_read_refuses_before_the_compile(tmp_path: Path) -> None:

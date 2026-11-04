@@ -719,8 +719,12 @@ class AzerothCoreInstaller(StagedInstaller):
         """
         finished = False
         try:
+            has_build = ctx.state.has("build") or self.built_images(ctx) is True
             yield from ale_playerbots.bridge(
-                ctx.server_dir, self._ale_compile_patches(ctx.server_dir), server=self.entry.name
+                ctx.server_dir,
+                self._ale_compile_patches(ctx.server_dir),
+                server=self.entry.name,
+                has_build=has_build,
             )
             yield from super().stage_build(ctx)
             finished = True
