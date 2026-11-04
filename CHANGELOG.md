@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### Fixed
 
 - Conquest of Azeroth: Switch realm type no longer fails with "container ... is not running" when the server is stopped.
+- Long dropdowns, like the Logs tab's list of logs, now show ten rows at most and scroll, and on a controller the D-pad moves through them, A chooses and B cancels.
 
 ### Changed
 
