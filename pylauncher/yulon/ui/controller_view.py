@@ -2133,7 +2133,7 @@ def _realm_switch(
         write_override=lambda env: _write_realm_override(entry, server_dir, env),
         stop=lambda: _stop_for_realm_switch(entry, server_dir, wsl_distro=wsl_distro),
         start_db=lambda: docker.start_database(
-            spec, server_dir, because="nothing was switched", wsl_distro=wsl_distro
+            spec, server_dir, because="the realm type could not be read", wsl_distro=wsl_distro
         ),
         start=lambda: _start_for_realm_switch(entry, server_dir, sql, wsl_distro=wsl_distro),
         bot_prefix=bot_prefix,

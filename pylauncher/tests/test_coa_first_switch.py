@@ -484,6 +484,50 @@ def test_the_switch_keeps_the_bot_count_the_player_set(tmp_path: Path) -> None:
     assert any(key.endswith("MIN_RANDOM_BOTS") and value == "7" for key, value in env.items())
 
 
+def test_the_switch_drops_a_retired_battleground_line(tmp_path: Path) -> None:
+    """T872-B B1: the switch no longer carries the override's battleground lines forward.
+
+    The override on disk still carries both "0" lines Yu'lon wrote (every
+    existing install does); the switch rewrites the override through
+    `composegen.render()`, whose environment holds neither key, so both are
+    gone and the conf decides. Mutation: carry the lines again (this test fails).
+    """
+    import yaml
+
+    from yulon.catalog import composegen
+    from yulon.resources import installers_dir
+    from yulon.ui import controller_view
+
+    _new_install(tmp_path)
+    write_file(tmp_path, "coa")
+    first = composegen.render(
+        coa(),
+        tmp_path,
+        templates_root=installers_dir(),
+        db_password="coa-Zx81kQ2mPa",
+    )
+    assert "JOIN_BG" not in first.override, "control: the render holds neither key"
+    anchor = '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"\n'
+    assert anchor in first.override, "control: the anchor line moved"
+    on_disk = first.override.replace(
+        anchor,
+        anchor
+        + '      AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG: "0"\n'
+        + '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG: "0"\n',
+    )
+    composegen._replace_whole(tmp_path / composegen.OVERRIDE_FILE, on_disk)
+    controller_view._write_realm_override(coa(), tmp_path, coa_realm.switch_env_for(coa(), "hero"))
+    env = next(
+        service
+        for name, service in yaml.safe_load(
+            (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+        )["services"].items()
+        if name.endswith("worldserver")
+    )["environment"]
+    assert "AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG" not in env
+    assert "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG" not in env
+
+
 def test_a_switch_that_failed_after_its_marker_finishes_on_the_next_press(
     tmp_path: Path,
 ) -> None:

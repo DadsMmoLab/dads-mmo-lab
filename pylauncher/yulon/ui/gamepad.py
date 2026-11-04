@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QScrollArea,
+    QTabBar,
     QTabWidget,
     QTextEdit,
     QWidget,
@@ -405,15 +406,74 @@ def _open_menu() -> QMenu | None:
     return None
 
 
-def _press_into(menu: QMenu, key: Qt.Key) -> bool:
-    """Deliver `key` to `menu` as a press and a release; the menu does the rest.
+def _open_combo_popup() -> QComboBox | None:
+    """The `QComboBox` whose list popup is open now, or None (T875).
 
-    Sent, not posted, so the menu has moved (or chosen, and closed) before the
-    pad's next event is resolved. It passes `KeyboardSource`'s filter on the way,
-    which lets it through because it is one of the menu's own keys (`_MENU_KEYS`).
+    A combo's popup holds a `QListView` of its rows, not focusable stops, so the
+    D-pad walk finds nothing to move to in there. Qt's own `QComboBox` handling
+    already walks the rows and scrolls -- but only the popup VIEW's keys reach
+    that handling, so the pad's arrows are routed to the view (see
+    `_deliver_to_combo`), the way a menu's own keys reach the menu (T89).
+    """
+    app = QApplication.instance()
+    if isinstance(app, QApplication):
+        popup = app.activePopupWidget()
+        if popup is not None:
+            owner = popup.parentWidget()
+            if isinstance(owner, QComboBox):
+                return owner
+    return None
+
+
+_RELAY_VIEW: QAbstractItemView | None = None
+"""The popup list a routed pad press is being delivered to (T875, C1).
+
+Set in a try/finally around the sent press in `_deliver_to_combo`, so
+`KeyboardSource`'s application-wide filter lets that press through to the
+popup list instead of routing it back into the relay forever. It stores the
+VIEW, not a bare flag, so the filter lets through only the relayed press
+(a press/release to that view) while a key aimed anywhere else is still
+filtered as normal. Delivery is synchronous (sent, not posted), so no two
+relays overlap; the finally keeps a failed delivery from wedging the guard
+set. A guard, not a per-source registry: a source whose window was deleted
+without `stop()` leaves nothing behind to break the next relay.
+"""
+
+
+def _press_into(target: QWidget, key: Qt.Key) -> bool:
+    """Deliver `key` to `target` as a press and a release; the target does the rest.
+
+    Sent, not posted, so the target has moved (or chosen, and closed) before the
+    pad's next event is resolved.
     """
     for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
-        QApplication.sendEvent(menu, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
+        QApplication.sendEvent(target, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
+    return True
+
+
+def _deliver_to_combo(combo: QComboBox, key: Qt.Key) -> bool:
+    """Send `key` to the open dropdown's popup list, past the pad filter (T875).
+
+    The press goes to the popup's list view, so only its HIGHLIGHT moves (the
+    combo's `currentIndex` is untouched until the pad's A chooses, exactly like
+    a keyboard user's arrows with the popup open); sending it to the combo
+    instead would move the current row too and Qt would NOT commit that row on
+    A (see `perform(CONFIRM)`). The press is already routed, so the relay view
+    (`_RELAY_VIEW`, read by `KeyboardSource.eventFilter`) stays set for the
+    sent pair in a try/finally: a pass through the pad filter would route it
+    back into this relay forever. Delivery stays synchronous (the highlight has
+    moved before the next pad event resolves), and other filters still see the
+    press. One function, not two: the move-highlight and the Return-to-choose
+    paths differ only in the key.
+    """
+    global _RELAY_VIEW
+    view = combo.view()
+    _RELAY_VIEW = view
+    try:
+        for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            QApplication.sendEvent(view, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
+    finally:
+        _RELAY_VIEW = None
     return True
 
 
@@ -667,6 +727,13 @@ class Navigator(QObject):
         if menu is not None:
             # T89: an open menu moves its own highlight; see `_open_menu()`.
             return _press_into(menu, _DIRECTION_TO_KEY[direction])
+        combo = _open_combo_popup()
+        if combo is not None and direction in (Direction.UP, Direction.DOWN):
+            # T875: an open dropdown moves its own highlight -- the D-pad walk
+            # finds no focusable stops in the popup list, and the popup view's
+            # own key handling walks the highlight row and scrolls. Left/Right
+            # stay the navigator's: they close nothing and choose nothing.
+            return _deliver_to_combo(combo, _DIRECTION_TO_KEY[direction])
         root = self._context_root()
         candidates = self._focusable(root)
         current = QApplication.focusWidget()
@@ -685,6 +752,30 @@ class Navigator(QObject):
             _scroll_into_view(current)
             return True
 
+        if (
+            isinstance(current, QTabBar)
+            and direction in (Direction.LEFT, Direction.RIGHT)
+            and current.isVisibleTo(root)
+        ):
+            # T874: a focused tab bar is a stop of its own, and Left/Right walk
+            # its tabs instead of leaving it. Only Qt classes: any QTabWidget
+            # (a server's sub-tabs, the rail) behaves the same. Disabled and
+            # hidden tabs are skipped; at the first/last tab the press falls
+            # through to the normal geometric move. Down still enters the page
+            # (T172's pin).
+            tabs = current.parentWidget()
+            if isinstance(tabs, QTabWidget) and tabs.tabBar() is current and tabs.count() >= 2:
+                index = tabs.currentIndex()
+                if direction is Direction.RIGHT:
+                    following = [i for i in range(index + 1, tabs.count())]
+                else:
+                    following = [i for i in range(index - 1, -1, -1)]
+                following = [i for i in following if tabs.isTabEnabled(i) and tabs.isTabVisible(i)]
+                if following:
+                    tabs.setCurrentIndex(following[0])
+                    self.invalidate()
+                    return True
+
         origin = QPoint(0, 0)
         if current is not None:
             # From the part of it that shows (T175): a row cut off at the bottom
@@ -695,12 +786,79 @@ class Navigator(QObject):
         target = self._way_back(candidates, current, direction, root)
         if target is None:
             target = self._pick(candidates, current, origin, direction, root)
+            if direction is Direction.UP:
+                target = self._prefer_tab_bar(
+                    target,
+                    candidates,
+                    current,
+                    origin,
+                    direction,
+                    root,
+                )
         if target is None:
             return False
         target.setFocus(Qt.FocusReason.OtherFocusReason)
         _scroll_into_view(target)
         self._last_move = (current, target, direction) if current is not None else None
         return True
+
+    @staticmethod
+    def _prefer_tab_bar(
+        target: QWidget | None,
+        candidates: list[QWidget],
+        current: QWidget | None,
+        origin: QPoint,
+        direction: Direction,
+        root: QWidget,
+    ) -> QWidget | None:
+        """The tab bar above the focused widget's own page, when it is the first stop (T874).
+
+        UP from a widget inside a QTabWidget page (any depth, through ScrollPage)
+        whose bar is visible, focusable and above the widget: when `_pick` would
+        go to a widget OUTSIDE that tab widget and above the bar, the bar is the
+        first stop above its own page, so the press goes to the bar instead. No
+        x-overlap test: a wide page button under a narrow centred bar still goes
+        up to it, even when neither the focus nor the geometric target stands
+        under the bar. A further UP from the bar then goes on as today. Only Qt
+        classes: nothing here names a server, a controller or a theme.
+        """
+        if direction is not Direction.UP or current is None or target is None:
+            return target
+        if target is current or not shiboken6.isValid(target):
+            return target
+        node: QWidget | None = current.parentWidget()
+        tabs: QTabWidget | None = None
+        while node is not None and node is not root:
+            if isinstance(node, QTabWidget):
+                tabs = node
+                break
+            node = node.parentWidget()
+        if tabs is None:
+            return target
+        bar = tabs.tabBar()
+        if bar not in candidates or not bar.isVisibleTo(root):
+            return target
+        if not (bar.focusPolicy() & Qt.FocusPolicy.TabFocus):
+            return target
+        current_edges = _shown_edges(current, root)
+        bar_edges = _shown_edges(bar, root)
+        if current_edges[1] < bar_edges[3]:
+            # The focus is not under the bar (a tab switched without moving the
+            # focus, e.g. a bumper landing on the new page): no first stop owed.
+            return target
+        if tabs.isAncestorOf(target) and target is not bar:
+            # A stop on another row of the same page is nearer than the bar:
+            # the bar is the first stop above the page, not above every row.
+            current_top = _shown_edges(current, root)[1]
+            row_top = _shown_edges(target, root)[1]
+            if row_top >= current_top:
+                return target
+        target_edges = _shown_edges(target, root)
+        if target_edges[1] >= bar_edges[3]:
+            return target
+        # Review round: the bar is the first stop above its own page, wherever
+        # across the page the focus stands.
+        return bar
 
     def _way_back(
         self,
@@ -939,6 +1097,19 @@ class Navigator(QObject):
             if action is Action.CONFIRM:
                 return _press_into(menu, Qt.Key.Key_Return)
             return False
+        combo = _open_combo_popup()
+        if combo is not None and action is not Action.BACK:
+            # T89 for menus, T875-C3 for dropdowns: A chooses the highlighted
+            # row (a Return to the popup's view commits it and closes the
+            # popup, the way a keyboard user's Return does), a bumper closes
+            # the popup WITHOUT choosing and does NOT switch tab -- switching
+            # tab would act on a page its button is no longer on. B is
+            # `_back()`'s, below. (One relay function: see `_deliver_to_combo`.)
+            if action is Action.CONFIRM:
+                return _deliver_to_combo(combo, Qt.Key.Key_Return)
+            if action in (Action.CYCLE_PREV, Action.CYCLE_NEXT):
+                combo.hidePopup()
+            return False
         if action is Action.CONFIRM:
             return self._confirm()
         if action is Action.BACK:
@@ -974,7 +1145,8 @@ class Navigator(QObject):
 
     def _back(self) -> bool:
         # Back is "close the thing I am in":
-        # 1. An open popup / menu.
+        # 1. An open popup / menu (T875-B3: B atop an open dropdown closes the
+        #    popup without choosing; the D-pad's highlight dies with it).
         # 2. An active InputPrompter (cancels the prompt rather than leaving Stage 2).
         # 3. An open modal dialog.
         # 4. A visible, enabled in-panel back button (`BACK_ACTION_PROPERTY`, e.g. Catalog Stage 2).
@@ -1100,6 +1272,21 @@ class KeyboardSource(QObject):
             self._app = None
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        relayed = _RELAY_VIEW
+        if relayed is not None:
+            # T875-C1: a routed dropdown press, already delivered to the popup
+            # list -- let ONLY it through: a KeyPress/Release to the relayed
+            # view or to the popup frame holding it. An unaccepted press
+            # propagates view -> popup, and the popup's own Return handling is
+            # what dismisses it after A commits the highlight; consuming that
+            # leg re-enters perform() with the popup already closed and
+            # reopens it. A key aimed anywhere else while the relay holds is
+            # still filtered as normal.
+            popup = relayed.window()
+            if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and (
+                watched is relayed or watched is popup
+            ):
+                return False
         if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
             key = int(event.key())
             if _open_menu() is not None:
@@ -1115,8 +1302,21 @@ class KeyboardSource(QObject):
                     self._navigator.perform(_KEY_TO_ACTION[key])
                     return True
                 return False
-
             if key in _KEY_TO_DIRECTION:
+                # T875: with a dropdown open, Up/Down are the popup list's own
+                # keys -- they walk the highlight row and scroll. Routed to the
+                # popup view (see `_deliver_to_combo`), NOT the navigator, which
+                # finds no focusable stops in the popup and would swallow them
+                # into nothing. Open popup only: with the combo closed the
+                # arrows stay the navigator's, so a held pad direction cannot
+                # leak into a widget and desync focus (guarded: the press is
+                # already routed, see `_deliver_to_combo`).
+                combo = _open_combo_popup()
+                if combo is not None:
+                    direction = _KEY_TO_DIRECTION[key]
+                    if direction in (Direction.UP, Direction.DOWN):
+                        _deliver_to_combo(combo, _DIRECTION_TO_KEY[direction])
+                        return True
                 # Horizontal arrows double as typing keys: they move a caret in
                 # a field, so while a text field has focus they reach it instead
                 # of navigating (see `_TYPING_KEYS`). Every other direction key
