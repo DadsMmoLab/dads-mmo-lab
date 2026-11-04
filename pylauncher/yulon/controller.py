@@ -570,6 +570,7 @@ class Controller:
             # T668: the database is up (`refuse_a_missing_database`); never refuses a start.
             self.seeded_accounts_locked = self._lock_seeded_accounts()
             self._before_the_servers_start()
+            self._drop_retired_coa_bg_lines()
             self.zone_problem = self._put_back_the_zone_file()
             # The map-data fingerprint was written by `refuse_start()` above (T219).
             # No `wait_healthy` closure: `start_staged()` deleted the argument on
@@ -819,6 +820,22 @@ class Controller:
         Nothing here. Tortoise brings its bot dashboard up (T127), at this point
         so that a refused start -- a missing database included -- starts nothing.
         """
+
+    def _drop_retired_coa_bg_lines(self) -> None:
+        """T872-B B3: the CoA override's retired "0" battleground lines, dropped before compose up.
+
+        After every refusal and the dashboard step (`_before_the_servers_start`),
+        before the zone file is read and `compose up` runs (`_start_servers`):
+        every Start of a CoA install, and never while a server container runs
+        (this Start refused, or stopped, anything in the way first). A failure
+        never stops the Start; the hook says so itself.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:
+            return
+        from yulon import coa_realm
+
+        coa_realm.drop_retired_bg_lines_at_start(entry, self.server_dir)
 
     def _put_back_the_zone_file(self) -> str | None:
         """T171: a CMaNGOS server's zone file, put back before every start; the warning if not.

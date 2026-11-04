@@ -16,7 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
- - Conquest of Azeroth: bots join battlegrounds and arenas again, and changing their battleground settings in playerbots.conf now takes effect (Switch realm type to apply).
+ - Conquest of Azeroth: bots join battlegrounds and arenas again, and changing their battleground settings in playerbots.conf now takes effect (applied at the next Start).
 
 ### Changed
 

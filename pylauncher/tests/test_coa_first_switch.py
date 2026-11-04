@@ -484,16 +484,13 @@ def test_the_switch_keeps_the_bot_count_the_player_set(tmp_path: Path) -> None:
     assert any(key.endswith("MIN_RANDOM_BOTS") and value == "7" for key, value in env.items())
 
 
-def test_the_switch_keeps_the_player_battleground_line(tmp_path: Path) -> None:
-    """T872: the regenerated override drops the retired catalog line, not the player's own.
+def test_the_switch_drops_a_retired_battleground_line(tmp_path: Path) -> None:
+    """T872-B B1: the switch no longer carries the override's battleground lines forward.
 
-    The override on disk still carries the player's own battleground line "1" (the
-    catalog used to set both keys, decision 1 drops them); the "Switch realm type"
-    press (the regeneration from decision 5) rewrites the override through
-    `composegen.render()`, whose environment holds neither key, so the player's
-    line is what stays and the key the player never set is gone (T872: env wins
-    over the conf, so setting them overruled the player; with no line at all the
-    conf decides).
+    The override on disk still carries both "0" lines Yu'lon wrote (every
+    existing install does); the switch rewrites the override through
+    `composegen.render()`, whose environment holds neither key, so both are
+    gone and the conf decides. Mutation: carry the lines again (this test fails).
     """
     import yaml
 
@@ -509,11 +506,15 @@ def test_the_switch_keeps_the_player_battleground_line(tmp_path: Path) -> None:
         templates_root=installers_dir(),
         db_password="coa-Zx81kQ2mPa",
     )
-    assert "JOIN_BG" not in first.override, "control: the render lost both keys (decision 1)"
+    assert "JOIN_BG" not in first.override, "control: the render holds neither key"
     anchor = '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"\n'
     assert anchor in first.override, "control: the anchor line moved"
-    old = '      AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG: "1"  # the player queues for battlegrounds\n'
-    on_disk = first.override.replace(anchor, anchor + old)
+    on_disk = first.override.replace(
+        anchor,
+        anchor
+        + '      AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG: "0"\n'
+        + '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG: "0"\n',
+    )
     composegen._replace_whole(tmp_path / composegen.OVERRIDE_FILE, on_disk)
     controller_view._write_realm_override(coa(), tmp_path, coa_realm.switch_env_for(coa(), "hero"))
     env = next(
@@ -523,8 +524,8 @@ def test_the_switch_keeps_the_player_battleground_line(tmp_path: Path) -> None:
         )["services"].items()
         if name.endswith("worldserver")
     )["environment"]
-    assert env["AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG"] == "1", "the player's choice wins"
-    assert "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG" not in env, "the retired line is gone"
+    assert "AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG" not in env
+    assert "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG" not in env
 
 
 def test_a_switch_that_failed_after_its_marker_finishes_on_the_next_press(

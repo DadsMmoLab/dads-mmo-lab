@@ -212,50 +212,86 @@ def switch_env_for(entry: CatalogEntry, type_id: str) -> dict[str, str]:
     return {**composegen.DEFAULT_WORLD_ENV, **base, **types[type_id].world_env}
 
 
-# -- T872: retired battleground keys a player's override still carries -----------
+# -- T872-B B2: the one-time cleanup for installs that never switch or update --
 
 RETIRED_BG_KEYS = (
     "AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG",
     "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG",
 )
-"""Env rows the CoA catalog used to set (removed from `world_env` by T872).
+"""Env rows the CoA catalog used to set, removed from `world_env` by T872.
 
-An override on disk can still carry them, and a line there is read as the
-player's choice: the catalog no longer sets either, so a regeneration keeps
-what the file says and drops nothing by hand (T872: env wins over the conf, so
-setting them overruled the player; the conf decides only once the env is
-silent). Read with the line scanner (`catalog.compose_env`), which is what
-reads the file's `KEY: "value"` lines.
+Every existing override carries both with value "0" because Yu'lon wrote them;
+the conf decides only once the env is silent, so they must go.
 """
 
 
-def retired_bg_lines(entry: CatalogEntry, server_dir: Path) -> dict[str, str]:
-    """A player's own battleground lines from the override on disk, or `{}`.
+def drop_retired_bg_lines(entry: CatalogEntry, server_dir: Path) -> bool:
+    """Drop the retired "0" battleground lines from the override on disk.
 
-    What a writer that REGENERATES the override lays over `composegen.render()`:
-    the render's own environment already lost both keys, so only a line the file
-    still carries wins, and a file that never had one stays silent (then the
-    conf decides). A key named twice carries nothing: which of the two the
-    server reads is not a choice this can make.
+    Each line whose key is a retired key AND whose value is exactly "0" (the
+    value Yu'lon wrote) is deleted, every other byte kept: the line scanner
+    (`catalog.compose_env`) finds the world's `environment:` lines, every
+    `playerbots_keys.reading_order` spelling counts, and a key named twice
+    keeps both lines (which of the two the server reads is not a choice this
+    can make). Any other value is left: a hand edit, logged once. Written
+    through the override's own atomic writer (`composegen._replace_whole`),
+    so a failed write leaves the file whole. Not for entries other than
+    CoA (checked on `entry.id`): False. Returns whether it wrote.
     """
+    if entry.id != "wow-coa":
+        return False
     from yulon import playerbots_keys
     from yulon.catalog import compose_env, composegen
 
+    target = server_dir / composegen.OVERRIDE_FILE
     try:
-        text = (server_dir / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+        with target.open(encoding="utf-8", newline="") as handle:
+            text = handle.read()
     except (OSError, UnicodeDecodeError):
-        return {}
+        return False
     lines = text.split("\n")
     at = compose_env.env_lines(lines, entry.container_spec().world)
     prefix = playerbots_keys.module_prefix(server_dir)
-    kept: dict[str, str] = {}
+    drop: set[int] = set()
     for name in RETIRED_BG_KEYS:
         for spelling in playerbots_keys.reading_order(name, prefix, of_env=True):
             spots = at.get(spelling, [])
-            if len(spots) == 1:
-                kept[name] = compose_env.env_value(lines[spots[0]])
-                break
-    return playerbots_keys.env_map(kept, prefix)
+            if len(spots) == 1 and compose_env.env_value(lines[spots[0]]) == "0":
+                drop.add(spots[0])
+            elif len(spots) == 1:
+                logger.info(
+                    f"{entry.id}: kept a {spelling} line the player set to "
+                    f"{compose_env.env_value(lines[spots[0]])!r}"
+                )
+    if not drop:
+        return False
+    kept = [line for index, line in enumerate(lines) if index not in drop]
+    composegen._replace_whole(target, "\n".join(kept))
+    return True
+
+
+def drop_retired_bg_lines_at_start(entry: CatalogEntry, server_dir: Path) -> None:
+    """Drop the retired battleground lines on the Start path, never stopping Start (T872-B B3).
+
+    Called by `Controller.start()` after every refusal and before compose up, so
+    it runs for every Start of a CoA install. Never while a server container
+    runs (a Start with one up is refused, or stops it, first; the switch's own
+    `servers_running` seam is the same rule): rewriting the override compose
+    reads under a running worldserver would take effect only at the next
+    create. A failure to write logs a warning and Start goes on.
+    """
+    if entry.id != "wow-coa":
+        return
+    from yulon import docker
+
+    spec = entry.container_spec()
+    for container in (spec.db, spec.auth, spec.world):
+        if docker.world_running(container):
+            return
+    try:
+        drop_retired_bg_lines(entry, server_dir)
+    except Exception as exc:  # noqa: BLE001 - a cleanup never refuses a start
+        logger.warning(f"{entry.id}: the retired battleground lines were not dropped: {exc}")
 
 
 class DatabaseUnreadable(RealmSwitchError):

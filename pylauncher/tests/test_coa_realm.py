@@ -567,6 +567,223 @@ def test_the_bot_count_still_wins_over_the_realm_type(tmp_path: Path) -> None:
     assert world["environment"]["AC_CO_A_CLASS_MODEL"] == "coa"
 
 
+def _rendered_override() -> str:
+    """A CoA override as Yu'lon writes it: both retired lines present with "0"."""
+    plan = composegen.render(
+        coa(),
+        Path("/home/user/wow-coa-server"),
+        templates_root=installers_dir(),
+        db_password="snapshot-db-password",
+        platform_id=lambda: "linux",
+    )
+    assert "JOIN_BG" not in plan.override, "control: the render holds neither key"
+    anchor = '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"\n'
+    assert anchor in plan.override, "control: the anchor line moved"
+    return plan.override.replace(
+        anchor,
+        anchor
+        + '      AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG: "0"\n'
+        + '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG: "0"\n',
+    )
+
+
+def test_drop_retired_bg_lines_drops_both_zero_lines_and_keeps_every_other_byte(
+    tmp_path: Path,
+) -> None:
+    """T872-B B2: both "0" lines go, every other byte stays."""
+    before = _rendered_override()
+    (tmp_path / composegen.OVERRIDE_FILE).write_text(before, encoding="utf-8")
+    assert coa_realm.drop_retired_bg_lines(coa(), tmp_path) is True
+    after = (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert "JOIN_BG" not in after
+    assert after == before.replace(
+        '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"\n'
+        '      AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG: "0"\n'
+        '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG: "0"\n',
+        '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"\n',
+    )
+
+
+def test_drop_retired_bg_lines_keeps_a_hand_edited_one_line(tmp_path: Path) -> None:
+    """T872-B B2: a "1" line is a hand edit and stays. Mutation: drop the value check."""
+    before = _rendered_override().replace(
+        '      AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG: "0"\n',
+        '      AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG: "1"  # the player queues for battlegrounds\n',
+    )
+    (tmp_path / composegen.OVERRIDE_FILE).write_text(before, encoding="utf-8")
+    assert coa_realm.drop_retired_bg_lines(coa(), tmp_path) is True
+    after = (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert 'AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG: "1"' in after
+    assert "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG" not in after
+
+
+def test_drop_retired_bg_lines_without_the_lines_writes_nothing(tmp_path: Path) -> None:
+    """T872-B B2: no retired lines means False and no write."""
+    plan = composegen.render(
+        coa(),
+        tmp_path,
+        templates_root=installers_dir(),
+        db_password="snapshot-db-password",
+        platform_id=lambda: "linux",
+    )
+    assert "JOIN_BG" not in plan.override
+    target = tmp_path / composegen.OVERRIDE_FILE
+    target.write_text(plan.override, encoding="utf-8")
+    stamp = target.stat().st_mtime_ns
+    assert coa_realm.drop_retired_bg_lines(coa(), tmp_path) is False
+    assert target.stat().st_mtime_ns == stamp
+    assert target.read_text(encoding="utf-8") == plan.override
+
+
+def test_drop_retired_bg_lines_without_an_override_returns_false(tmp_path: Path) -> None:
+    """T872-B B2: a missing override is False, not a refusal."""
+    assert coa_realm.drop_retired_bg_lines(coa(), tmp_path) is False
+
+
+def test_drop_retired_bg_lines_ignores_a_non_coa_entry(tmp_path: Path) -> None:
+    """T872-B B2: not for entries other than wow-coa."""
+    from tests.support_native import ENTRY
+
+    assert ENTRY.id != "wow-coa"
+    target = tmp_path / composegen.OVERRIDE_FILE
+    target.write_text(_rendered_override(), encoding="utf-8")
+    assert coa_realm.drop_retired_bg_lines(ENTRY, tmp_path) is False
+    assert target.read_text(encoding="utf-8") == _rendered_override()
+
+
+def test_the_start_drops_the_lines_after_every_refusal_and_before_the_servers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T872-B B3: the Start path calls the cleanup before compose up.
+
+    Mutation: call it after compose up (this order test fails).
+    """
+    from contextlib import nullcontext
+
+    from yulon import controller, docker
+
+    order: list[str] = []
+    target = tmp_path / composegen.OVERRIDE_FILE
+    target.write_text(_rendered_override(), encoding="utf-8")
+
+    class _Ordered(controller.Controller):
+        def refuse_start(self) -> None:
+            order.append("refuse_start")
+
+        def port_conflicts(self) -> list[str]:
+            order.append("ports")
+            return []
+
+        def refuse_a_taken_port(self) -> None:
+            order.append("taken")
+
+        def refuse_a_missing_image(self) -> None:
+            order.append("image")
+
+        def refuse_a_missing_database(self) -> None:
+            order.append("database")
+
+        def refuse_an_unfinished_install(self) -> None:
+            order.append("install")
+
+        def refuse_an_ended_import(self) -> None:
+            order.append("import")
+
+        def _ask_before_the_servers(self) -> None:
+            order.append("before_servers")
+
+        def _rename_bot_settings(self) -> str | None:
+            order.append("rename")
+            return None
+
+        def _lock_seeded_accounts(self) -> str | None:
+            order.append("lock")
+            return None
+
+        def _put_back_the_zone_file(self) -> str | None:
+            order.append("zone")
+            return None
+
+        def _start_servers(self) -> None:
+            order.append("servers")
+
+    ctl = _Ordered(coa().container_spec(), tmp_path)
+    monkeypatch.setattr(docker, "lifecycle", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(docker, "world_running", lambda container: False)
+    monkeypatch.setattr(
+        "yulon.coa_realm.drop_retired_bg_lines",
+        lambda entry, server_dir: order.append("drop") or True,
+    )
+    ctl.start()
+    assert order == [
+        "refuse_start",
+        "ports",
+        "taken",
+        "image",
+        "database",
+        "install",
+        "import",
+        "before_servers",
+        "rename",
+        "lock",
+        "drop",
+        "zone",
+        "servers",
+    ]
+
+
+def test_a_write_error_on_the_start_path_does_not_stop_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T872-B B3: a cleanup write error logs a warning and Start goes on."""
+    from contextlib import nullcontext
+
+    from yulon import controller, docker
+
+    target = tmp_path / composegen.OVERRIDE_FILE
+    target.write_text(_rendered_override(), encoding="utf-8")
+
+    class _Ordered(controller.Controller):
+        def refuse_start(self) -> None:
+            return None
+
+        def port_conflicts(self) -> list[str]:
+            return []
+
+        def refuse_a_missing_database(self) -> None:
+            return None
+
+        def _put_back_the_zone_file(self) -> str | None:
+            return None
+
+        def _start_servers(self) -> None:
+            return None
+
+    ctl = _Ordered(coa().container_spec(), tmp_path)
+    monkeypatch.setattr(docker, "lifecycle", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(docker, "world_running", lambda container: False)
+
+    def refuse(_entry: object, _server_dir: Path) -> bool:
+        raise OSError("the disk is full")
+
+    monkeypatch.setattr("yulon.coa_realm.drop_retired_bg_lines", refuse)
+    ctl.start()  # no raise
+    assert "JOIN_BG" in target.read_text(encoding="utf-8"), "the file is untouched"
+
+
+def test_the_start_cleanup_writes_nothing_while_a_server_container_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T872-B B3: never while a server container runs (the switch's rule)."""
+    from yulon import docker
+
+    target = tmp_path / composegen.OVERRIDE_FILE
+    target.write_text(_rendered_override(), encoding="utf-8")
+    monkeypatch.setattr(docker, "world_running", lambda container: True)
+    coa_realm.drop_retired_bg_lines_at_start(coa(), tmp_path)
+    assert "JOIN_BG" in target.read_text(encoding="utf-8"), "the file is untouched"
+
+
 def test_a_missing_file_reads_as_the_default(tmp_path: Path) -> None:
     assert coa_realm.active(coa(), tmp_path).id == "coa"
 
