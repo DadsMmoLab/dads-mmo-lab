@@ -70,7 +70,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, ExitStack, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -4738,17 +4738,35 @@ def parked_build_note(server_dir: Path) -> str | None:
     )
 
 
+def _no_size() -> int | None:
+    """No size answer: a kept-build route that does not weigh its images."""
+    return None
+
+
+@dataclass(frozen=True)
+class KeptBuildRemoved:
+    """What letting go of the kept build did: its sentence, and whether it went (T864 R2)."""
+
+    ok: bool
+    """True once no `-parked` name is left: the record is forgotten and the build is gone."""
+    line: str
+    """The sentence for the player, on either exit."""
+
+
 @dataclass(frozen=True)
 class KeptBuildRoute:
     """The two halves of the Server tab's kept-build banner (T224, D3), wired for one install.
 
     `check` reads only `PARKED_BUILD_FILE` and never raises: the note, or None.
-    `remove` lets the `-parked` names go and forgets the record, and returns the
-    sentence that says what it did.
+    `remove` lets the `-parked` names go and forgets the record, and returns
+    `KeptBuildRemoved`: `ok` says whether anything counts as freed (T864 R2),
+    `line` the sentence that says what it did.
+    `size` is what the `-parked` images take, up to (T864); None unknown.
     """
 
     check: Callable[[], str | None]
-    remove: Callable[[], str]
+    remove: Callable[[], KeptBuildRemoved]
+    size: Callable[[], int | None] = _no_size
 
 
 @dataclass(frozen=True)
@@ -7590,6 +7608,13 @@ class Seams:
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build_cache_bytes: Callable[[], int | None] = docker.build_cache_bytes
     """How much build cache Docker holds; preflight counts it for a resumed build (T203)."""
+    dangling_image_ids: Callable[[str], tuple[str, ...] | None] = docker.dangling_image_ids
+    containers_on: Callable[[str], tuple[docker.ContainerRef, ...] | None] = docker.containers_on
+    """T864-E: every container still referencing an image, whatever its state; None = no
+    answer."""
+    remove_finished_container: Callable[[str], str] = docker.remove_finished_container
+    """T864-E: `docker rm` of one finished container by its id; `""` when it went, else the
+    daemon's sentence."""
     folder_bytes: Callable[[Path], int | None] = folder_bytes
     """What the server folder already holds; preflight counts it for a resumed build (T203)."""
     image_id: Callable[[str], str | None] = docker.image_id
@@ -7703,6 +7728,7 @@ class Seams:
     compile is a copy of the new build, and one restored without a recreate
     leaves the failed build running.
     """
+    remove_unused_image: Callable[[str], str] = docker.remove_unused_image
     wait_db_healthy: Callable[[docker.ContainerSpec], bool] = docker.wait_db_healthy_for
     wait_ready: Callable[[docker.ContainerSpec, docker.ReadySpec], bool] = docker.wait_ready_for
     container_tail: Callable[[str], str | None] = _container_tail
@@ -8027,6 +8053,9 @@ class Seams:
             blob_id=repo.blob_id,
             images_built=on(docker.images_built, wsl_distro=distro),
             build_cache_bytes=on(docker.build_cache_bytes, wsl_distro=distro),
+            dangling_image_ids=on(docker.dangling_image_ids, wsl_distro=distro),
+            containers_on=on(docker.containers_on, wsl_distro=distro),
+            remove_finished_container=on(docker.remove_finished_container, wsl_distro=distro),
             image_id=on(docker.image_id, wsl_distro=distro),
             build=on(docker.build_staged, wsl_distro=distro),
             context_fingerprint=_no_fingerprint,
@@ -8048,6 +8077,7 @@ class Seams:
             remove_service=on(docker.compose_remove_service, wsl_distro=distro),
             tag_image=on(docker.tag_image, wsl_distro=distro),
             remove_image=on(docker.remove_image, wsl_distro=distro),
+            remove_unused_image=on(docker.remove_unused_image, wsl_distro=distro),
             wait_db_healthy=on(docker.wait_db_healthy_for, wsl_distro=distro),
             wait_ready=on(docker.wait_ready_for, wsl_distro=distro),
             world_output=on(_world_output, wsl_distro=distro),
@@ -8796,6 +8826,7 @@ class StagedInstaller:
                 self._locking(self.stages(), server_dir, started_empty),
                 ctx,
                 run=ERROR_RUN_INSTALL,
+                builds=True,
             )
         except ReadyWaitStopped as stopped:
             # T247: the containers are up, and the world is still loading -- or,
@@ -8826,6 +8857,7 @@ class StagedInstaller:
         # After the realm row, for `_advertise_realm()`'s reason: a background job
         # is a sentence, never a failed install (T179's movement maps).
         yield from self.after_ready(server_dir)
+        yield from self._free_own_old_images(server_dir)
         # The bash path logs `install of <id> finished` (installer.py); this path
         # logged nothing at the end, so the only sign a run had ended was the
         # compose-project pin - which is how a tester on yulon-win11 (2026-08-28)
@@ -8883,7 +8915,13 @@ class StagedInstaller:
         return INSTALL_WORLD_STOPPED
 
     def _staged(
-        self, stages: Sequence[Stage], ctx: StageContext, *, run: str = ""
+        self,
+        stages: Sequence[Stage],
+        ctx: StageContext,
+        *,
+        run: str = "",
+        builds: bool = False,
+        press: str = INSTALL_PRESS,
     ) -> Generator[str, None, InstallState]:
         """Run `stages` in order, saying where the user is. The ONE progress reporter.
 
@@ -8919,6 +8957,19 @@ class StagedInstaller:
         during the extraction, 2026-09-08. The record belongs to whoever holds
         the current state, and after this change that is exactly one function.
 
+        **`builds` is about the FREE DOCKER SPACE press, not about this loop.**
+        Only the install's `run()` and `rebuild()` pass True, because only they
+        run a `build` stage; their whole loop counts as compiling
+        (`docker.building()`), which refuses Free Docker space (T864 R3). An
+        update, a repair, corrections and an adopt pass through the same loop
+        with no compile at all, and counting them refused the press with a
+        sentence about an install building when nothing was (T864 review).
+        Writing Docker's cache for a minute is not a reason to skip the press.
+        `press` is the name the server's reservation carries at `start-db`: the
+        caller's own (a repair's or an update's), never the install's by
+        default, so the label another Yu'lon and `build_press_refusal()` read
+        names the press that is actually running.
+
         **T841's cleanup stop is HERE for the same reason, and for its own.**
         An install whose world came up and then stopped must stop that world
         (nothing watches an unfinished install, and `restart: unless-stopped`
@@ -8936,7 +8987,8 @@ class StagedInstaller:
         reservation = ExitStack()
         reserved = False
         try:
-            with reservation, self._held_awake() as note:
+            compiling = docker.building(ctx.server_dir) if builds else nullcontext()
+            with reservation, self._held_awake() as note, compiling:
                 if note:
                     yield note
                 try:
@@ -8947,7 +8999,7 @@ class StagedInstaller:
                             held = reservation.enter_context(
                                 self._reservation(
                                     ctx.server_dir,
-                                    INSTALL_PRESS,
+                                    press,
                                     ctx.cancel,
                                     images=self.image_refs_at(ctx.server_dir),
                                 )
@@ -9271,7 +9323,7 @@ class StagedInstaller:
             for stage in planned
         )
         ctx = self._update_context(server_dir, cancel)
-        yield from self._staged(stages, ctx)
+        yield from self._staged(stages, ctx, press=UPDATES_BUTTON_LABEL)
         # T808: an update may write the realm row again (the shared post-import step).
         yield from self._apply_realm_name(ctx, "The database updates are applied")
 
@@ -9330,7 +9382,7 @@ class StagedInstaller:
         yield REPAIR_DATABASE_OPENING_NOTE
         self._check_cancel(cancel)
         ctx = replace(self._update_context(server_dir, cancel), updates_only=False)
-        yield from self._staged(self.repair_database_stages(), ctx)
+        yield from self._staged(self.repair_database_stages(), ctx, press=REPAIR_DATABASE_PRESS)
         # T808: the import just seeded the catalog's realm name into the new login database.
         yield from self._apply_realm_name(ctx, "The database was made again")
         yield (
@@ -9560,7 +9612,7 @@ class StagedInstaller:
             )
             for stage in (self.stage_named("start-db"), self.stage_named("import"))
         )
-        yield from self._staged(stages, ctx)
+        yield from self._staged(stages, ctx, press=CORRECTIONS_BUTTON_LABEL)
         # T808: a corrected phase may write the realm row again (the shared post-import step).
         yield from self._apply_realm_name(ctx, "The corrections are applied")
         if stopped:
@@ -10025,7 +10077,7 @@ class StagedInstaller:
         )
         ctx = self._update_context(server_dir, cancel)
         try:
-            yield from self._staged(stages, ctx)
+            yield from self._staged(stages, ctx, press=ADOPT_BUTTON_LABEL)
         except BaseException:
             # Logged and not yielded: a generator whose consumer has abandoned
             # it may not yield again, and a press that failed has already said
@@ -10420,7 +10472,7 @@ class StagedInstaller:
                 ) from exc
         yield HELD_REMOVED
 
-    @_reserving(server_build_presses.REBUILD)
+    @_reserving(lambda given: given.get("press") or server_build_presses.REBUILD)
     def rebuild(
         self,
         options: InstallOptions | None = None,
@@ -10822,7 +10874,11 @@ class StagedInstaller:
             ctx, refs, missing_ok=missing_images_ok, held=held is not None
         )
         try:
-            state = yield from self._staged(stages, ctx)
+            # `press`, never REBUILD: this loop's reservation (a family whose rebuild opens
+            # the database first) is the update route's or the player's own, and another
+            # Yu'lon reading `presses_running()` must not be told "Rebuild" while an Update
+            # or a Return to the pin is what runs (T864 review round 3).
+            state = yield from self._staged(stages, ctx, builds=True, press=press)
         except InstallerError as exc:
             # FIRST, and outside every rollback branch below, because it is not
             # about the images at all: `touched` False is the whole window the
@@ -11103,6 +11159,7 @@ class StagedInstaller:
         if held is not None:
             yield held_rebuild_ending(self.entry.name, server_dir)
             return
+        yield from self._free_own_old_images(server_dir)
         # T739: the update route's own work ran the importer too (T220) for the family whose
         # Rebuild imports, and may have applied SQL for the others; "ran no SQL" is said only
         # by a plain Rebuild that ran none.
@@ -11113,31 +11170,37 @@ class StagedInstaller:
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
 
     @_reserving_call(REMOVE_KEPT_BUILD_LABEL)
-    def remove_kept_build(self, options: InstallOptions | None = None) -> str:
+    def remove_kept_build(self, options: InstallOptions | None = None) -> KeptBuildRemoved:
         """Remove the kept build now: "Remove kept build…" on the Server tab (T224, D3).
 
         Every `<ref>-parked` name is let go (`_let_go()`, whose `-f` covers a stopped
         container), and only when none is left is the record forgotten: a name Docker
         kept, or a Docker that did not answer, leaves the build recorded and the
         banner up (Codex adversarial review). `remove_image()` reads "no such image"
-        as done. Returns the sentence; never raises for Docker's refusals.
+        as done. Returns `KeptBuildRemoved`; never raises for Docker's refusals.
         """
         server_dir = self.server_dir(options or InstallOptions())
         names = [ref + PARKED_TAG_SUFFIX for ref in self.image_refs_at(server_dir)]
         left = self._let_go(names)
         if left:
-            return (
-                f"The kept build was not removed: Docker would not remove {', '.join(left)} (the "
-                f"log says why). It is still kept; press {REMOVE_KEPT_BUILD_LABEL} again once "
-                f"Docker answers."
+            return KeptBuildRemoved(
+                ok=False,
+                line=(
+                    f"The kept build was not removed: Docker would not remove {', '.join(left)} "
+                    f"(the log says why). It is still kept; press {REMOVE_KEPT_BUILD_LABEL} "
+                    f"again once Docker answers."
+                ),
             )
         forgot = forget_parked_build(server_dir)
         if forgot:
-            return (
-                f"The kept build was removed from Docker, but {forgot}; the next rebuild "
-                f"forgets it."
+            return KeptBuildRemoved(
+                ok=True,
+                line=(
+                    f"The kept build was removed from Docker, but {forgot}; the next rebuild "
+                    f"forgets it."
+                ),
             )
-        return "The kept build was removed."
+        return KeptBuildRemoved(ok=True, line="The kept build was removed.")
 
     # ------------------------------------------------------- update to latest (T64)
 
@@ -14134,6 +14197,70 @@ class StagedInstaller:
                 f"this server is stopped."
             )
         return left
+
+    def _free_own_old_images(self, server_dir: Path) -> tuple[str, ...]:
+        """Remove this install's own dangling images after a successful build (T864 D1).
+
+        Dangling images of THIS compose project only (`com.docker.compose.project=<project>`,
+        where project is spelled exactly like `_db_volume()`), each removed by id with plain
+        `docker image rm` and never `-f`: forcing only takes the name off and leaves the
+        layers, which is the leak this pass cleans. An image is left for a later build while
+        ANY container still uses it; one whose every holder is exited, of THIS project, and
+        serving a name in `composegen.ONE_SHOT_SERVICES` is removed after those containers
+        (`docker rm` by id, no `-f`, no `-v`, in
+        `docker_space.remove_finished_holders_on()`), and that is all or nothing. Anything
+        else is never touched: other projects, unlabelled images, running containers,
+        database/auth/world containers, volumes.
+
+        A failure here is one sentence at most and never fails the build that worked: the
+        returned lines are appended to the build's own success tail, after it.
+        """
+        from yulon import docker_space  # noqa: PLC0415 - native sits in docker_space's import chain
+
+        try:
+            project = composegen.project_name(
+                self.entry.id,
+                server_dir,
+                platform_id=self._seams.platform_id,
+                install_id=self._install_id(server_dir),
+            )
+            ids = self._seams.dangling_image_ids(f"{docker.PROJECT_LABEL}={project}")
+            failed = ids is None
+            for image in ids or ():
+                said = self._seams.remove_unused_image(image)
+                if said == docker.IMAGE_IN_USE:
+                    # T864-E: a rebuild's recreate never selects the one-shot services
+                    # (`ac-db-import`, `ac-client-data-init`), so their EXITED containers
+                    # keep the pre-rebuild image referenced for ever. Cleared here, and
+                    # only when every holder is exited, of THIS project, and its service
+                    # is in `composegen.ONE_SHOT_SERVICES`; the image is then asked for
+                    # once more. See `docker_space.remove_finished_holders_on()` for why
+                    # that is safe.
+                    cleared = docker_space.remove_finished_holders_on(
+                        image,
+                        project,
+                        listing=self._seams.containers_on,
+                        remove=self._seams.remove_finished_container,
+                    )
+                    if cleared:
+                        said = self._seams.remove_unused_image(image)
+                if said == "" or said == docker.IMAGE_GONE:
+                    logger.info(f"removed this install's old image {image}")
+                elif said == docker.IMAGE_IN_USE:
+                    logger.debug(f"{image} is still held by a container; left for a later build")
+                else:
+                    logger.warning(f"could not remove this install's old image {image}: {said}")
+                    failed = True
+            cache = self._seams.build_cache_bytes()
+        except Exception as exc:  # noqa: BLE001 - never fails a build that worked
+            logger.warning(f"could not remove this install's old images: {exc}")
+            return (docker_space.OLD_IMAGES_NOT_REMOVED,)
+        lines: list[str] = []
+        if failed:
+            lines.append(docker_space.OLD_IMAGES_NOT_REMOVED)
+        if cache is not None and cache > docker_space.CACHE_POINTER_BYTES:
+            lines.append(docker_space.cache_pointer(cache))
+        return tuple(lines)
 
     def _recipe_ground(self, server_dir: Path) -> dict[str, RecipeGround]:
         """The build-recipe files as found. Bytes, `None` for absent, `UNREADABLE` for neither.

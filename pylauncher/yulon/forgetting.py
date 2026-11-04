@@ -191,6 +191,11 @@ DELETE_HOLDS_THE_DATABASES = (
     f"Old backups are being deleted on this server's {MAINTENANCE_TAB} tab. Wait for that "
     "to finish, then try again."
 )
+PRESS_FREE_DOCKER_SPACE = server_build_presses.FREE_DOCKER_SPACE
+FREE_DOCKER_SPACE_HOLDS = (
+    f"Docker space is being freed on this server's {MAINTENANCE_TAB} tab. Wait for that "
+    "to finish, then try again."
+)
 TUNING_RUNNING = (
     "A Tuning change is being saved or put back on this server's Tuning tab. Wait for it "
     "to finish, then try again. Nothing was removed."

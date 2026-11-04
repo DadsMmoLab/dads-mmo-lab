@@ -155,6 +155,30 @@ class Recorder:
     build_cache: int | None = None
     """What `docker.build_cache_bytes()` answers (T203). `None`, "could not ask", by default."""
     build_cache_asked: int = 0
+    dangling_ids: tuple[str, ...] | None = ()
+    """What `dangling_image_ids()` answers (T864): ids of this install's dangling images."""
+    dangling_asked: list[str] = field(default_factory=list)
+    """Every project label `dangling_image_ids()` was asked with, in order (T864)."""
+    unused_answers: dict[str, str] = field(default_factory=dict)
+    """What `remove_unused_image()` answers per id; `""` (removed) unless stated (T864)."""
+    unused_removed: list[str] = field(default_factory=list)
+    """Every image id `remove_unused_image()` was asked to remove, in order (T864)."""
+    in_use_once: set[str] = field(default_factory=set)
+    """Image ids `remove_unused_image()` answers `IMAGE_IN_USE` for ONCE, then as usual.
+
+    T864-E: the shape of the bug is "the first ask is refused by a finished
+    one-shot container, and the second ask, after that container is removed,
+    succeeds". A double that could only ever answer one way could not show the
+    retry happening.
+    """
+    holders: dict[str, tuple[docker.ContainerRef, ...] | None] = field(default_factory=dict)
+    """What `containers_on()` answers per image (T864-E); a missing key is ()."""
+    holders_asked: list[str] = field(default_factory=list)
+    """Every image `containers_on()` was asked about, in order (T864-E)."""
+    containers_removed: list[str] = field(default_factory=list)
+    """Every container id `remove_finished_container()` removed, in order (T864-E)."""
+    container_answers: dict[str, str] = field(default_factory=dict)
+    """What `remove_finished_container()` answers per id; `""` (gone) unless stated."""
     folder_size: int | None = None
     """What `native.folder_bytes()` answers (T203 fix round 3). `None`, "could not measure"."""
     folder_asked: list[Path] = field(default_factory=list)
@@ -1115,6 +1139,10 @@ class Recorder:
             upstream_get=self.upstream_get,
             images_built=self.images_built,
             build_cache_bytes=self.build_cache_bytes,
+            dangling_image_ids=self.dangling_image_ids,
+            containers_on=self.containers_on,
+            remove_finished_container=self.remove_finished_container,
+            remove_unused_image=self.remove_unused_image,
             folder_bytes=self.folder_bytes,
             image_id=self.image_id,
             build=build,
@@ -1200,6 +1228,29 @@ class Recorder:
         """`docker.build_cache_bytes()`: answers `self.build_cache`, and counts the asks."""
         self.build_cache_asked += 1
         return self.build_cache
+
+    def dangling_image_ids(self, label: str) -> tuple[str, ...] | None:
+        """`docker.dangling_image_ids()`: answers `dangling_ids`, keeps the label (T864)."""
+        self.dangling_asked.append(label)
+        return self.dangling_ids
+
+    def remove_unused_image(self, image: str) -> str:
+        """`docker.remove_unused_image()`: answers `unused_answers`, keeps the id (T864)."""
+        self.unused_removed.append(image)
+        if image in self.in_use_once:
+            self.in_use_once.discard(image)
+            return docker.IMAGE_IN_USE
+        return self.unused_answers.get(image, "")
+
+    def containers_on(self, image: str) -> tuple[docker.ContainerRef, ...] | None:
+        """`docker.containers_on()`: `holders` per image, and what was asked."""
+        self.holders_asked.append(image)
+        return self.holders.get(image, ())
+
+    def remove_finished_container(self, container: str) -> str:
+        """`docker.remove_finished_container()`: `container_answers`, and each id asked."""
+        self.containers_removed.append(container)
+        return self.container_answers.get(container, "")
 
     def folder_bytes(self, folder: Path) -> int | None:
         """`native.folder_bytes()`: answers `self.folder_size`, and keeps what it was asked."""

@@ -19,6 +19,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - New, untested on a Steam Deck: WotLK, Unbound and Centurion can use the ConsolePort controller add-on and a Deck layout. Report issues.
 - New, untested on a Steam Deck: Conquest of Azeroth can install the ConsolePort controller add-on from its Modules tab.
 - Six new themes: Gruvbox dark and light (medium and soft) and Organic dark and light.
+- Free Docker space… on Backups & updates removes Docker's build cache and old builds; builds now clean up their own.
 
 ### Fixed
 - Installs no longer leave unnamed Docker volumes behind (one per Conquest of Azeroth install, and one after a tool run was cut off).

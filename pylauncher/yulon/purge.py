@@ -56,10 +56,12 @@ WotLK install also uses. `--rmi all` would take the shared one; `--rmi local`
 removes only untagged images and would take none of ours. So
 `composegen.built_image_refs()`'s four refs are removed explicitly, and an
 image another title is holding comes back as a warning rather than as a failed
-uninstall. Nothing here prunes: `image prune`, `builder prune` and
-`system prune` reach the whole daemon, and `alpine/git` — the sha256-pinned
-image every install's clone stage uses — shows up untagged, which is to say it
-looks exactly like something a prune should take.
+uninstall. Uninstall still never prunes. The only prune in the package is
+`docker.prune_build_cache()`, run when the player ticks Docker's build cache in
+Free Docker space… (T864); Yu'lon's old untagged images are removed one id at a
+time (`docker.remove_unused_image()`), listed by the compose project label,
+never by `image prune` or `system prune`, so `alpine/git` -- pinned by digest,
+untagged-looking, with no compose label -- is never among them.
 
 **A ticked box keeps the password too, or keeps nothing.** The volume it keeps
 was created with a password that, on every `generated` entry, lives in a file

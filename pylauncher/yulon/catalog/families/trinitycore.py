@@ -2446,7 +2446,7 @@ class TrinityCoreInstaller(CmangosInstaller):
                 f"The map data in {data_dir} was moved aside, so the tools start into empty "
                 "folders; it is put back if this extraction does not finish."
             )
-            yield from self._staged((stage,), ctx)
+            yield from self._staged((stage,), ctx, press=REEXTRACT_BUTTON)
             # Asked of Docker before the old map data is deleted (Codex adversarial
             # review): lost as the last tool finished, nothing more is done here.
             self._still_claimed(claim, data_dir, "")

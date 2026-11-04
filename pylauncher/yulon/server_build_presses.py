@@ -14,7 +14,8 @@ T692a moved the presses into the "Server version" section on the tab:
 `SERVER_BUILD` is that section, and `under_server_build()` places an entry
 under it there. T692b renamed the tab to "Backups & updates": `MAINTENANCE_TAB`
 is the title, and every player sentence that sends someone to the tab reads it
-from here, so the widget's title and the sentences cannot drift apart.
+from here, so the widget's title and the sentences cannot drift apart. T864 adds
+the "Free Docker space…" press beside Clean up…, spelled here for the same reason.
 """
 
 from __future__ import annotations
@@ -31,6 +32,11 @@ REBUILD = "Rebuild the server…"
 UPDATE_TO_LATEST = "Update the server to latest…"
 RETURN_TO_PIN = "Return to the tested pin…"
 PUT_THE_FOLDERS_BACK = "Put the folders back…"
+FREE_DOCKER_SPACE = "Free Docker space…"
+"""Docker's build cache and old untagged builds, on the Maintenance tab (T864)."""
+
+FREE_DOCKER_SPACE_PLACE = f"“{FREE_DOCKER_SPACE}” on the {MAINTENANCE_TAB} tab"
+"""Where the Free Docker space press is, for a sentence that names it (T864)."""
 
 
 SERVER_BUILD_PLACE = f"“{SERVER_BUILD}” on the {MAINTENANCE_TAB} tab"

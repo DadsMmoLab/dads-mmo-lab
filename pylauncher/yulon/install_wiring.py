@@ -59,6 +59,7 @@ from yulon.catalog.installer import (
 )
 from yulon.catalog.native import (
     NOTHING_BUILT,
+    PARKED_TAG_SUFFIX,
     REPAIR_FILES_LABEL,
     WSL_DISTRO_STOPPED_NOTE,
     CatalogPin,
@@ -1302,7 +1303,28 @@ def kept_build_for_app(
     return KeptBuildRoute(
         check=lambda: parked_build_note(server_dir),
         remove=lambda: installer_for_app(entry).remove_kept_build(options),
+        size=lambda: _kept_build_bytes(entry, server_dir, wsl_distro=wsl_distro),
     )
+
+
+def _kept_build_bytes(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None = None
+) -> int | None:
+    """What this install's kept `-parked` images take, up to (T864); None unknown. Never raises."""
+    try:
+        engine = installer_for_app(entry)
+        if not isinstance(engine, StagedInstaller):
+            return None
+        names = [ref + PARKED_TAG_SUFFIX for ref in engine.image_refs_at(server_dir)]
+        if not names:
+            return None
+        facts = docker.image_facts(names, wsl_distro=wsl_distro)
+        if not facts:
+            return None
+        return sum(f.size for f in facts)
+    except Exception as exc:  # noqa: BLE001 - a size must never fail a dialog
+        logger.warning(f"kept build size is unknown ({exc})")
+        return None
 
 
 def repair_confs_for_app(

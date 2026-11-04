@@ -36,10 +36,10 @@ class _Route:
         self.checks += 1
         return NOTE if self.kept else None
 
-    def remove(self) -> str:
+    def remove(self) -> native.KeptBuildRemoved:
         self.removed += 1
         self.kept = False
-        return "The kept build was removed."
+        return native.KeptBuildRemoved(ok=True, line="The kept build was removed.")
 
     def route(self) -> native.KeptBuildRoute:
         return native.KeptBuildRoute(check=self.check, remove=self.remove)
