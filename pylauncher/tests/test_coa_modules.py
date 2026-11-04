@@ -15,6 +15,7 @@ import pytest
 
 from yulon import coa_client, resources, steam_input
 from yulon.catalog.catalog import load_catalog
+from yulon.controller_wow_coa import modules as coa_modules
 from yulon.manifest import ManifestType
 from yulon.manifest_store import ManifestStore
 from yulon.ui.controller_view import ControllerServices
@@ -95,12 +96,17 @@ def test_no_other_game_lists_the_coa_item(game: str, tmp_path: Path) -> None:
 def test_default_addons_never_puts_consoleport_in(tmp_path: Path) -> None:
     """T1: assert on what `put_in()` installs, not on display names. The CoA
     services' `default_addons` holds no `yulon-consoleport`, so a Play or a
-    fresh install leaves the client alone until the Modules tab's own Install."""
+    fresh install leaves the client alone until the Modules tab's own Install.
+    SquidBots Lite is CoA's default (T870), ConsolePort stays opt-in."""
     from yulon import default_addons
 
     services = _services(tmp_path)
     assert services.store is not None
-    assert services.default_addons == ()
+    # Review round 1: the NAME no longer depends on the folder (a Remove in a folder that
+    # is not a game client yet must still be remembered), so this tab names SquidBots Lite
+    # even with no client folder set. The write paths are what refuse to write there.
+    assert services.default_addons == (coa_modules.ADDON_ID,)
+    assert "yulon-consoleport" not in services.default_addons
 
     manifests = list(services.store.load_all("mod"))
     assert "yulon-consoleport" in {m.id for m in manifests}

@@ -20,6 +20,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - New, untested on a Steam Deck: Conquest of Azeroth can install the ConsolePort controller add-on from its Modules tab.
 - Six new themes: Gruvbox dark and light (medium and soft) and Organic dark and light.
 - Free Docker space… on Backups & updates removes Docker's build cache and old builds; builds now clean up their own.
+- Conquest of Azeroth puts the SquidBots Lite bot add-on into your game client by itself and updates it with the server.
 
 ### Fixed
 - Installs no longer leave unnamed Docker volumes behind (one per Conquest of Azeroth install, and one after a tool run was cut off).
