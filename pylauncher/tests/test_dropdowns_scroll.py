@@ -80,7 +80,7 @@ def test_open_dropdown_shows_ten_rows_at_most_and_scrolls(qapp: object) -> None:
                 for row in range(view.model().rowCount())
                 if view.visualRect(view.model().index(row, 0)).intersects(view.viewport().rect())
             )
-            assert visible <= box.maxVisibleItems()
+            assert visible <= 10
         finally:
             box.hidePopup()
             process_events()
@@ -95,13 +95,14 @@ def test_logs_source_picker_shows_eight_rows(qapp: object) -> None:
     view = _logs_view()
     try:
         assert view.source_picker.maxVisibleItems() == 8
+        assert view.source_picker.minimumContentsLength() == 24
     finally:
         view.deleteLater()
         process_events()
 
 
 def test_pad_down_past_the_visible_rows_moves_and_scrolls(qapp: object) -> None:
-    """15 pad Downs through the Navigator: index 15, and the row shows (T875)."""
+    """15 pad Downs through the Navigator: VIEW row 15, index unchanged (T875-B2)."""
     win, box = _window_with_combo()
     navigator, keyboard, gamepad = install_gamepad_navigation(win)
     try:
@@ -115,17 +116,20 @@ def test_pad_down_past_the_visible_rows_moves_and_scrolls(qapp: object) -> None:
         process_events()
         assert QApplication.activePopupWidget() is not None
         box.setCurrentIndex(0)
+        fired: list[int] = []
+        box.currentIndexChanged.connect(lambda index: fired.append(index))
         process_events()
         view = box.view()
         for _ in range(15):
             assert navigator.navigate(Direction.DOWN) is True
             process_events()
         try:
-            assert box.currentIndex() == 15
             assert view.currentIndex().row() == 15
             assert view.verticalScrollBar().value() > 0
             row = view.visualRect(view.model().index(15, 0))
             assert row.intersects(view.viewport().rect())
+            assert box.currentIndex() == 0
+            assert fired == []
         finally:
             box.hidePopup()
             process_events()
@@ -138,7 +142,7 @@ def test_pad_down_past_the_visible_rows_moves_and_scrolls(qapp: object) -> None:
 
 
 def test_pad_keys_down_past_the_visible_rows_moves_and_scrolls(qapp: object) -> None:
-    """15 pad Downs as key presses: index 15, and the row shows (T875)."""
+    """15 pad Downs as key presses: VIEW row 15, index unchanged (T875-B2)."""
     win, box = _window_with_combo()
     _navigator, keyboard, gamepad = install_gamepad_navigation(win)
     try:
@@ -149,20 +153,150 @@ def test_pad_keys_down_past_the_visible_rows_moves_and_scrolls(qapp: object) -> 
         box.showPopup()
         process_events()
         box.setCurrentIndex(0)
+        fired: list[int] = []
+        box.currentIndexChanged.connect(lambda index: fired.append(index))
         process_events()
         view = box.view()
         try:
             for _ in range(15):
                 QTest.keyClick(win.windowHandle(), Qt.Key.Key_Down)
                 process_events()
-            assert box.currentIndex() == 15
             assert view.currentIndex().row() == 15
             row = view.visualRect(view.model().index(15, 0))
             assert row.intersects(view.viewport().rect())
+            assert box.currentIndex() == 0
+            assert fired == []
         finally:
             box.hidePopup()
             process_events()
     finally:
+        keyboard.stop()
+        gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()
+
+
+def test_pad_confirm_chooses_the_highlighted_row(qapp: object) -> None:
+    """Down x3 then A: index 3, popup closed, exactly one signal (T875-B3)."""
+    win, box = _window_with_combo()
+    navigator, keyboard, gamepad = install_gamepad_navigation(win)
+    try:
+        apply_dadcraft_theme(win, width=1280, theme_name="arthas")
+        win.show()
+        win.activateWindow()
+        process_events()
+        box.setFocus()
+        process_events()
+        assert navigator.perform(Action.CONFIRM) is True
+        process_events()
+        assert QApplication.activePopupWidget() is not None
+        box.setCurrentIndex(0)
+        fired: list[int] = []
+        box.currentIndexChanged.connect(lambda index: fired.append(index))
+        process_events()
+        for _ in range(3):
+            assert navigator.navigate(Direction.DOWN) is True
+            process_events()
+        assert navigator.perform(Action.CONFIRM) is True
+        process_events()
+        assert box.currentIndex() == 3
+        assert QApplication.activePopupWidget() is None
+        assert fired == [3]
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()
+
+
+def test_pad_back_closes_without_choosing(qapp: object) -> None:
+    """Down x3 then B: index unchanged, popup closed, no signal (T875-B3)."""
+    win, box = _window_with_combo()
+    navigator, keyboard, gamepad = install_gamepad_navigation(win)
+    try:
+        apply_dadcraft_theme(win, width=1280, theme_name="arthas")
+        win.show()
+        win.activateWindow()
+        process_events()
+        box.setFocus()
+        process_events()
+        assert navigator.perform(Action.CONFIRM) is True
+        process_events()
+        assert QApplication.activePopupWidget() is not None
+        box.setCurrentIndex(0)
+        fired: list[int] = []
+        box.currentIndexChanged.connect(lambda index: fired.append(index))
+        process_events()
+        for _ in range(3):
+            assert navigator.navigate(Direction.DOWN) is True
+            process_events()
+        assert navigator.perform(Action.BACK) is True
+        process_events()
+        assert box.currentIndex() == 0
+        assert QApplication.activePopupWidget() is None
+        assert fired == []
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()
+
+
+def test_deleted_source_does_not_break_the_next_relay(qapp: object) -> None:
+    """A dead KeyboardSource changes nothing: the next relay still works (T875-B4)."""
+    from yulon.ui.gamepad import _deliver_to_combo
+
+    win, box = _window_with_combo()
+    navigator, keyboard, gamepad = install_gamepad_navigation(win)
+    stray_win = QWidget()
+    try:
+        apply_dadcraft_theme(win, width=1280, theme_name="arthas")
+        win.show()
+        process_events()
+        install_gamepad_navigation(stray_win)
+        stray_win.deleteLater()
+        process_events()
+        box.showPopup()
+        process_events()
+        try:
+            before = box.view().currentIndex().row()
+            assert _deliver_to_combo(box, Qt.Key.Key_Down) is True
+            process_events()
+            assert box.view().currentIndex().row() == before + 1
+            assert box.currentIndex() == 0
+        finally:
+            box.hidePopup()
+            process_events()
+    finally:
+        keyboard.stop()
+        gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()
+
+
+def test_relay_guard_cleared_after_a_failed_delivery(qapp: object) -> None:
+    """An exception during delivery still clears the guard flag (T875-B4)."""
+    import yulon.ui.gamepad as gamepad_module
+    from yulon.ui import gamepad as gamepad_pkg
+
+    win, box = _window_with_combo()
+    _navigator, keyboard, gamepad = install_gamepad_navigation(win)
+    real_send = gamepad_pkg.QApplication.sendEvent
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("delivery blew up")
+
+    try:
+        gamepad_pkg.QApplication.sendEvent = boom  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="delivery blew up"):
+            gamepad_module._deliver_to_combo(box, Qt.Key.Key_Down)
+        assert gamepad_module._IN_COMBO_RELAY is False
+    finally:
+        gamepad_pkg.QApplication.sendEvent = real_send  # type: ignore[method-assign]
         keyboard.stop()
         gamepad.stop()
         win.close()
