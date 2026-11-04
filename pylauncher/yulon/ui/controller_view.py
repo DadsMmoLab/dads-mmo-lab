@@ -2579,7 +2579,8 @@ class ControllerServices:
     each one in through `default_addons.put_in()`, unless the player removed it:
     the Modules tab's own Remove is remembered per server (`_module_done()`). Empty for
     every game but Tortoise, which names its two Sagiroth addons, and Conquest of Azeroth,
-    which names SquidBots Lite when its client folder is the game (T870).
+    which names SquidBots Lite (T870). The folder is not part of this answer: whether
+    anything may be written into it is the write paths' own question (T870 review round 1).
     """
     module_forget: Callable[[Manifest], bool] | None = None
     """Drop this app's record of a custom module, answering whether there was one.
@@ -4525,12 +4526,14 @@ def _for_wotlk(
         if entry.has_manifests
         else None
     )
-    # T870 D3: CoA's SquidBots Lite is a default add-on only for a folder that holds the game.
-    # The WotLK-family applier is handed the raw client folder (Tortoise's gets T30's
-    # `_client_dir_for_addons`), so a press-less write needs that evidence: `Interface/` or
-    # the entry's own exe. Read here, at tab build, so a later start reads it again.
+    # T870 D3, as review round 1 corrected it: CoA NAMES SquidBots Lite whatever the folder
+    # is, so a Remove in a folder that does not (yet) hold the game is still the player's
+    # Remove and is remembered (`_module_done()`). Whether anything may be WRITTEN there is
+    # the folder's own answer, asked by each write path (`_default_addons_folder()`): the
+    # WotLK-family applier is handed the raw client folder (Tortoise's gets T30's
+    # `_client_dir_for_addons`), so a press-less write needs `Interface/` or the entry's exe.
     coa = entry.id == coa_modules.GAME and module_applier is not None
-    default_ids = coa_modules.DEFAULT_ADDONS if coa and _a_game_client(entry, client_dir) else ()
+    default_ids = coa_modules.DEFAULT_ADDONS if coa else ()
     services = _assemble(
         entry,
         server_dir,
@@ -5899,6 +5902,13 @@ def _for_tortoise(
                 lambda: store.load_all("mod"),
                 tortoise_modules.ADDON_ID,
                 place=lambda: default_addons.client_place(client_dir, module_applier.client_dir),
+                # T870 D6, review round 1: the same rule CoA's follow carries. A player who
+                # brought TortoiseBots Manager themselves has a record writing this addon's
+                # own folder, and "Update the server to latest…" must not clone the shipped
+                # one over it.
+                players_own=lambda: default_addons.players_own(
+                    tortoise_modules.ADDON_ID, store.load_all("mod"), _outside_addons(entry)
+                ),
             ),
         )
     return replace(
@@ -14950,7 +14960,7 @@ class ControllerView(QWidget):
         # its display and account choices are Config.wtf keys only the pipeline writes.
         if (
             has_client_data(self.entry.client)
-            or bool(self.services.default_addons)
+            or (bool(self.services.default_addons) and self._default_addons_folder() is not None)
             or self._has_outside_addons()
             or (
                 recorded is not None
@@ -15357,6 +15367,20 @@ class ControllerView(QWidget):
             save()
         return _Prepared(tuple(notes), frozenset(unavailable))
 
+    def _default_addons_folder(self) -> Path | None:
+        """The folder this game's default add-ons are written into, when it holds the game.
+
+        T870 D3, moved here by review round 1. `services.default_addons` names the add-ons
+        whatever the folder is -- a Remove in a folder that is not a game client yet is
+        still the player's Remove, so it must be remembered -- and every path that WRITES
+        asks this instead. `Interface/` (any case) or one of the entry's exes is the
+        evidence; a folder showing neither gets nothing written into it, the same way
+        `put_in()` already leaves alone a client whose folder is not set at all.
+        """
+        applier = self.services.applier
+        folder = None if applier is None else applier.client_dir
+        return folder if _a_game_client(self.entry, folder) else None
+
     def _default_addons_work(self, say: Callable[[str], None], *, clone: bool) -> tuple[str, ...]:
         """Off the GUI thread: this game's default client addons, put in (T612).
 
@@ -15369,7 +15393,10 @@ class ControllerView(QWidget):
         """
         services = self.services
         ids = services.default_addons
-        if not ids or services.applier is None or services.store is None:
+        applier = services.applier
+        if not ids or applier is None or services.store is None:
+            return ()
+        if self._default_addons_folder() is None:
             return ()
         try:
             manifests = list(services.store.load_all("mod"))
@@ -15386,7 +15413,7 @@ class ControllerView(QWidget):
                 return ()
             outcome = default_addons.put_in(
                 services.controller.server_dir,
-                services.applier,
+                applier,
                 manifests,
                 ids,
                 clone=clone,
@@ -15442,7 +15469,7 @@ class ControllerView(QWidget):
         path: Play itself never clones. Nothing happens when they are all there, removed, or
         failed within the day.
         """
-        if self.services.default_addons:
+        if self.services.default_addons and self._default_addons_folder() is not None:
             QTimer.singleShot(milliseconds, self, self.put_default_addons_in)
 
     def put_default_addons_in(self) -> None:
@@ -15454,6 +15481,8 @@ class ControllerView(QWidget):
         files would go into is not this server's; the next Play puts them in then.
         """
         if not self.services.default_addons or getattr(self, "_closed", False):
+            return
+        if self._default_addons_folder() is None:
             return
         if self._busy or self._module_job_running() or self._play_pending:
             return

@@ -511,11 +511,6 @@ def follow_with_addon(
     )
 
 
-def _short(exc: Exception) -> str:
-    """One line of `exc`, for the FAILED sentence (T814)."""
-    return " ".join(str(exc).split())
-
-
 def module_updates(
     server_dir: Path,
     *,

@@ -15,6 +15,7 @@ import pytest
 
 from yulon import coa_client, resources, steam_input
 from yulon.catalog.catalog import load_catalog
+from yulon.controller_wow_coa import modules as coa_modules
 from yulon.manifest import ManifestType
 from yulon.manifest_store import ManifestStore
 from yulon.ui.controller_view import ControllerServices
@@ -101,7 +102,10 @@ def test_default_addons_never_puts_consoleport_in(tmp_path: Path) -> None:
 
     services = _services(tmp_path)
     assert services.store is not None
-    assert services.default_addons == ()
+    # Review round 1: the NAME no longer depends on the folder (a Remove in a folder that
+    # is not a game client yet must still be remembered), so this tab names SquidBots Lite
+    # even with no client folder set. The write paths are what refuse to write there.
+    assert services.default_addons == (coa_modules.ADDON_ID,)
     assert "yulon-consoleport" not in services.default_addons
 
     manifests = list(services.store.load_all("mod"))

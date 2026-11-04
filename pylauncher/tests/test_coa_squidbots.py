@@ -166,9 +166,14 @@ def test_no_other_game_lists_the_squidbots_item(game: str, tmp_path: Path) -> No
 # ---------------------------------------------------------------- the default
 
 
-def test_coa_names_the_add_on_as_a_default_only_for_a_real_client(tmp_path: Path) -> None:
-    """F: without `_a_game_client` an empty folder is taken for the game and gets written."""
-    exe_only = _coa_services(tmp_path / "exe", _client(tmp_path / "c1", interface=False, exe=True))
+def test_coa_names_the_add_on_as_a_default_whatever_the_folder_is(tmp_path: Path) -> None:
+    """F: `default_ids=()` for a folder that is not a game client (review round 1) leaves
+    a Remove there unremembered. `_a_game_client` -- asserted here -- is what every write
+    path asks instead, so a folder without `Interface/` or the exe is still never written."""
+    from yulon.ui.controller_view import _a_game_client
+
+    exe_only_folder = _client(tmp_path / "c1", interface=False, exe=True)
+    exe_only = _coa_services(tmp_path / "exe", exe_only_folder)
     assert exe_only.default_addons == (ADDON_ID,)
 
     lower = _client(tmp_path / "c2")
@@ -176,11 +181,18 @@ def test_coa_names_the_add_on_as_a_default_only_for_a_real_client(tmp_path: Path
     lower_case = _coa_services(tmp_path / "lower", lower)
     assert lower_case.default_addons == (ADDON_ID,)
 
-    empty = _coa_services(tmp_path / "empty", _client(tmp_path / "c3", interface=False))
-    assert empty.default_addons == ()
+    empty_folder = _client(tmp_path / "c3", interface=False)
+    empty = _coa_services(tmp_path / "empty", empty_folder)
+    assert empty.default_addons == (ADDON_ID,)
 
     none = _coa_services(tmp_path / "none", None)
-    assert none.default_addons == ()
+    assert none.default_addons == (ADDON_ID,)
+
+    entry = load_catalog().get(COA)
+    assert _a_game_client(entry, exe_only_folder) is True
+    assert _a_game_client(entry, lower) is True
+    assert _a_game_client(entry, empty_folder) is False
+    assert _a_game_client(entry, None) is False
     for services in (exe_only, lower_case, empty, none):
         assert "yulon-consoleport" not in services.default_addons
 
