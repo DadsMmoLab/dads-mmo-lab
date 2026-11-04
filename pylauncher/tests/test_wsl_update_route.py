@@ -563,6 +563,13 @@ class _Distro:
             return subprocess.CompletedProcess(cmd, 0, "sha256:0123\n", "")
         if " up " in f" {text} " and "compose" in text:
             return subprocess.CompletedProcess(cmd, 1, "", "the test stops the press here")
+        if "reset --hard" in text and mount:
+            # T863: the fetch moves the checkout even when the test stops the
+            # press later: `reset --hard` lands what the fetch brought, so the
+            # heads this double answers follow it the way `stream()`'s own
+            # reset branch already did. Without this the press reads every
+            # source as unmoved and ends before the compose the test is about.
+            self.heads[mount.replace(":/git", ":/git:ro")] = NEW
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     def stream(self, cmd: list[str], *a: object, **kw: object) -> Iterator[str]:
