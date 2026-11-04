@@ -61,8 +61,9 @@ class FakeSql(coa_realm.SqlRunner):
         return True
 
     def start_database(self) -> bool:
+        was_up = self.db_up
         self.db_up = True
-        return True
+        return not was_up
 
     def _need_up(self) -> None:
         if not self.db_up:
