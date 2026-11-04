@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QScrollArea,
+    QTabBar,
     QTabWidget,
     QTextEdit,
     QWidget,
@@ -685,6 +686,29 @@ class Navigator(QObject):
             _scroll_into_view(current)
             return True
 
+        if (
+            isinstance(current, QTabBar)
+            and direction in (Direction.LEFT, Direction.RIGHT)
+            and current.isVisibleTo(root)
+        ):
+            # T874: a focused tab bar is a stop of its own, and Left/Right walk
+            # its tabs instead of leaving it. Only Qt classes: any QTabWidget
+            # (a server's sub-tabs, the rail) behaves the same. Disabled tabs
+            # are skipped; at the first/last tab the press falls through to the
+            # normal geometric move. Down still enters the page (T172's pin).
+            tabs = current.parentWidget()
+            if isinstance(tabs, QTabWidget) and tabs.tabBar() is current and tabs.count() >= 2:
+                index = tabs.currentIndex()
+                if direction is Direction.RIGHT:
+                    following = [i for i in range(index + 1, tabs.count())]
+                else:
+                    following = [i for i in range(index - 1, -1, -1)]
+                following = [i for i in following if tabs.isTabEnabled(i)]
+                if following:
+                    tabs.setCurrentIndex(following[0])
+                    self.invalidate()
+                    return True
+
         origin = QPoint(0, 0)
         if current is not None:
             # From the part of it that shows (T175): a row cut off at the bottom
@@ -695,12 +719,82 @@ class Navigator(QObject):
         target = self._way_back(candidates, current, direction, root)
         if target is None:
             target = self._pick(candidates, current, origin, direction, root)
+            if direction is Direction.UP:
+                target = self._prefer_tab_bar(
+                    target,
+                    candidates,
+                    current,
+                    origin,
+                    direction,
+                    root,
+                )
         if target is None:
             return False
         target.setFocus(Qt.FocusReason.OtherFocusReason)
         _scroll_into_view(target)
         self._last_move = (current, target, direction) if current is not None else None
         return True
+
+    @staticmethod
+    def _prefer_tab_bar(
+        target: QWidget | None,
+        candidates: list[QWidget],
+        current: QWidget | None,
+        origin: QPoint,
+        direction: Direction,
+        root: QWidget,
+    ) -> QWidget | None:
+        """The tab bar above the focused widget's own page, when it is the first stop (T874).
+
+        UP from a widget inside a QTabWidget page (any depth, through ScrollPage)
+        whose bar is visible, focusable and above the widget: when `_pick` would
+        go to a widget OUTSIDE that tab widget and above the bar, the bar is the
+        first stop above its own page, so the press goes to the bar instead. A
+        further UP from the bar then goes on as today. Only Qt classes: nothing
+        here names a server, a controller or a theme.
+        """
+        if direction is not Direction.UP or current is None or target is None:
+            return target
+        if target is current or not shiboken6.isValid(target):
+            return target
+        node: QWidget | None = current.parentWidget()
+        tabs: QTabWidget | None = None
+        while node is not None and node is not root:
+            if isinstance(node, QTabWidget):
+                tabs = node
+                break
+            node = node.parentWidget()
+        if tabs is None:
+            return target
+        bar = tabs.tabBar()
+        if bar not in candidates or not bar.isVisibleTo(root):
+            return target
+        if not (bar.focusPolicy() & Qt.FocusPolicy.TabFocus):
+            return target
+        current_edges = _shown_edges(current, root)
+        bar_edges = _shown_edges(bar, root)
+        if current_edges[1] < bar_edges[3]:
+            # The focus is not under the bar (a tab switched without moving the
+            # focus, e.g. a bumper landing on the new page): no first stop owed.
+            return target
+        if tabs.isAncestorOf(target) and target is not bar:
+            # A stop on another row of the same page is nearer than the bar:
+            # the bar is the first stop above the page, not above every row.
+            current_top = _shown_edges(current, root)[1]
+            row_top = _shown_edges(target, root)[1]
+            if row_top >= current_top:
+                return target
+        target_edges = _shown_edges(target, root)
+        if target_edges[1] >= bar_edges[3]:
+            return target
+        origin_x = origin.x()
+        bar_left, _bar_top, bar_right, _bar_bottom = bar_edges
+        if bar_left <= origin_x <= bar_right:
+            return bar
+        target_left = target.mapTo(root, QPoint(0, 0)).x()
+        if bar_left <= target_left <= bar_right:
+            return bar
+        return target
 
     def _way_back(
         self,
