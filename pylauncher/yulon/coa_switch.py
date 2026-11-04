@@ -100,15 +100,20 @@ class RealmSwitch:
         running)"). A pre-check refusal stops the database again only when this press
         started it on a server that was not running, leaving the server as the player
         had it; a down database beside running world/auth is a broken server, and a
-        validation refusal must not stop that. A start_db failure refuses before
-        anything else is touched. After the Stop the database alone is started again,
-        before the engine reads anything; the world and auth stay down.
+        validation refusal must not stop that. A start_db failure stops the database
+        again too when the server was not running (the start brings the container up
+        and then waits for health, so a timeout leaves it running) and then refuses
+        with the start refusal; on a running server nothing is stopped. After the
+        Stop the database alone is started again, before the engine reads anything;
+        the world and auth stay down.
         """
         with self._hold_server(SWITCH_PRESS):
             was_running = self._servers_running()
             try:
                 db_was_down = bool(self._start_db())
             except Exception as exc:
+                if not was_running:
+                    self._stop_database_this_press_started()
                 raise _start_db_refusal(exc) from exc
             try:
                 original = coa_realm.pre_check(
@@ -121,10 +126,7 @@ class RealmSwitch:
                 )
             except Exception:
                 if db_was_down and not was_running:
-                    try:
-                        self._stop()
-                    except Exception as stop_exc:
-                        logger.warning(f"{self._entry.id}: the cleanup stop failed: {stop_exc}")
+                    self._stop_database_this_press_started()
                 raise
             self._stop()
             before = len(_writes_of(self._sql))
@@ -155,6 +157,19 @@ class RealmSwitch:
                     raise _restarted_after_failed_switch(exc, original) from exc
                 raise _stopped_after_failed_switch(exc) from exc
             self._start()
+
+    def _stop_database_this_press_started(self) -> None:
+        """Stop again a database this press may have started, guarding the cleanup.
+
+        The early `start_db` starts the container and THEN waits for health, so a
+        failure can leave it running on a stopped server; the pre-check path has
+        the same shape. A cleanup failure is logged and never hides the refusal
+        it cleans up after (T873-C C1).
+        """
+        try:
+            self._stop()
+        except Exception as stop_exc:
+            logger.warning(f"{self._entry.id}: the cleanup stop failed: {stop_exc}")
 
 
 def confirm_text(target_label: str, target_realm_name: str) -> str:

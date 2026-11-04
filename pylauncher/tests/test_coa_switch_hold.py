@@ -608,7 +608,7 @@ def test_a_refused_switch_leaves_a_database_it_found_up_alone(tmp_path: Path) ->
 
 
 def test_a_database_that_will_not_start_switches_nothing(tmp_path: Path) -> None:
-    """T873: start_db raises: RealmSwitchError with "nothing was switched", nothing touched."""
+    """T873: start_db raises: RealmSwitchError with "nothing was switched", stop cleans up."""
     sql = FakeSql()
     coa_schemas(sql)
     sql.db_up = False
@@ -626,7 +626,7 @@ def test_a_database_that_will_not_start_switches_nothing(tmp_path: Path) -> None
     with pytest.raises(coa_realm.RealmSwitchError, match="nothing was switched"):
         list(switch.switch_to("hero"))
     assert starts == ["start-db"]
-    assert stopped == [] and started == []
+    assert stopped == ["stop"] and started == []
     assert sql.executed == []
     assert file_type(tmp_path) == "coa"
 
@@ -716,5 +716,136 @@ def test_a_start_db_refusal_is_said_once_with_its_detail_kept(tmp_path: Path) ->
     assert said.count("The database's own log says why.") == 1, said
     assert getattr(caught.value, "detail", "") == failed.detail
     assert caught.value.__cause__ is failed
-    assert stopped == [] and started == []
+    assert stopped == ["stop"] and started == []
     assert sql.db_up is False
+
+
+def test_a_start_timeout_on_a_stopped_server_stops_the_database_it_started(
+    tmp_path: Path,
+) -> None:
+    """T873-C C1: a start_db that brings the db up and THEN times out: stop called once."""
+    from yulon import docker
+
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.db_up = False
+    write_file(tmp_path, "coa")
+    stopped: list[str] = []
+    started: list[str] = []
+    starts: list[str] = []
+    failed = docker.DockerRefusal(
+        "coa-database did not report healthy within 180s, so the realm type could not be read. "
+        "The database's own log says why.",
+        detail="To read everything it printed, run this in /srv:\ndocker compose logs db",
+    )
+
+    def start_then_time_out() -> object:
+        starts.append("timed-out")
+        sql.db_up = True
+        raise failed
+
+    switch = _t873_switch(
+        tmp_path,
+        sql,
+        "hero",
+        stopped=stopped,
+        started=started,
+        starts=starts,
+        start_db=start_then_time_out,
+    )
+    with pytest.raises(coa_realm.RealmSwitchError) as caught:
+        list(switch.switch_to("hero"))
+    assert starts == ["start-db", "timed-out"]
+    assert stopped == ["stop"], "a database the switch could not bring up was not stopped again"
+    assert started == []
+    assert sql.db_up is False
+    assert getattr(caught.value, "detail", "") == failed.detail
+    assert caught.value.__cause__ is failed
+
+
+def test_a_start_timeout_on_a_running_server_stops_nothing(tmp_path: Path) -> None:
+    """T873-C C1: running world/auth beside a starting db: a start failure stops nothing."""
+    from yulon import docker
+
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.db_up = False
+    write_file(tmp_path, "coa")
+    stopped: list[str] = []
+    started: list[str] = []
+    starts: list[str] = []
+    failed = docker.DockerRefusal(
+        "coa-database did not report healthy within 180s, so the realm type could not be read. "
+        "The database's own log says why.",
+        detail="To read everything it printed, run this in /srv:\ndocker compose logs db",
+    )
+
+    def start_then_time_out() -> object:
+        starts.append("timed-out")
+        sql.db_up = True
+        raise failed
+
+    switch = _t873_switch(
+        tmp_path,
+        sql,
+        "hero",
+        stopped=stopped,
+        started=started,
+        starts=starts,
+        start_db=start_then_time_out,
+        running=True,
+    )
+    with pytest.raises(coa_realm.RealmSwitchError) as caught:
+        list(switch.switch_to("hero"))
+    assert stopped == [], "a start failure on a running server must stop nothing"
+    assert started == []
+    assert sql.db_up is True
+    assert getattr(caught.value, "detail", "") == failed.detail
+    assert caught.value.__cause__ is failed
+
+
+def test_a_failing_stop_after_a_start_timeout_keeps_the_start_refusal(
+    tmp_path: Path,
+) -> None:
+    """T873-C C1: the cleanup stop also raises: the start refusal is still what is raised."""
+    from yulon import docker
+
+    sql = FakeSql()
+    coa_schemas(sql)
+    sql.db_up = False
+    write_file(tmp_path, "coa")
+    stopped: list[str] = []
+    started: list[str] = []
+    starts: list[str] = []
+    failed = docker.DockerRefusal(
+        "coa-database did not report healthy within 180s, so the realm type could not be read. "
+        "The database's own log says why.",
+        detail="To read everything it printed, run this in /srv:\ndocker compose logs db",
+    )
+
+    def start_then_time_out() -> object:
+        starts.append("timed-out")
+        sql.db_up = True
+        raise failed
+
+    def refuse_stop() -> bool:
+        stopped.append("stop")
+        sql.stop_database()
+        raise RuntimeError("the cleanup stop blew up")
+
+    switch = _t873_switch(
+        tmp_path,
+        sql,
+        "hero",
+        stopped=stopped,
+        started=started,
+        starts=starts,
+        start_db=start_then_time_out,
+        stop=refuse_stop,
+    )
+    with pytest.raises(coa_realm.RealmSwitchError) as caught:
+        list(switch.switch_to("hero"))
+    assert stopped == ["stop"]
+    assert started == []
+    assert getattr(caught.value, "detail", "") == failed.detail
+    assert caught.value.__cause__ is failed
