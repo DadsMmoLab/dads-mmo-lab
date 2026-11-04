@@ -3106,23 +3106,34 @@ def _with_client_addons(
 
 
 def _outside_addons(entry: CatalogEntry) -> list[Manifest] | None:
-    """The add-ons the player brought for this game; `None` when the records cannot be read.
+    """The add-ons the player brought for this game; `None` when a record cannot be read.
 
-    `None` is "unknown", never "not the player's" (T870 C2): a write path that treats it as
-    an empty list could put the shipped copy over one the player brought. The one log line
-    is here, and the callers skip their write without a player-facing failure.
+    `None` is "unknown", never "not the player's" (T870 C2, review round 3): a write path
+    that treats it as an empty list could put the shipped copy over one the player brought.
+    `ManifestStore` raises for an index it cannot parse, but SKIPS an individual user record
+    it cannot parse, so the skip list is part of the answer: one damaged record of the
+    player's leaves the question unanswerable. The one log line is here, and the callers
+    skip their write without a player-facing failure.
     """
+    skipped: list[str] = []
     try:
         records = ManifestStore(
             Path(os.devnull), entry.id, wotlk_modules.user_manifests_dir(), shipped=False
-        ).load_all("mod")
-        return [m for m in records if client_addons.is_client_addon(m)]
+        ).load_all("mod", skipped=skipped)
+        outside = [m for m in records if client_addons.is_client_addon(m)]
     except Exception as exc:  # noqa: BLE001 - unknown is the player's, never a refusal
         logger.warning(
             f"could not read the add-ons brought for {entry.id}: {exc}; "
             "no default add-on is written for it"
         )
         return None
+    if skipped:
+        logger.warning(
+            f"could not read {len(skipped)} of the add-ons brought for {entry.id} "
+            f"({skipped[0]}); no default add-on is written for it"
+        )
+        return None
+    return outside
 
 
 def _with_take_back(services: ControllerServices) -> ControllerServices:
@@ -15396,8 +15407,10 @@ class ControllerView(QWidget):
         is what the tab shows installed and what its Remove takes back. `clone=False` is Play:
         no git and no network, only the files a clone on disk has and the client lacks.
         `clone=True` (a fresh install, a tab opening) also installs an add-on with no clone.
-        A default whose folder the player's own add-on already writes is left out (T870 D6).
-        Never raises: the lines come back as Play notes.
+        A default whose folder the player's own add-on already writes is left out (T870 D6),
+        and a record that cannot be read at all -- the index or one damaged item -- leaves the
+        player possibly owning it, so nothing is written. Never raises: the lines come back
+        as Play notes.
         """
         services = self.services
         ids = services.default_addons
@@ -15407,20 +15420,14 @@ class ControllerView(QWidget):
         if self._default_addons_folder() is None:
             return ()
         try:
-            # T870 D6 and review round 2 C2: a copy the player brought wins over a default
-            # that writes the same folder, and a record store nobody can read means the
-            # player MAY own it, so nothing is written. Read before the manifests: the same
-            # unreadable store may hold them, and a failure there is not this decision.
-            outside: list[Manifest] = []
-            if services.client_addons is not None:
-                try:
-                    outside = services.client_addons.installed()
-                except Exception as exc:  # boundary: unknown is the player's, never "no"
-                    logger.warning(
-                        "could not read the add-ons brought for this server "
-                        f"({exc}); no default add-on is put in"
-                    )
-                    return ()
+            # T870 D6, review round 2 C2, round 3: a copy the player brought wins over a
+            # default that writes the same folder, and ANY record that cannot be read --
+            # the index or one damaged item -- means the player MAY own it, so nothing is
+            # written. Not `route.installed()`: it skips a damaged record silently, which
+            # is the answer this decision must not take.
+            outside = _outside_addons(self.entry)
+            if outside is None:
+                return ()
             manifests = list(services.store.load_all("mod"))
             ids = default_addons.ids_to_put_in(ids, manifests, outside)
             if not ids:

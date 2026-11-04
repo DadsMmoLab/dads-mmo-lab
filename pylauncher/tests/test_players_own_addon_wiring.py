@@ -17,6 +17,7 @@ reads them.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -409,3 +410,40 @@ def test_the_coa_update_route_writes_nothing_into_a_folder_that_is_not_the_game(
     assert outcome.sentence == default_addons.FOLLOW_UNKNOWN.format(name=ADDON_NAME)
     assert (writes.installed, writes.put_back) == ([], [])
     assert not (server / "sql_scripts" / "clones" / ADDON_ID).exists()
+
+
+# ------------------------------------------------- review round 3: skipped records
+
+
+@pytest.mark.parametrize("damage", ["malformed", "unreadable"])
+def test_a_damaged_record_of_the_players_own_writes_nothing(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    """F: `load_all()` SKIPS one user record it cannot parse while its index is fine, so a
+    reader that ignores `skipped=` sees the player's copy as absent and the follow installs
+    the shipped one over it (review round 3)."""
+    server = tmp_path / "coa"
+    client = _game_client(tmp_path / "Ascension")
+    _record_it(tmp_path, monkeypatch, _player_brought(COA, "players-squidbots", "SquidBotsLite"))
+    record = tmp_path / "user" / COA / "mods" / "players-squidbots.json"
+    assert record.is_file()
+    if damage == "malformed":
+        record.write_text("{not json", encoding="utf-8")
+    else:
+        if sys.platform == "win32":
+            pytest.skip("a file no one may open is not a thing Windows can make")
+        record.chmod(0)
+    follows = _follow_spy(monkeypatch, coa_modules)
+    services = _route_of(COA, server, client, monkeypatch)
+    assert len(follows) == 1, "the CoA tab did not wire the follow"
+    writes = _watched(services)
+    view = ControllerView(load_catalog().get(COA), services, status_poll_ms=0)
+
+    outcome = follows[0]()  # no clone: without the skip list this installs
+    assert outcome.kind is default_addons.Followed.PLAYERS_OWN
+    assert outcome.sentence == default_addons.FOLLOW_PLAYERS_OWN.format(name=ADDON_NAME)
+    assert (writes.installed, writes.put_back) == ([], [])
+
+    _shipped_clone(server, ADDON_ID)  # now Play's put-back is reachable too
+    assert view._default_addons_work(lambda _line: None, clone=False) == ()  # Play
+    assert (writes.installed, writes.put_back) == ([], [])
