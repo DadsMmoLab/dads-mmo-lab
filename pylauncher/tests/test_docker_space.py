@@ -353,6 +353,9 @@ def test_carry_out_removes_old_builds_then_kept_then_cache_in_order(
         return answers[image_id]
 
     monkeypatch.setattr(docker, "remove_unused_image", remove_unused)
+    # T864-E: the held image asks who holds it; answer "no finished container" here,
+    # so this test stays about the sentence and not about the new pass.
+    monkeypatch.setattr(docker, "exited_containers_on", lambda image, **_: ())
     monkeypatch.setattr(docker_space, "_old_builds", lambda distro: old)
     caches = [30 * GIB, 2 * GIB]
     monkeypatch.setattr(docker, "build_cache_bytes", lambda **_: caches.pop(0) if caches else None)
@@ -378,6 +381,87 @@ def test_carry_out_removes_old_builds_then_kept_then_cache_in_order(
         "Docker's build cache: removed, 28.0 GB freed.",
     )
     assert "prune" in calls and "-f" not in " ".join(calls)
+
+
+def test_an_old_build_held_only_by_its_projects_finished_container_is_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T864-E through the press: the container goes, then the image, and one line says so."""
+    calls, freed = _press_an_old_build_held_by(
+        tmp_path,
+        monkeypatch,
+        holders=(docker.ContainerRef("ac-db-import", "yulon-wow-coa-x"),),
+        still_held=False,
+    )
+    assert calls == ["ac-db-import"]
+    assert freed.lines[0] == "Yu'lon's old untagged builds: removed 1, up to 1.0 GB."
+
+
+def test_an_old_build_a_running_container_holds_is_left_by_the_press(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T864-E: the listing is finished containers only, so a running holder frees nothing."""
+    calls, freed = _press_an_old_build_held_by(tmp_path, monkeypatch, holders=(), still_held=True)
+    assert calls == []
+    assert freed.lines[0] == (
+        "Yu'lon's old untagged builds: removed 0, up to 0.0 GB. "
+        "1 still used by a container was left."
+    )
+
+
+def test_an_old_build_whose_finished_holder_is_another_project_is_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T864-E: the image's own project is the only one whose containers may be cleared."""
+    calls, freed = _press_an_old_build_held_by(
+        tmp_path,
+        monkeypatch,
+        holders=(docker.ContainerRef("other-import", "yulon-other"),),
+        still_held=False,
+    )
+    assert calls == []
+    assert freed.lines[0] == (
+        "Yu'lon's old untagged builds: removed 0, up to 0.0 GB. "
+        "1 still used by a container was left."
+    )
+
+
+def _press_an_old_build_held_by(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    holders: tuple[docker.ContainerRef, ...] | None,
+    still_held: bool,
+) -> tuple[list[str], docker_space.Freed]:
+    """One old build whose first `image rm` is refused by a container, through carry_out.
+
+    `still_held` keeps the retry refused, which is what a running holder (or a
+    removal that did not help) answers; False lets it succeed, as it does once
+    the finished one-shot container is gone.
+    """
+    calls: list[str] = []
+    old = (docker_space.OldBuild(image_id="aaa", size=GIB, project="yulon-wow-coa-x"),)
+    monkeypatch.setattr(docker_space, "_old_builds", lambda distro: old)
+    saids = [docker.IMAGE_IN_USE] + ([docker.IMAGE_IN_USE] * 3 if still_held else [""])
+
+    def remove_unused(image_id: str, **_: object) -> str:
+        return saids.pop(0) if saids else docker.IMAGE_IN_USE
+
+    monkeypatch.setattr(docker, "remove_unused_image", remove_unused)
+    monkeypatch.setattr(docker, "exited_containers_on", lambda image, **_: holders)
+    monkeypatch.setattr(
+        docker, "remove_finished_container", lambda name, **_: calls.append(name) or ""
+    )
+    monkeypatch.setattr(docker, "build_cache_bytes", lambda **_: None)
+    monkeypatch.setattr(docker, "prune_build_cache", lambda **_: "")
+    freed = docker_space.carry_out(
+        tmp_path,
+        docker_space.Choice(cache=False, old_builds=True, kept_build=False),
+        kept_build=None,
+        spec=None,
+        wsl_distro=None,
+    )
+    return calls, freed
 
 
 def test_unticked_kept_build_never_calls_remove(

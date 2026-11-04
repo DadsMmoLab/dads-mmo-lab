@@ -161,6 +161,74 @@ def test_at_most_one_failure_line_and_the_build_still_ends(tmp_path: Path) -> No
     assert before == [] and raising_calls != []
 
 
+def test_an_image_held_only_by_this_projects_finished_one_shot_is_removed(
+    tmp_path: Path,
+) -> None:
+    """T864-E: the recreate never selects ac-db-import, so its container kept the image.
+
+    Mutation: drop the project-label check in `remove_finished_holders_on()` and
+    the other-project test below fails; skip the retry and this one does.
+    """
+    rec = Recorder()
+    server_dir = _install(rec, tmp_path)
+    project = _project(server_dir, rec)
+    rec.dangling_ids = ("aaa",)
+    rec.in_use_once = {"aaa"}
+    rec.exited_holders = {"aaa": (docker.ContainerRef("ac-db-import", project),)}
+    said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert rec.exited_asked == ["aaa"]
+    assert rec.containers_removed == ["ac-db-import"]
+    # Asked twice: refused while the container held it, removed after the container went.
+    assert rec.unused_removed == ["aaa", "aaa"]
+    assert all("old images" not in line for line in said), said
+    assert said[-1] == f"{ENTRY.name} was rebuilt and is running in {server_dir}"
+
+
+def test_an_image_a_running_container_holds_is_left_alone(tmp_path: Path) -> None:
+    """T864-E: a RUNNING holder is not in the `status=exited` listing, so nothing goes."""
+    rec = Recorder()
+    server_dir = _install(rec, tmp_path)
+    rec.dangling_ids = ("aaa",)
+    rec.unused_answers = {"aaa": docker.IMAGE_IN_USE}
+    said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert rec.containers_removed == []
+    assert rec.unused_removed == ["aaa"]
+    assert all("old images" not in line for line in said), said
+    assert said[-1] == f"{ENTRY.name} was rebuilt and is running in {server_dir}"
+
+
+def test_an_image_whose_finished_holder_belongs_to_another_project_is_left_alone(
+    tmp_path: Path,
+) -> None:
+    """T864-E: an image id is not proof of ownership; another project's container stays."""
+    rec = Recorder()
+    server_dir = _install(rec, tmp_path)
+    rec.dangling_ids = ("aaa",)
+    rec.in_use_once = {"aaa"}
+    rec.exited_holders = {"aaa": (docker.ContainerRef("other-import", "yulon-other"),)}
+    said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert rec.containers_removed == []
+    assert rec.unused_removed == ["aaa"]
+    assert said[-1] == f"{ENTRY.name} was rebuilt and is running in {server_dir}"
+
+
+def test_a_listing_that_failed_leaves_the_image_and_the_build_ends(tmp_path: Path) -> None:
+    """T864-E: "the daemon did not answer" removes no container and fails no build."""
+    from yulon import docker_space
+
+    rec = Recorder()
+    server_dir = _install(rec, tmp_path)
+    rec.dangling_ids = ("aaa",)
+    rec.in_use_once = {"aaa"}
+    rec.exited_holders = {"aaa": None}
+    said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert rec.exited_asked == ["aaa"]
+    assert rec.containers_removed == []
+    assert rec.unused_removed == ["aaa"]
+    assert said.count(docker_space.OLD_IMAGES_NOT_REMOVED) == 0, said
+    assert said[-1] == f"{ENTRY.name} was rebuilt and is running in {server_dir}"
+
+
 def test_held_rebuilds_return_before_the_success_tail_so_they_never_list() -> None:
     """T739's held press returns before it; pinned here so a move of the call
     site into a finally (or ahead of the held return) breaks this, not review."""

@@ -36,6 +36,7 @@ image is named `-rollback`, not dangling, until the build ends).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -78,7 +79,8 @@ CACHE_NOTE = (
 )
 OLD_BUILDS_NOTE = (
     "Old images that earlier builds of Yu'lon's servers left behind with no name, including "
-    "servers you removed. One that a container still uses is left alone."
+    "servers you removed. One that a running container still uses is left alone; a finished "
+    "one-shot container holding one is removed with it, and the next start makes it again."
 )
 KEPT_NOTE = (
     f"The build this server kept from before its last rebuild. The next "
@@ -213,6 +215,56 @@ def _old_builds(wsl_distro: str | None) -> tuple[OldBuild, ...] | None:
     )
 
 
+def remove_finished_holders_on(
+    image_id: str,
+    project: str | None,
+    *,
+    listing: Callable[[str], tuple[docker.ContainerRef, ...] | None],
+    remove: Callable[[str], str],
+) -> int:
+    """Remove the finished one-shot containers of `project` holding `image_id` (T864-E).
+
+    Every container the daemon lists for the image must be finished (the
+    listing asks for `status=exited`) AND carry the same compose project as the
+    image, or nothing is removed. A container of another project, one with no
+    project label, or a listing the daemon would not answer leaves every
+    container and the image alone: those are the cases where the holder may be
+    somebody else's, and an image id is not proof of ownership.
+
+    **Why this is safe.** A one-shot service (`ac-db-import`,
+    `ac-client-data-init`, ...) runs once and exits; its container keeps the
+    pre-rebuild image referenced for ever because `compose up --force-recreate`
+    never selects that service, and nothing else was going to remove it. It has
+    no state of its own: what it wrote lives in the project's named volumes and
+    databases, and `docker rm` without `-v` does not touch those. The next
+    `compose up` recreates it from the current image if it is needed again.
+
+    Returns:
+        How many containers were actually removed. Zero means the caller leaves
+        the image where it is, exactly as before this ticket.
+    """
+    if project is None:
+        return 0
+    listed = listing(image_id)
+    if not listed:
+        return 0
+    if any(ref.project != project for ref in listed):
+        logger.info(
+            f"left the containers holding image {image_id}: not every one is of project {project} "
+            f"({', '.join(f'{ref.name}={ref.project!r}' for ref in listed)})"
+        )
+        return 0
+    removed = 0
+    for ref in listed:
+        said = remove(ref.name)
+        if said:
+            logger.warning(f"could not remove the finished container {ref.name}: {said}")
+            continue
+        logger.info(f"removed the finished container {ref.name}, which held old image {image_id}")
+        removed += 1
+    return removed
+
+
 def read_space(*, kept_build: KeptBuildRoute | None, wsl_distro: str | None) -> Space:
     """Read what Docker holds, for the dialog. Never raises for Docker's answers (T864)."""
     cache = docker.build_cache_bytes(wsl_distro=wsl_distro)
@@ -344,6 +396,25 @@ def _free_under_the_lease(
             failed = 0
             for build in listed:
                 said = docker.remove_unused_image(build.image_id, wsl_distro=wsl_distro)
+                if said == docker.IMAGE_IN_USE:
+                    # T864-E: a REBUILD never recreates the one-shot services (import,
+                    # client-data), so their EXITED containers keep the old image
+                    # referenced and every pass left it. Cleared here -- this project's
+                    # own finished containers only -- and the image asked for once more.
+                    # Counted in the log, never in the player's line: a container is
+                    # not space.
+                    cleared = remove_finished_holders_on(
+                        build.image_id,
+                        build.project,
+                        listing=lambda image: docker.exited_containers_on(
+                            image, wsl_distro=wsl_distro
+                        ),
+                        remove=lambda name: docker.remove_finished_container(
+                            name, wsl_distro=wsl_distro
+                        ),
+                    )
+                    if cleared:
+                        said = docker.remove_unused_image(build.image_id, wsl_distro=wsl_distro)
                 if said == "" or said == docker.IMAGE_GONE:
                     if said == "":
                         removed += 1

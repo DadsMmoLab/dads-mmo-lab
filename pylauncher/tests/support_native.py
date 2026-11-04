@@ -163,6 +163,22 @@ class Recorder:
     """What `remove_unused_image()` answers per id; `""` (removed) unless stated (T864)."""
     unused_removed: list[str] = field(default_factory=list)
     """Every image id `remove_unused_image()` was asked to remove, in order (T864)."""
+    in_use_once: set[str] = field(default_factory=set)
+    """Image ids `remove_unused_image()` answers `IMAGE_IN_USE` for ONCE, then as usual.
+
+    T864-E: the shape of the bug is "the first ask is refused by a finished
+    one-shot container, and the second ask, after that container is removed,
+    succeeds". A double that could only ever answer one way could not show the
+    retry happening.
+    """
+    exited_holders: dict[str, tuple[docker.ContainerRef, ...] | None] = field(default_factory=dict)
+    """What `exited_containers_on()` answers per image (T864-E); a missing key is ()."""
+    exited_asked: list[str] = field(default_factory=list)
+    """Every image `exited_containers_on()` was asked about, in order (T864-E)."""
+    containers_removed: list[str] = field(default_factory=list)
+    """Every container `remove_finished_container()` removed, in order (T864-E)."""
+    container_answers: dict[str, str] = field(default_factory=dict)
+    """What `remove_finished_container()` answers per name; `""` (gone) unless stated."""
     folder_size: int | None = None
     """What `native.folder_bytes()` answers (T203 fix round 3). `None`, "could not measure"."""
     folder_asked: list[Path] = field(default_factory=list)
@@ -1124,6 +1140,8 @@ class Recorder:
             images_built=self.images_built,
             build_cache_bytes=self.build_cache_bytes,
             dangling_image_ids=self.dangling_image_ids,
+            exited_containers_on=self.exited_containers_on,
+            remove_finished_container=self.remove_finished_container,
             remove_unused_image=self.remove_unused_image,
             folder_bytes=self.folder_bytes,
             image_id=self.image_id,
@@ -1219,7 +1237,20 @@ class Recorder:
     def remove_unused_image(self, image: str) -> str:
         """`docker.remove_unused_image()`: answers `unused_answers`, keeps the id (T864)."""
         self.unused_removed.append(image)
+        if image in self.in_use_once:
+            self.in_use_once.discard(image)
+            return docker.IMAGE_IN_USE
         return self.unused_answers.get(image, "")
+
+    def exited_containers_on(self, image: str) -> tuple[docker.ContainerRef, ...] | None:
+        """`docker.exited_containers_on()`: `exited_holders` per image, and what was asked."""
+        self.exited_asked.append(image)
+        return self.exited_holders.get(image, ())
+
+    def remove_finished_container(self, container: str) -> str:
+        """`docker.remove_finished_container()`: `container_answers`, and each name asked."""
+        self.containers_removed.append(container)
+        return self.container_answers.get(container, "")
 
     def folder_bytes(self, folder: Path) -> int | None:
         """`native.folder_bytes()`: answers `self.folder_size`, and keeps what it was asked."""

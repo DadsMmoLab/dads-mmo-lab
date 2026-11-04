@@ -7310,6 +7310,80 @@ def test_remove_image_reports_an_image_in_use_as_a_warning_not_a_failure(
     assert "in use" in docker.remove_image("yulon.local/ac-wotlk-authserver:native-1")
 
 
+# -- T864-E: the finished one-shot containers that keep an old image alive ---------
+
+
+def test_remove_finished_container_sends_a_plain_rm_and_never_a_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T864-E: never `-f` (a running holder must be refused) and never `-v` (a volume)."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        calls.append(cmd)
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.remove_finished_container("ac-db-import") == ""
+    assert calls == [["docker", "rm", "ac-db-import"]]
+    for cmd in calls:
+        for flag in ("-f", "--force", "-v", "--volumes"):
+            assert flag not in cmd, cmd
+
+
+def test_remove_finished_container_says_what_docker_said_when_it_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A container that will not go answers a non-empty sentence, never `""`."""
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(
+            1,
+            "",
+            "Error response from daemon: You cannot remove a running container abc",
+        ),
+    )
+    said = docker.remove_finished_container("ac-db-import")
+    assert said and "running container" in said
+
+
+def test_exited_containers_on_asks_ancestor_and_exited_and_keeps_name_and_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T864-E: the listing is scoped to one image AND to finished containers only."""
+    calls: list[list[str]] = []
+    stdout = "ac-db-import\tyulon-wow-coa-af665b68\nac-client-data-init\t\n"
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        calls.append(cmd)
+        return _completed(0, stdout, "")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    refs = docker.exited_containers_on("sha256:aaa")
+    assert calls[0][:2] == ["docker", "ps"]
+    assert "ancestor=sha256:aaa" in calls[0], calls[0]
+    assert "status=exited" in calls[0], calls[0]
+    # Mutation guard: a listing without the status filter offers a RUNNING
+    # container to the caller, which would end something the player is using.
+    assert [(ref.name, ref.project) for ref in refs or ()] == [
+        ("ac-db-import", "yulon-wow-coa-af665b68"),
+        ("ac-client-data-init", None),
+    ]
+
+
+def test_exited_containers_on_answers_none_when_the_listing_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """None, never `()`: "would not answer" must not read as "nothing holds it"."""
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: _completed(1, "", "daemon hung up"),
+    )
+    assert docker.exited_containers_on("sha256:aaa") is None
+
+
 def test_tag_image_gives_one_ref_a_second_name_and_touches_nothing_else(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

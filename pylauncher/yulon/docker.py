@@ -8258,6 +8258,62 @@ def image_facts(
     return tuple(rows)
 
 
+@dataclass(frozen=True)
+class ContainerRef:
+    """One container the daemon listed: its name and its compose project (T864-E).
+
+    `project` is the `com.docker.compose.project` label, or None when the
+    container carries none (something started by hand, or by a tool).
+    """
+
+    name: str
+    project: str | None
+
+
+def exited_containers_on(
+    image_id: str, *, wsl_distro: str | None = None
+) -> tuple[ContainerRef, ...] | None:
+    """The FINISHED containers created from `image_id`, or None when unlisted (T864-E).
+
+    A one-shot service's container (`ac-db-import`, `ac-client-data-init`, and
+    the like) keeps its image referenced after it exits, and a rebuild never
+    recreates it -- `compose up --force-recreate` does not select those
+    services -- so the old image cannot be removed until the finished container
+    is. `status=exited` is the safety line, not a convenience: a RUNNING or
+    paused container still holds its image on purpose, and the caller must leave
+    the image alone rather than end something the player is using.
+
+    A nonzero exit is None, never `()`: "the daemon would not answer" is not
+    "nothing holds it", and a caller that confused the two would go on to remove
+    an image whose holders it never saw.
+    """
+    proc = _docker(
+        [
+            "ps",
+            "-a",
+            "--filter",
+            f"ancestor={image_id}",
+            "--filter",
+            "status=exited",
+            "--format",
+            '{{.Names}}\t{{.Label "com.docker.compose.project"}}',
+        ],
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.info(f"could not list the containers on image {image_id}: {proc.stderr.strip()}")
+        return None
+    refs: list[ContainerRef] = []
+    for line in proc.stdout.splitlines():
+        name, _, project = line.partition("\t")
+        name = name.strip()
+        if not name:
+            logger.info(f"could not read a container listing line: {line!r}")
+            continue
+        refs.append(ContainerRef(name=name, project=project.strip() or None))
+    return tuple(refs)
+
+
 def _failure_said(proc: subprocess.CompletedProcess[str]) -> str:
     """What a nonzero exit said: stderr, else stdout, else the exit code (T864 review).
 
@@ -8288,6 +8344,32 @@ def remove_unused_image(image_id: str, *, wsl_distro: str | None = None) -> str:
         logger.debug(f"{image_id} is still held by a container: {said}")
         return IMAGE_IN_USE
     logger.warning(f"could not remove image {image_id}: {said}")
+    return said
+
+
+def remove_finished_container(name_or_id: str, *, wsl_distro: str | None = None) -> str:
+    """`docker rm <name_or_id>`: one FINISHED container only. `""` when it went (T864-E).
+
+    NEVER `-f`: a container that is somehow still running must be refused by the
+    daemon, not killed, because the image it holds is then left alone too.
+    NEVER `-v`: this is only ever a one-shot service's container, whose data
+    lives in the compose project's NAMED volumes; those are not touched by
+    `docker rm` at all, and asking for volume removal could only lose something.
+
+    Not `remove_container()`: that one is the `rm -f -v` the movement-map job's
+    container and the claim need (T846), and its force is the whole point there.
+    This asks the daemon to take a finished container and answers with the
+    daemon's own sentence when it will not, as `remove_unused_image()` does.
+
+    Returns:
+        `""` when the container is gone, otherwise what Docker said, never empty.
+    """
+    proc = _docker(["rm", name_or_id], wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        logger.info(f"removed container {name_or_id}")
+        return ""
+    said = _failure_said(proc)
+    logger.warning(f"could not remove container {name_or_id}: {said}")
     return said
 
 
