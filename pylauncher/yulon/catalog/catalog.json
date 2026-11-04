@@ -3138,8 +3138,6 @@
                         "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "150",
                         "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "150",
                         "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN": "1",
-                        "AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG": "0",
-                        "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG": "0",
                         "AC_AI_PLAYERBOT_SYNC_LEVEL_WITH_PLAYERS": "1",
                         "AC_AI_PLAYERBOT_RANDOM_BOT_CONCENTRATE_IN_PLAYER_ZONE": "0"
                     },

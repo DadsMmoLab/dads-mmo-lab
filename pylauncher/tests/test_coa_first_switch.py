@@ -484,6 +484,49 @@ def test_the_switch_keeps_the_bot_count_the_player_set(tmp_path: Path) -> None:
     assert any(key.endswith("MIN_RANDOM_BOTS") and value == "7" for key, value in env.items())
 
 
+def test_the_switch_keeps_the_player_battleground_line(tmp_path: Path) -> None:
+    """T872: the regenerated override drops the retired catalog line, not the player's own.
+
+    The override on disk still carries the player's own battleground line "1" (the
+    catalog used to set both keys, decision 1 drops them); the "Switch realm type"
+    press (the regeneration from decision 5) rewrites the override through
+    `composegen.render()`, whose environment holds neither key, so the player's
+    line is what stays and the key the player never set is gone (T872: env wins
+    over the conf, so setting them overruled the player; with no line at all the
+    conf decides).
+    """
+    import yaml
+
+    from yulon.catalog import composegen
+    from yulon.resources import installers_dir
+    from yulon.ui import controller_view
+
+    _new_install(tmp_path)
+    write_file(tmp_path, "coa")
+    first = composegen.render(
+        coa(),
+        tmp_path,
+        templates_root=installers_dir(),
+        db_password="coa-Zx81kQ2mPa",
+    )
+    assert "JOIN_BG" not in first.override, "control: the render lost both keys (decision 1)"
+    anchor = '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"\n'
+    assert anchor in first.override, "control: the anchor line moved"
+    old = '      AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG: "1"  # the player queues for battlegrounds\n'
+    on_disk = first.override.replace(anchor, anchor + old)
+    composegen._replace_whole(tmp_path / composegen.OVERRIDE_FILE, on_disk)
+    controller_view._write_realm_override(coa(), tmp_path, coa_realm.switch_env_for(coa(), "hero"))
+    env = next(
+        service
+        for name, service in yaml.safe_load(
+            (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+        )["services"].items()
+        if name.endswith("worldserver")
+    )["environment"]
+    assert env["AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG"] == "1", "the player's choice wins"
+    assert "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG" not in env, "the retired line is gone"
+
+
 def test_a_switch_that_failed_after_its_marker_finishes_on_the_next_press(
     tmp_path: Path,
 ) -> None:

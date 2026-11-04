@@ -2211,9 +2211,10 @@ def _write_realm_override(entry: CatalogEntry, server_dir: Path, env: Mapping[st
     other regeneration hands it (T812 C8 D10, the live run: "generates its
     database password per install, and none was given"): the folder's own
     password (`db_password`, as `channel_setup.enable()` and the reset read it),
-    the bind label the installed override already carries (else the host's
     answer, `channel_setup.install_bind_label`), the channel's enable while a
-    press is live, and the bot-count carry-over (`bot_count.world_env`). Then the
+    press is live, the bot-count carry-over (`bot_count.world_env`), and a player's
+    own battleground lines from the override on disk (T872: the catalog no longer
+    sets them, so only a line the player kept wins). Then the
     file's own writer (`_replace_whole`), whole or left as it was.
     """
     from yulon import channel_setup, coa_realm
@@ -2239,11 +2240,13 @@ def _write_realm_override(entry: CatalogEntry, server_dir: Path, env: Mapping[st
     operations = entry.operations
     if operations is not None and composegen.channel_world_env(entry, server_dir) is not None:
         base.update(operations.enable_env)
+    carried = dict(bot_count.world_env(entry, server_dir, base) or {})
+    carried.update(coa_realm.retired_bg_lines(entry, server_dir))
     plan = composegen.render(
         entry,
         server_dir,
         templates_root=installers_dir(),
-        world_env=bot_count.world_env(entry, server_dir, base),
+        world_env=carried,
         db_password=password,
         bind_label=label,
     )

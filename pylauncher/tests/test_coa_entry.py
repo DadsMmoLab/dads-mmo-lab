@@ -174,8 +174,6 @@ COA_ENV_KEYS = {
     "AiPlayerbot.MinRandomBots": "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS",
     "AiPlayerbot.MaxRandomBots": "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS",
     "AiPlayerbot.RandomBotAutologin": "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN",
-    "AiPlayerbot.RandomBotJoinBG": "AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG",
-    "AiPlayerbot.RandomBotAutoJoinBG": "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG",
     "AiPlayerbot.SyncLevelWithPlayers": "AC_AI_PLAYERBOT_SYNC_LEVEL_WITH_PLAYERS",
     "AiPlayerbot.RandomBotConcentrateInPlayerZone": (
         "AC_AI_PLAYERBOT_RANDOM_BOT_CONCENTRATE_IN_PLAYER_ZONE"
@@ -207,14 +205,69 @@ def test_every_coa_env_name_is_env_name_for_its_key() -> None:
         "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "150",
         "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "150",
         "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN": "1",
-        "AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG": "0",
-        "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG": "0",
         "AC_AI_PLAYERBOT_SYNC_LEVEL_WITH_PLAYERS": "1",
         "AC_AI_PLAYERBOT_RANDOM_BOT_CONCENTRATE_IN_PLAYER_ZONE": "0",
     }
     assert dict(env) == block_keys
     # Default bots from the setting (150), not a constant: the entry carries them.
     assert env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == env["AC_AI_PLAYERBOT_MAX_RANDOM_BOTS"] == "150"
+
+
+def test_coa_leaves_bot_battlegrounds_to_the_playerbots_conf() -> None:
+    """T872: the env wins over the conf, so setting these overruled the player (ticket T872)."""
+    for name in (
+        "AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG",
+        "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG",
+    ):
+        assert name not in composegen.world_env(coa())
+        for realm_type in coa().install.native.azerothcore.realm_types:  # type: ignore[union-attr]
+            assert name not in realm_type.world_env
+        assert name not in coa_rendered_override()
+
+
+def coa_rendered_override() -> str:
+    """The override `composegen.render()` writes for a CoA install on Linux."""
+    from yulon import resources
+
+    plan = composegen.render(
+        coa(),
+        Path("/home/user/wow-coa-server"),
+        templates_root=resources.installers_dir(),
+        db_password="snapshot-db-password",
+    )
+    return plan.override
+
+
+def test_coa_keeps_a_player_line_for_a_retired_battleground_key(tmp_path: Path) -> None:
+    """T872 decision 5: a player's own override line for either key is KEPT.
+
+    The catalog no longer sets either key (decision 1), so a regeneration drops
+    a line the player never set and keeps one the player did: `retired_bg_lines`
+    reads the override on disk with the line scanner (`catalog.compose_env`).
+    """
+    from yulon import coa_realm
+    from yulon.catalog import composegen
+    from yulon.resources import installers_dir
+
+    plan = composegen.render(
+        coa(),
+        tmp_path,
+        templates_root=installers_dir(),
+        db_password="snapshot-db-password",
+    )
+    assert "JOIN_BG" not in plan.override
+    anchor = '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"\n'
+    composegen._replace_whole(
+        tmp_path / composegen.OVERRIDE_FILE,
+        plan.override.replace(
+            anchor,
+            anchor + '      AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG: "0"\n',
+        ),
+    )
+    assert coa_realm.retired_bg_lines(coa(), tmp_path) == {
+        "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG": "0"
+    }
+    assert coa_realm.retired_bg_lines(coa(), tmp_path.parent / "absent") == {}
 
 
 def test_the_realm_types_are_the_four_db_suffixes_with_coa_default() -> None:

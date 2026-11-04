@@ -212,6 +212,52 @@ def switch_env_for(entry: CatalogEntry, type_id: str) -> dict[str, str]:
     return {**composegen.DEFAULT_WORLD_ENV, **base, **types[type_id].world_env}
 
 
+# -- T872: retired battleground keys a player's override still carries -----------
+
+RETIRED_BG_KEYS = (
+    "AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG",
+    "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG",
+)
+"""Env rows the CoA catalog used to set (removed from `world_env` by T872).
+
+An override on disk can still carry them, and a line there is read as the
+player's choice: the catalog no longer sets either, so a regeneration keeps
+what the file says and drops nothing by hand (T872: env wins over the conf, so
+setting them overruled the player; the conf decides only once the env is
+silent). Read with the line scanner (`catalog.compose_env`), which is what
+reads the file's `KEY: "value"` lines.
+"""
+
+
+def retired_bg_lines(entry: CatalogEntry, server_dir: Path) -> dict[str, str]:
+    """A player's own battleground lines from the override on disk, or `{}`.
+
+    What a writer that REGENERATES the override lays over `composegen.render()`:
+    the render's own environment already lost both keys, so only a line the file
+    still carries wins, and a file that never had one stays silent (then the
+    conf decides). A key named twice carries nothing: which of the two the
+    server reads is not a choice this can make.
+    """
+    from yulon import playerbots_keys
+    from yulon.catalog import compose_env, composegen
+
+    try:
+        text = (server_dir / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    lines = text.split("\n")
+    at = compose_env.env_lines(lines, entry.container_spec().world)
+    prefix = playerbots_keys.module_prefix(server_dir)
+    kept: dict[str, str] = {}
+    for name in RETIRED_BG_KEYS:
+        for spelling in playerbots_keys.reading_order(name, prefix, of_env=True):
+            spots = at.get(spelling, [])
+            if len(spots) == 1:
+                kept[name] = compose_env.env_value(lines[spots[0]])
+                break
+    return playerbots_keys.env_map(kept, prefix)
+
+
 class DatabaseUnreadable(RealmSwitchError):
     """A read a decision rests on could not be made: neither present nor absent.
 
