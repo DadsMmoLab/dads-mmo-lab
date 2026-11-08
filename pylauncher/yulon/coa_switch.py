@@ -464,5 +464,5 @@ def switch_import(
     try:
         after = seams.verify(probe, service, server_dir, run)
     except docker.DockerCommandError as exc:
-        raise coa_realm.RealmSwitchError(str(exc)) from exc
+        raise _with_detail_of(coa_realm.RealmSwitchError(str(exc)), exc) from exc
     yield f"The {context.target} databases now read as {after.state}."

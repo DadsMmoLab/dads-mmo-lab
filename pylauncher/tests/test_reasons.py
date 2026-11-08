@@ -211,3 +211,22 @@ def test_an_empty_reason_is_refused_and_changes_nothing(row: Any) -> None:
     assert first.isEnabled()
     assert first.toolTip() == "Apply the plan"
     assert line.isHidden()
+
+
+def test_drop_reason_if_keeps_a_different_reason(row: Any) -> None:
+    """A press greyed with another job's wait keeps it: only the exact reason is dropped (T877).
+
+    Mutation: drop the exact-match check in `drop_reason_if()`.
+    """
+    from yulon.ui.widgets.reasons import drop_reason_if, set_enabled_why
+
+    _root, first, _second, line = row
+    set_enabled_why(first, "Wait: B is running.", line)
+
+    assert drop_reason_if(first, "Wait: A is running.") is False
+
+    assert not first.isEnabled()
+    assert first.toolTip() == "Wait: B is running."
+    assert line.text() == "Wait: B is running."
+    assert drop_reason_if(first, "Wait: B is running.") is True
+    assert line.isHidden()

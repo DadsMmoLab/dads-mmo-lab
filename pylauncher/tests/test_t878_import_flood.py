@@ -11,6 +11,7 @@ The switch is the product's own (`coa_switch.switch_import` over fake docker sea
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -115,3 +116,32 @@ def test_a_failed_import_shows_its_last_lines_open_under_the_line(
     assert not details.isHidden() and not details.collapsed
     assert "import line" not in view.problem_label.text()
     assert len(view.problem_label.text().splitlines()) <= 6
+
+
+def test_a_rejected_database_check_keeps_the_importers_last_lines_open(
+    qapp: Any, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one-shot exits 0 but the check refuses the database: its `detail` still shows.
+
+    Mutation: drop `_with_detail_of()` from the `seams.verify()` refusal in `switch_import()`.
+    """
+    sql = FakeSql()
+    coa_schemas(sql)
+    fake = _Chatty(sql, FLOOD)
+
+    def reject(*_args: Any, **_kwargs: Any) -> docker.ImportState:
+        raise docker.DockerRefusal(
+            "The databases do not read as imported.", detail="the importer's last words"
+        )
+
+    seams = fake.seams()
+    seams = replace(seams, verify=reject)
+    fake.seams = lambda **_kw: seams  # type: ignore[method-assign]
+    view = _view(tmp_path, monkeypatch, fake, sql)
+
+    view.switch_realm_type()
+
+    details = view.problem_details
+    assert "the importer's last words" in details.text()
+    assert not details.isHidden() and not details.collapsed
+    assert "import line" not in view.problem_label.text()

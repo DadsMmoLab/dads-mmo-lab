@@ -12508,12 +12508,17 @@ class ControllerView(QWidget):
         that ends through `_set_busy(False)`, whichever press started it. A reason
         any later site gave a press (its own standing reason, a different wait) is kept.
         """
+        # A build job's end (`_rebuild_finished`) can have left Adopt greyed with "Wait: the
+        # server build is running." set by the build's own last step: the build is over, so
+        # dropping it is right (T877 review).
         for widget in self.findChildren(QWidget):
             drop_reason_if(widget, waited)
         for action in self.findChildren(QAction):
-            # A hidden action only: a shown one is offered again by whoever shows it, and
-            # `_bind_button_to_action()` refuses a shown, greyed button with no reason.
-            if not action.isVisible() and action.property(ControllerView._GREY_WHY) == waited:
+            # Shown actions only. A hidden one keeps its reason: nobody draws its button,
+            # `_offer_build_action()` gives the right one when it is shown again, and a
+            # reason cleared here makes that showing grey the button with no reason at all,
+            # which `_bind_button_to_action()` refuses with a ValueError in a Qt slot.
+            if action.isVisible() and action.property(ControllerView._GREY_WHY) == waited:
                 action.setProperty(ControllerView._GREY_WHY, None)
 
     def _ends_the_hold(self) -> bool:

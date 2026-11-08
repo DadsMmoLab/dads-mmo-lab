@@ -23,7 +23,7 @@ from tests.test_controller_view import (
 )
 from yulon import runner
 from yulon.catalog.catalog import load_catalog
-from yulon.ui.controller_view import ControllerServices, ControllerView
+from yulon.ui.controller_view import ControllerServices, ControllerView, wait_for
 from yulon.ui.widgets.job import run_inline
 
 _WAIT = re.compile(r"^Wait:.*is running", re.S)
@@ -48,6 +48,10 @@ def _stale(view: ControllerView) -> list[str]:
             if _WAIT.match(text):
                 found.append(f"{names.get(id(widget), type(widget).__name__)}: {text!r}")
     for action in view.findChildren(QAction):
+        if not action.isVisible():
+            # Never drawn, and its reason is kept on purpose (review): `_offer_build_action()`
+            # sets the right one when it is shown again.
+            continue
         for text in (action.text(), action.toolTip(), str(action.property("yulon_grey_why") or "")):
             if _WAIT.match(text):
                 found.append(f"{names.get(id(action), action.text())}: {text!r}")
@@ -129,3 +133,34 @@ def test_the_bot_rebuild_leaves_no_wait_after_it_ends(
     assert _stale(view) != [], "the sweep sees nothing while the job runs: the test proves nothing"
     view._bot_rebuild_finished(ok, "" if ok else "it failed")
     assert not _stale(view), "\n".join(_stale(view))
+
+
+def test_a_hidden_build_action_keeps_its_reason_so_showing_it_again_raises_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review: clearing a hidden action's wait made the later showing grey its button
+    with no reason, which `set_enabled_why()` refuses (a ValueError in a Qt slot).
+
+    Mutation: clear hidden actions' reasons in `_forget_the_wait()` again.
+    """
+    import sys
+
+    view = ControllerView(
+        TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
+    action = view.put_the_folders_back_action
+    assert not action.isVisible()
+    view._set_busy(True, "Start")
+    view._set_busy(False)
+    assert action.property(ControllerView._GREY_WHY) == wait_for("Start")
+
+    raised: list[BaseException] = []
+    monkeypatch.setattr(sys, "excepthook", lambda _kind, exc, _tb: raised.append(exc))
+    view._put_back_offered = True
+    action.setVisible(True)
+    view._offer_build_action(action)
+
+    assert raised == []
+    assert action.isEnabled()
+    button = view.put_the_folders_back_button
+    assert button.isEnabled() and "Wait:" not in button.toolTip()
