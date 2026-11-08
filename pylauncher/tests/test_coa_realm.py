@@ -2301,7 +2301,8 @@ def test_leaving_wildcard_keeps_none_of_its_keys(tmp_path: Path) -> None:
             world_env=wanted,
         )
         world = _world_environment(plan.override)
-        assert wildcard_only.isdisjoint(world), f"{target} kept {sorted(wildcard_only & set(world))}"
+        kept = sorted(wildcard_only & set(world))
+        assert wildcard_only.isdisjoint(world), f"{target} kept {kept}"
         for key in coa_realm.realm_type_keys(entry) & set(wanted):
             assert world[key] == wanted[key], (target, key)
 
