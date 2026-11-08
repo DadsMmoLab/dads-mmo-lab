@@ -213,6 +213,42 @@ def test_a_marker_missing_from_this_runs_log_says_unbound_did_not_load() -> None
     )
 
 
+def _reading(db: _Db, log: str) -> module_health.HealthReading:
+    assert HEALTH is not None
+    return module_health.reading(HEALTH, CHECKS, SCHEMAS, db, log, OFF)
+
+
+def test_only_the_line_missing_tells_a_late_line_from_a_fault_a_wait_cannot_mend() -> None:
+    """T876: a missing log line with good tables is 'only the line'; nothing else is."""
+    no_line = MARKERS.replace("[UNBOUND] Prereq map built.\n", "")
+    assert _reading(_Db(), no_line).only_the_line_missing
+    assert not _reading(_Db(), MARKERS).only_the_line_missing  # good
+    assert not _reading(_Db(missing=("unbound_milestones",)), no_line).only_the_line_missing
+    assert not _reading(_Db(counts={"unbound_class_catalog": 12}), no_line).only_the_line_missing
+    assert not _reading(_Db(counts={"creature": 7}), no_line).only_the_line_missing
+    assert not _reading(_Db(), "").only_the_line_missing  # unreadable log
+
+
+def test_only_the_line_missing_is_false_for_every_other_fault_beside_the_line() -> None:
+    """T876 review: the marker alone is true; the marker plus any other fault is not."""
+    line = "[UNBOUND] Prereq map built."
+    name = "Unbound"
+    assert module_health.HealthReading(name, absent_marker=line).only_the_line_missing
+    assert module_health.HealthReading(
+        name, absent_marker=line, placed=("Mentor", 9, 9)
+    ).only_the_line_missing
+    others = {
+        "missing": {"missing": ("unbound_milestones",)},
+        "short": {"short": (("unbound_class_catalog", 12, 1000),)},
+        "unreadable": {"unreadable": "the world's log could not be read"},
+        "placed short": {"placed": ("Mentor", 7, 9)},
+    }
+    for label, extra in others.items():
+        got = module_health.HealthReading(name, absent_marker=line, **extra)  # type: ignore[arg-type]
+        assert not got.only_the_line_missing, label
+    assert not module_health.HealthReading(name).only_the_line_missing  # no fault at all
+
+
 def test_the_button_the_sentence_names_is_on_the_logs_tab() -> None:
     from pathlib import Path
 
