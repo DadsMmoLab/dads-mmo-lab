@@ -7,6 +7,20 @@ You pick a game from the Catalog, click **Install**, and the app does the rest: 
 open-source server software, builds it, starts it, and gives you a control panel (start/stop,
 live console, accounts, modules, networking for friends).
 
+## User guide
+
+The step-by-step guide for players lives in [docs/](docs/index.md).
+
+Start here:
+
+1. [Download and start the app](docs/getting-started/download-and-start-the-app.md)
+2. [Pre-install checks](docs/getting-started/pre-install-checks.md)
+3. [Start, stop and restart your server](docs/running-a-server/start-stop-and-restart.md)
+4. [The Play button](docs/playing/the-play-button.md)
+5. [Common problems](docs/getting-started/common-problems.md)
+
+The four sections are [Getting started](docs/getting-started/index.md), [Running a server](docs/running-a-server/index.md), [Games and bots](docs/games-and-bots/index.md) and [Playing](docs/playing/index.md).
+
 ## What the app installs for you — and what that means under the hood
 
 The game servers run as **Docker** containers, and Docker needs a Linux kernel. Yu'lon hides
