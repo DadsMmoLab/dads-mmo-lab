@@ -24,6 +24,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from yulon import (
     database_presence,
@@ -538,8 +539,11 @@ class Controller:
                 if got.status not in ("in_use", "reserved"):
                     continue
                 program = platform.listening_program(port) if got.status == "in_use" else None
+            # Only reached when the status is one of the two (checked above, and again after
+            # the lingering-port wait), so this is the same word, typed as the two it can be.
+            kind: Literal["reserved", "in_use"] = "in_use" if got.status == "in_use" else "reserved"
             sentence = docker.blocked_port_sentence(
-                port, got.status, windows=windows, what=what, program=program or ""
+                port, kind, windows=windows, what=what, program=program or ""
             )
             logger.warning(f"start() refused: binding {host}:{port} answered {got.status}")
             # "bind" and the port on one line: the Server tab's channel rollback reads it.
