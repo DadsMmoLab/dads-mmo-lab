@@ -28,7 +28,7 @@ sources:
     title: "The update window"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:25:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -59,7 +59,7 @@ Yu'lon only installs a release it can prove. It checks the download against the 
 | Linux AppImage, Linux tar.gz folder, Windows zip folder | **Update now** | Downloads, checks, replaces itself and restarts. |
 | macOS | **Download** | Downloads and checks the `.dmg`, then opens it for you to install. |
 | A folder you cannot write to | **Download** | Saves the checked file into your Downloads folder. |
-| A release without a checksum list | **Open download page** | Opens the release page instead.[^detect] |
+| A release without a checksum list, or Yu'lon running from source | **Open download page** | Opens the release page instead.[^detect] |
 
 The project describes these update paths as written and unit-tested; the live proof on a real machine of each kind is still owed.[^pyreadme]
 
@@ -75,7 +75,7 @@ Yu'lon replaces only the files it shipped. Notes or saves you keep beside the pr
 - With the AppImage, the file inside `.yulon-old` is the version you had.
 
 [^pyreadme]: pylauncher/README.md, "Odds and ends": the daily check, the per-platform table, the SHA256SUMS rule, and the put-it-back steps. README.md "Updates" says the same.
-[^updatebar]: update_bar.py builds the "is available" line and the See what's new button.
-[^dialog]: update_dialog.py: the title, "Your game servers keep running while Yu'lon updates.", and Later and Skip this version.
-[^main]: main.py creates the Check for Yu'lon updates button inside Settings.
-[^detect]: selfupdate/detect.py chooses Update now, Download or Open download page.
+[^updatebar]: The update bar builds the "is available" line and the See what's new button.
+[^dialog]: The update window: the title, "Your game servers keep running while Yu'lon updates.", and Later and Skip this version.
+[^main]: The app creates the Check for Yu'lon updates button inside Settings.
+[^detect]: The update check chooses Update now, Download or Open download page.

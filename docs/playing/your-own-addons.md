@@ -22,7 +22,7 @@ sources:
     title: The add-on dialogs and messages
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -52,7 +52,7 @@ It goes into the game client you play with: the ready-to-play client when there 
 
 The game loads `Interface/AddOns/<Name>/<Name>.toc`, so Yu'lon names the add-on after its `.toc` file. A download called `pfUI-master` containing `pfUI.toc` becomes `pfUI`. Several add-ons in one source are all added.[^layout]
 
-It also checks the add-on is made for your client version. A very new add-on, from a later game version, is refused. A slightly older one is installed with an "out of date" note.[^layout]
+It also checks the add-on is made for your client version. An add-on for a different game version, later or from an older expansion, is refused. One slightly older within the same expansion is installed with an "out of date" note.[^layout]
 
 ## What Yu'lon refuses
 

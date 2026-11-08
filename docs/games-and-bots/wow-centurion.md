@@ -13,7 +13,7 @@ sources:
     title: "The Modules tab text for games without add-on modules"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -42,5 +42,5 @@ Bring your own English (enUS) 3.3.5a client, build 12340. Yu'lon makes a ready-t
 
 Questions about Centurion and its bots go to the Centurion Discord listed in the app's Help places. If the client step fails, see [Common problems](/getting-started/common-problems.md).
 
-[^catalog]: Description, client notes, bot counts and packs from catalog.json.
+[^catalog]: Description, client notes, bot counts and packs from the game catalog.
 [^view]: The Modules tab says the game has no add-on modules.

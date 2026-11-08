@@ -13,7 +13,7 @@ sources:
     title: "Default client add-ons"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -44,5 +44,5 @@ Only the custom Turtle-WoW 1.18.1 client (build 7272) works. Any other build wil
 
 Questions about the Tortoise server and the bots go to the Snapjaw Discord places listed in the app's Help places. For Yu'lon problems see [Common problems](/getting-started/common-problems.md).
 
-[^catalog]: Client, ranks, play limits, bot count and platforms from catalog.json.
+[^catalog]: Client, ranks, play limits, bot count and platforms from the game catalog.
 [^addons]: Default add-ons are put in at Play and at a fresh install, and a removed one stays removed.

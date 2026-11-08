@@ -10,7 +10,7 @@ sources:
     title: "The Catalog: every game, its client version, ports and bot counts"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -54,4 +54,4 @@ The Catalog also has servers that are not World of Warcraft:
 - Getting your client ready and patched: [Playing](/playing/index.md).
 - Running the server day to day: [Running a server](/running-a-server/index.md).
 
-[^catalog]: Names, status, client version, ports, platforms and bot counts come from the games section of catalog.json.
+[^catalog]: Names, status, client version, ports, platforms and bot counts come from the games section of the game catalog.

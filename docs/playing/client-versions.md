@@ -13,13 +13,13 @@ sources:
     title: How the program's build is checked
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
 # Which client each game needs
 
-Yu'lon never ships or downloads a game client. You bring one that matches the game. Pick its folder as described in [Point Yu'lon at your own game client](/playing/set-your-client-folder.md).
+Yu'lon never downloads or hands out a game client you don't already have. The only game files it fetches are ones you ask for: the Conquest of Azeroth files that **Update client** replaces in your own folder, and, for Centurion only, a stock `Wow.exe` when yours is not the unmodified one (one file, checked by hash first). You bring a client that matches the game. Pick its folder as described in [Point Yu'lon at your own game client](/playing/set-your-client-folder.md).
 
 | Game | Client you bring | Program Yu'lon starts |
 |---|---|---|

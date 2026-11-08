@@ -22,7 +22,7 @@ sources:
     title: "Release notes"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -75,7 +75,7 @@ If you press Start while the list is on a type the server is not running, a ques
 See also [Backups](/running-a-server/backups.md) and [Start, stop and restart](/running-a-server/start-stop-and-restart.md).
 
 [^view]: The Server tab's realm type list, the Switch realm type button and the Start question.
-[^catalog]: The realm_types section of wow-coa in catalog.json.
-[^realm]: coa_realm.py: parking, first-switch import, account copy and crash marker.
-[^switch]: coa_switch.py: the confirm text and the hold taken around a switch.
+[^catalog]: The realm_types section of wow-coa in the game catalog.
+[^realm]: The realm-type switch: parking, first-switch import, account copy and crash marker.
+[^switch]: The realm-type switch: the confirm text and the hold taken around a switch.
 [^changelog]: Release notes: realm list names, the button, the Start question, Wildcard fix.

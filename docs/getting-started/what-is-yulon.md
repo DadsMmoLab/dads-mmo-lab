@@ -16,7 +16,7 @@ sources:
     title: "Launcher README: what works where"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:20:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -45,7 +45,7 @@ Each tile has a short description of what that server is. Read it before you ins
 
 ## What you need to bring
 
-- **Your own game client.** Yu'lon never downloads, bundles or hands out game clients or game files. You point it at a client you already own.[^readme] Some servers ask for the folder during Install; for others the client is only needed when you press Play.
+- **Your own game client.** Yu'lon never downloads or hands out a game client you don't already have. The only game files it fetches are ones you ask for: the Conquest of Azeroth files that Update client replaces in your own folder, and, for Centurion only, a stock Wow.exe when yours is not the unmodified one (one file, checked by hash first). You point it at a client you already own.[^readme] Some servers ask for the folder during Install; for others the client is only needed when you press Play.
 - **Disk space and memory.** An install builds the server from source, so it needs room. See [Pre-install checks](/getting-started/pre-install-checks.md).
 - **Your computer's password once or twice**, when Yu'lon has to install system software. See [What Yu'lon installs](/getting-started/what-yulon-installs.md).
 
@@ -60,5 +60,5 @@ Yu'lon is open-source server software that you run yourself. Read the project's 
 3. [First run and the Catalog](/getting-started/first-run-and-the-catalog.md)
 
 [^readme]: README.md, "Project Yu'lon" and "What the app installs for you".
-[^catalog]: Names, status and descriptions come from catalog.json (eight games, two others under "Other games").
+[^catalog]: Names, status and descriptions come from the game catalog (eight games, two others under "Other games").
 [^pyreadme]: pylauncher/README.md says to read DISCLAIMER.md before running a server.

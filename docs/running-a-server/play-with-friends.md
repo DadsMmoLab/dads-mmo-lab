@@ -16,7 +16,7 @@ sources:
     title: Address handling for single-container servers
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T21:00:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -54,6 +54,8 @@ Yu'lon cannot change your router. For Internet play the plan ends with "You need
 2. Forward TCP (not UDP) for the two game ports to this computer. On the router look for "Port Forwarding", "Virtual Server" or "NAT".
 3. Your public address can change. If friends suddenly cannot connect, run Show plan and Apply again. A free dynamic DNS name (for example from duckdns.org) gives you one that stays put.
 4. People on your own network keep using this computer's LAN address; only remote players use the public address.
+
+Friends who use Yu'lon too can join with the friend launcher: see [The friend launcher](/playing/friend-launcher.md).
 
 If your internet provider uses carrier-grade NAT, the plan warns that you cannot accept port forwards and suggests asking for a public address or using a VPN.[^networking]
 

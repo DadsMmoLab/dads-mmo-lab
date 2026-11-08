@@ -10,7 +10,7 @@ sources:
     title: "The wow-unbound entry"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -42,4 +42,4 @@ You bring a 3.3.5a client, build 12340. Because the login port is different, the
 
 If the client cannot reach the realm, check first that the realmlist line ends in `:3725`. Bugs in the multi-class mod go to the Dad's MMO Lab Discord channel named in the app's Help places. Other trouble: [Common problems](/getting-started/common-problems.md).
 
-[^catalog]: Description, ports, client notes and platforms from catalog.json.
+[^catalog]: Description, ports, client notes and platforms from the game catalog.

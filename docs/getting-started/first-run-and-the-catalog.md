@@ -16,7 +16,7 @@ sources:
     title: "Games, statuses, descriptions"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:25:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -31,7 +31,7 @@ Across the top of the window are five buttons:[^sidebar]
 - **Launcher** - play on a friend's server without installing one here.
 - **Log** - Yu'lon's own logs, and a file to send when something goes wrong.
 - **Catalog** - browse and install server emulators.
-- **Servers** - choose an installed server. It says "No servers installed yet - install one from the Catalog" until you have one.
+- **Servers** - choose an installed server. Until you have one it is greyed out, and its tooltip says "No servers installed yet - install one from the Catalog".
 - **Settings** - change the colour theme, keep Yu'lon in the system tray, and start it at sign-in. See [Settings and themes](/getting-started/settings-and-themes.md).
 
 Each server you install also gets a short name on the left rail, for example "WotLK".
@@ -46,9 +46,9 @@ Each server you install also gets a short name on the left rail, for example "Wo
 
 ## Other buttons on a tile
 
-- **Use existing...** manages a server that is already installed, by a script or before this app. It works on every system.[^catalogview]
-- **Bring from another computer...** builds a server from a file packed on another computer.
-- **Find in WSL...** appears only on Windows when a Linux (WSL) distro exists. It adopts a server that already lives inside it, without moving it.
+- **Use existing...** manages a server that is already installed, by a script or before this app. It works on every system, and on every tile (World of Warcraft, DDON and DFO).[^catalogview]
+- **Bring from another computer...** builds a server from a file packed on another computer. It is on World of Warcraft tiles only; DDON and DFO tiles show just **Install** and **Use existing...**.
+- **Find in WSL...** is on World of Warcraft tiles only, and appears only on Windows when a Linux (WSL) distro exists. It adopts a server that already lives inside it, without moving it.
 - Once a game is installed, its **Install** button becomes **Open server**, which takes you to that server's tab.[^catalogview]
 
 ## What you'll see
@@ -59,5 +59,5 @@ If a game does not support your system, its tile says "Installer needs ... - not
 
 See [Common problems](/getting-started/common-problems.md).
 
-[^sidebar]: Button names and tooltips are set in sidebar.py.
-[^catalogview]: Labels and tile layout are in catalog_view.py; game list and descriptions in catalog.json.
+[^sidebar]: Button names and tooltips are set in the sidebar.
+[^catalogview]: Labels and tile layout are on the Catalog page; game list and descriptions in the game catalog.

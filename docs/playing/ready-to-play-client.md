@@ -16,13 +16,13 @@ sources:
     title: The Client box of the launcher window
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
 # The ready-to-play client
 
-Yu'lon does not point your own client at a server. It makes a copy of your client for each server, set up for that server, and Play starts the copy. Your own client is never changed for this server.[^client]
+Yu'lon does not point your own client at a server. It makes a copy of your client for each server, set up for that server, and Play starts the copy. Making and playing the copy never changes your own client. (Conquest of Azeroth's **Update client** is the one button that does, and it keeps a backup.)[^client] When the window lists files Yu'lon once put into your own client for this server's modules, the box "Also remove them from your original client" is there; it is unticked, and only files still exactly as Yu'lon copied them are removed.
 
 ## Why a copy
 

@@ -19,7 +19,7 @@ sources:
     title: "Prints the checks into the install log"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:25:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -76,7 +76,7 @@ Softer problems, such as few archives or an unexpected locale, are warnings. Yu'
 
 Fix what the refusal says, then press **Install** again. See [Common problems](/getting-started/common-problems.md).
 
-[^native]: native.py prints every check as one line in the install log.
-[^preflight]: Verdicts, check names and remedies are in preflight.py.
+[^native]: The install prints every check as one line in the install log.
+[^preflight]: Verdicts, check names and remedies come from the pre-install checks.
 [^catalogjson]: min and warn numbers are in each game's native section.
-[^clientdir]: Client folder rules are in catalog/families/clientdir.py.
+[^clientdir]: The client folder rules come from the install checks.

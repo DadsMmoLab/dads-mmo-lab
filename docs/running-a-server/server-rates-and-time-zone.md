@@ -16,7 +16,7 @@ sources:
     title: The time zone box and its labels
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T21:00:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -56,7 +56,7 @@ The server's clock decides when daily quests reset, when calendar events start a
 2. If you chose a region, pick the place in the second drop-down.
 3. Press **Apply...** and answer the question.
 
-You pick from lists; you do not type a zone. Yu'lon changes only the TZ lines in the server's compose override file and makes a backup of it first.[^zone]
+You pick from lists; you do not type a zone. Yu'lon changes only the time zone setting in the server's the server's Docker settings file and makes a backup of it first.[^zone]
 
 ### What you'll see
 
@@ -65,9 +65,9 @@ The question explains what changes. The running server keeps its time zone until
 ## If something goes wrong
 
 - "... is not on disk, so there is no time zone to read or change. Repair the server to write it again."
-- If the compose files were not made by Yu'lon, Yu'lon does not rewrite them and tells you to set TZ yourself.[^zone]
+- If the server's Docker settings files were not made by Yu'lon, Yu'lon does not rewrite them and tells you to set TZ yourself.[^zone]
 - If TZ appears more than once, remove the extra line and press Reload.
-- Box missing: games whose compose files Yu'lon does not make have no time zone box.[^zone]
+- Box missing: games whose Docker settings files Yu'lon does not make have no time zone box.[^zone]
 - See [Troubleshooting](/running-a-server/troubleshooting.md).
 
 [^rates]: The rows, limits and notes are in the server rates module.

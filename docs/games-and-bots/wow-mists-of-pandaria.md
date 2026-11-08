@@ -16,7 +16,7 @@ sources:
     title: "Release notes"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -33,7 +33,7 @@ The build is 18414. The Recall client logs in to this server with no exe patch, 
 ## What is special
 
 - Bots level from 1 to 90, Pandaria included.[^catalog]
-- The first Mists of Pandaria install appeared in release v0.9.31.[^changelog]
+- Mists of Pandaria is a new game in the Catalog.[^changelog]
 - On Windows, the map data is built inside Docker rather than through the slow Windows folder share.[^changelog]
 - It needs more memory than most: see [Pre-install checks](/getting-started/pre-install-checks.md).
 - Linux and Windows.[^catalog]
@@ -48,6 +48,6 @@ The build is 18414. The Recall client logs in to this server with no exe patch, 
 
 Bugs in the server and its bots go to the LoA Pandaria project (listed in the app's Help places). If the client check refuses, make sure you unpacked the Recall folder fully. More: [Common problems](/getting-started/common-problems.md).
 
-[^catalog]: Description, client notes, build, bot count and platforms from catalog.json.
-[^changelog]: v0.9.31 release notes.
+[^catalog]: Description, client notes, build, bot count and platforms from the game catalog.
+[^changelog]: The release notes where this game first appeared.
 [^chars]: The list of actions confirmed on a live server is empty for Mists of Pandaria.

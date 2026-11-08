@@ -22,7 +22,7 @@ sources:
     title: "Default client add-ons"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -67,8 +67,8 @@ Tortoise and Conquest of Azeroth put their own bot add-ons into your game client
 - [Playerbots settings and playerbots.conf](/games-and-bots/playerbots-conf.md)
 - [Games at a glance](/games-and-bots/games-overview.md)
 
-[^catalog]: Bot counts and bot markers per game from catalog.json.
-[^botlist]: botlist.py: the two signals (registry and account prefix) only exist on WotLK-style servers.
+[^catalog]: Bot counts and bot markers per game from the game catalog.
+[^botlist]: The bot list: the two signals (registry and account prefix) only exist on WotLK-style servers.
 [^view]: The Bots tab and its groups in the server view.
-[^citybots]: city_bots_guard.py: the range, the name prefix and the refusal.
-[^addons]: default_addons.py: Tortoise and Conquest of Azeroth default add-ons.
+[^citybots]: The City bots safeguard: the range, the name prefix and the refusal.
+[^addons]: The default add-ons step: Tortoise and Conquest of Azeroth default add-ons.

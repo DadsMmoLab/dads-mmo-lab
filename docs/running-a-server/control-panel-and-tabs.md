@@ -16,7 +16,7 @@ sources:
     title: The realm badge words
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T21:00:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -47,7 +47,7 @@ What a tab offers depends on the game. A button that does not apply to your game
 ## The Server tab, section by section
 
 - **Realm** shows the status line and the Start, Stop, Restart and Refresh buttons. The status line reads like "Database running · Login server running · World server running".[^view]
-- **Play** and **Client** hold the game-client buttons. Yu'lon never ships a game client; you bring your own.
+- **Play** and **Client** hold the game-client buttons. Yu'lon never hands out a game client you don't already have; you bring your own (see [Point Yu'lon at your own game client](/playing/set-your-client-folder.md)).
 - **Command channel** is how Yu'lon talks to the running server. It has a **Test the console** button where the game supports it.[^view]
 - **Help** opens help pages for the game, where there are any.
 - **Danger zone** removes the server. See [Remove or uninstall a server](/running-a-server/remove-or-uninstall.md).

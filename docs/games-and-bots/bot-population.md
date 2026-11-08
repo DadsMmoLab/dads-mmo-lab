@@ -16,7 +16,7 @@ sources:
     title: "The Random bots box and the delete/rebuild texts"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -41,7 +41,7 @@ The running server keeps its current bots until it is restarted. On WotLK, Unbou
 
 | Servers | Kept in |
 |---|---|
-| WotLK, Unbound, Conquest of Azeroth | The server's container settings (the compose override). Only the two bot-count lines change. |
+| WotLK, Unbound, Conquest of Azeroth | The server's container settings (the server's Docker settings file). Only the two bot-count lines change. |
 | TBC, Vanilla, Tortoise | `aiplayerbot.conf` in the server's etc folder. On the Tuning tab it appears as the "Playerbots (server settings)" card; **Revert** there puts the old file back. |
 | Mists of Pandaria | `playerbots.conf` in the etc folder |
 | Centurion | `playerbots.conf` in the etc folder, as "RandomPopulation" target lowest and highest |
@@ -61,9 +61,9 @@ The running server keeps its current bots until it is restarted. On WotLK, Unbou
 ## If something goes wrong
 
 - "... is not on disk": Repair the server so the file is written again.
-- "... were not made by Yu'lon": Yu'lon will not rewrite a compose file it did not write; change the number in that file yourself.
+- "... were not made by Yu'lon": Yu'lon will not rewrite a Docker settings file it did not write; change the number in that file yourself.
 - "The bot count was NOT changed": nothing was written; read the reason shown and press Apply again.[^pop][^view]
 
-[^pop]: bot_population.py: routes, ceilings, questions and refusals.
-[^count]: bot_count.py: the count a rewrite carries over from the file on disk.
+[^pop]: The bot population controls: routes, ceilings, questions and refusals.
+[^count]: The bot count step: the count a rewrite carries over from the file on disk.
 [^view]: Texts of the Random bots box, Rebuild and Delete dialogs.

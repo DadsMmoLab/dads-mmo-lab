@@ -16,7 +16,7 @@ sources:
     title: The realm badge words
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T21:00:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -49,7 +49,7 @@ Another Yu'lon of yours holds the server. A Stop names what it is doing and asks
 
 ## CRASH LOOP or UPDATE FAILED
 
-The world keeps restarting, or a database update failed. Open the **Console** tab and press **Follow worldserver log** ([Console and server commands](/running-a-server/console-and-server-commands.md)). If it started after you added a module, remove the module and rebuild ([Install, remove and update modules](/running-a-server/modules.md)). If it started after an update, use **Return to the tested pin...** ([Update or rebuild the server](/running-a-server/update-and-rebuild.md)).[^badge]
+The world keeps restarting, or a database update failed. Open the **Console** tab and press **Follow worldserver log** ([Console and server commands](/running-a-server/console-and-server-commands.md)). If it started after you added a module, remove the module and rebuild ([Install, remove and update modules](/running-a-server/modules.md)). If it started after an update, use **Return to the tested pin...** ([Update or rebuild the server](/running-a-server/update-and-rebuild.md)). If your databases are already ahead of the tested version, Yu'lon will not go back and names the backup from before the update to restore instead.[^badge]
 
 ## "Table ... is marked as crashed"
 
@@ -61,7 +61,7 @@ Use **Repair the database...**, then restore a backup ([Repair damaged tables](/
 
 ## Docker files differ from this Yu'lon
 
-A banner says the server's `docker-compose.yml` differs from what this version writes (another version wrote it, or it was edited by hand). **Repair server files...** writes it again the way this version does and keeps your current file as a backup. Nothing changes until you press it. Applying it may need **Recreate containers...**.[^view]
+A banner says the server's Docker settings file differs from what this version writes (another version wrote it, or it was edited by hand). **Repair server files...** writes it again the way this version does and keeps your current file as a backup. Nothing changes until you press it. Applying it may need **Recreate containers...**.[^view]
 
 ## Friends cannot connect
 

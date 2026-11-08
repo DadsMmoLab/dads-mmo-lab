@@ -22,13 +22,13 @@ sources:
     title: Which games have packs and updates
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
 # Client updates, patches and extras
 
-Yu'lon never downloads the game itself. It does fetch small extras for the client: patches a server needs, optional packs, and, for Conquest of Azeroth, updates to your own client.[^packs]
+Yu'lon never downloads or hands out a game client you don't already have. The only game files it fetches are ones you ask for: the Conquest of Azeroth files that **Update client** replaces in your own folder, and, for Centurion only, a stock `Wow.exe` when yours is not the unmodified one (one file, checked by hash first). Besides that it fetches small extras: patches a server needs and optional packs.[^packs]
 
 ## Update client (Conquest of Azeroth)
 
@@ -49,7 +49,7 @@ To go back, use the **▾** menu beside Play: **Undo the last client update…**
 
 Where a server has optional extras, the **▾** menu beside Play has **Client options…**. That is WoW WotLK, WoW Unbound and Centurion. The window lists the optional packs as checkboxes: for example the Lumenveil graphics mod (Windows only), ConsolePort controller support, and Centurion's HD packs. Centurion also has a Wow.exe option, borderless full screen. The window says how much the required download is. Required packs are not a choice: they are fetched at Play. Tick what you want and press **Save**. The change is applied at your next Play: packs are downloaded and installed, or removed, then.[^catalog][^view] Optional packs that are off by default stay off until you tick them.
 
-Downloads go over https to the host the server names, and a file is checked before it is used. A pack whose address no longer answers is shown as unavailable.[^packs] A pack with a newer version shows an **Update** button.
+Optional packs are fetched over https from the hosts the server's entry names, and checked before use. The server's required patch files come from the server install. A pack whose address no longer answers is shown as unavailable.[^packs] A pack with a newer version shows an **Update** button.
 
 ## After your own client is patched
 

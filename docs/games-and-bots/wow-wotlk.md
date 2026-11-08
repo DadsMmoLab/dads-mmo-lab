@@ -13,7 +13,7 @@ sources:
     title: "My Party: which games have it"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -42,5 +42,5 @@ You bring your own 3.3.5a client, build 12340. In the client, the realmlist line
 
 Bugs that also happen without the bots belong to AzerothCore; bugs in the bots belong to mod-playerbots. The app's Help places list shows where to report each one. For problems with Yu'lon itself, see [Common problems](/getting-started/common-problems.md).
 
-[^catalog]: Description, client, ports, bot count and platforms from catalog.json.
+[^catalog]: Description, client, ports, bot count and platforms from the game catalog.
 [^party]: My Party is offered for wow-wotlk and wow-unbound only.

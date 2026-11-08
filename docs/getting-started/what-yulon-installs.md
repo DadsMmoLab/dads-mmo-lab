@@ -19,7 +19,7 @@ sources:
     title: "The install engine and its Docker setup messages"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:20:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -60,7 +60,7 @@ SteamOS keeps its system files read-only. Yu'lon unlocks them to install Docker 
 
 Every game installs on Linux and Windows except where a tile says otherwise. On macOS only WotLK and WoW Unbound can be installed.[^readme] On a platform a game does not support, the tile says "Installer needs ..." and the **Install** button is disabled.
 
-[^readme]: README.md, the table "What the app installs for you" and the list of things it cannot do silently. The macOS limit is in pylauncher/README.md and catalog.json (install platforms).
+[^readme]: README.md, the table "What the app installs for you" and the list of things it cannot do silently. The macOS limit is in pylauncher/README.md and the game catalog (install platforms).
 [^catalogjson]: Install platforms per game.
 [^native]: The Docker Desktop wait message.
-[^platform]: Question and message texts are in platform.py (sudo password, docker group, Docker start, SteamOS repair) and catalog/native.py (the Docker Desktop wait message).
+[^platform]: Question and message texts come from the system checks (sudo password, docker group, Docker start, SteamOS repair) and the install steps (the Docker Desktop wait message).

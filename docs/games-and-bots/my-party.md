@@ -16,7 +16,7 @@ sources:
     title: "Where the panel sits on the Bots tab"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -59,6 +59,6 @@ The panel says "Working -- the server is being asked. This can take a few second
 
 See also [Playerbots: what they are](/games-and-bots/playerbots-overview.md).
 
-[^party]: party.py: only wow-wotlk and wow-unbound qualify, and the bridge is proven by the server answering.
-[^panel]: party_panel.py: button labels, refusals and the two-press gestures.
+[^party]: The My Party check: only wow-wotlk and wow-unbound qualify, and the bridge is proven by the server answering.
+[^panel]: The My Party panel: button labels, refusals and the two-press gestures.
 [^view]: The message shown on other servers.

@@ -22,7 +22,7 @@ sources:
     title: "Default client add-ons"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -60,8 +60,8 @@ The realmlist line for the client is `127.0.0.1:3726`, or the host's LAN or publ
 
 If you are disconnected right after choosing the realm, your client is probably the stock Ascension one: press **Update client**. If a realm type switch fails, see [CoA realm types](/games-and-bots/coa-realm-types.md). Other trouble: [Common problems](/getting-started/common-problems.md).
 
-[^catalog]: Description, client notes, ports, bot keys and requirements from catalog.json.
-[^coaclient]: coa_client.py tells the CoA client from the stock Ascension one by Extensions.dll and Ascension.exe against the CoA manifest.
+[^catalog]: Description, client notes, ports, bot keys and requirements from the game catalog.
+[^coaclient]: The install checks tell the CoA client from the stock Ascension one by Extensions.dll and Ascension.exe against the CoA manifest.
 [^changelog]: Release notes for Update client, HD patches, update to latest and the stop option.
 [^update]: The tooltip and Undo button text in the client update code.
 [^addons]: SquidBots Lite is a default add-on, installed at a fresh install and put back at Play unless removed.

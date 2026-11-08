@@ -10,7 +10,7 @@ sources:
     title: "The wow-vanilla entry"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -39,4 +39,4 @@ You bring your own 1.12.1 client. The server accepts build 5875, and also builds
 
 Bugs in the Vanilla server and in the bots are reported to the cMaNGOS project; the app's Help places list has the link. For install trouble, see [Common problems](/getting-started/common-problems.md).
 
-[^catalog]: Client builds, bot keys, play limits and platforms from catalog.json.
+[^catalog]: Client builds, bot keys, play limits and platforms from the game catalog.

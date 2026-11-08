@@ -19,7 +19,7 @@ sources:
     title: "The Settings button"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:25:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -71,6 +71,6 @@ If your desktop has no system tray, Yu'lon says so: "This desktop has no system 
 If a setting cannot be saved, Yu'lon tells you it "lasts only until Yu'lon closes". If starting at sign-in cannot be turned on or off, it shows the reason.[^settings]
 
 [^sidebar]: The tooltip on Settings reads "Change the color theme, keep Yu'lon in the system tray, and start it at sign-in".
-[^settings]: Labels and messages are in tray_settings.py (SettingsView).
-[^themespec]: theme_spec.py: DEFAULT_THEME is arthas; the themes folder is created and seeded by sync_user_themes.
-[^themes]: The bundled themes are the .json files in ui/themes.
+[^settings]: Labels and messages are on the Settings page.
+[^themespec]: The default theme is arthas; the themes folder is created and filled with the bundled themes by the app.
+[^themes]: The bundled themes ship with the app.

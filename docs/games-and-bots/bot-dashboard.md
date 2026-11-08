@@ -7,7 +7,7 @@ resource: pylauncher/yulon/catalog/bot_dashboard.py
 sources:
   - id: dash
     resource: pylauncher/yulon/catalog/bot_dashboard.py
-    title: "What the switch writes: three conf keys and one compose block"
+    title: "What the switch writes: three conf keys and one Docker settings block"
   - id: tort
     resource: pylauncher/yulon/controller_wow_tortoise/botdash.py
     title: "The Docker half: image, container, restart"
@@ -16,7 +16,7 @@ sources:
     title: "The Bot dashboard group and its texts"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -37,9 +37,9 @@ You sign in with one of your game accounts that has GM rank 2 or higher.[^view][
 
 ## What you'll see
 
-Yu'lon uses TortoiseBots' ready-made program when one fits your bots module, checked against its published checksum. If none fits, it builds the module's own, which takes a few minutes the first time.[^view][^tort] It turns on the module's telemetry in `tortoise_bots.conf`, keeping a copy, adds one service to your `docker-compose.yml`, starts it, and restarts the server if it was running so the bots module finds the dashboard. Anyone playing is disconnected for a few minutes.[^view]
+Yu'lon uses TortoiseBots' ready-made program when one fits your bots module, checked against its published checksum. If none fits, it builds the module's own, which takes a few minutes the first time.[^view][^tort] It turns on the module's telemetry in `tortoise_bots.conf`, keeping a copy, adds one service to the server's Docker settings file, starts it, and restarts the server if it was running so the bots module finds the dashboard. Anyone playing is disconnected for a few minutes.[^view]
 
-Each install gets its own random session secret, and no password is ever written into the compose file.[^dash]
+Each install gets its own random session secret, and no password is ever written into the server's Docker settings file.[^dash]
 
 ## Other devices on your network
 
@@ -47,7 +47,7 @@ By default only this PC can open the dashboard. **Allow other devices on my netw
 
 ## Switch it off
 
-Untick the box and confirm. The dashboard is stopped and removed from the compose file, and the three telemetry settings go back to what they were before you switched it on. If you changed those three by hand since, your changes to them are replaced. The app offers a server restart; skipping it does no harm.[^view]
+Untick the box and confirm. The dashboard is stopped and removed from the server's Docker settings file, and the three telemetry settings go back to what they were before you switched it on. If you changed those three by hand since, your changes to them are replaced. The app offers a server restart; skipping it does no harm.[^view]
 
 ## After a server update
 
@@ -59,6 +59,6 @@ When an update moves the bots module, Yu'lon rebuilds the dashboard for it. If t
 - If you cannot sign in, check that the account has GM rank 2 or higher: see [Game accounts](/running-a-server/game-accounts.md).
 - Other trouble: [Common problems](/getting-started/common-problems.md).
 
-[^dash]: bot_dashboard.py: port 8095, minimum GM level, the three conf keys, the compose block and the rebuild-owed record.
-[^tort]: botdash.py: the on and off sequence; wired only for Tortoise.
+[^dash]: The dashboard switch: port 8095, minimum GM level, the three conf keys, the Docker settings block and the rebuild-owed record.
+[^tort]: The Tortoise dashboard switch: the on and off sequence; wired only for Tortoise.
 [^view]: Texts and buttons of the Bot dashboard group.

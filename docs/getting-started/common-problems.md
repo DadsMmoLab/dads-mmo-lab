@@ -31,7 +31,7 @@ sources:
     title: "The Docker banner and its buttons"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:25:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -95,10 +95,10 @@ That is the unsigned-app warning. Choose "Run anyway" (Windows) or right-click a
 
 Open **Log** in the top bar and press **Save logs for support...**. The zip has passwords taken out. Send it when you ask for help. See [Where Yu'lon keeps its files](/getting-started/where-files-live.md).
 
-[^catalogview]: Titles and messages in catalog_view.py: "Cannot install yet", "Install stopped", "Another job is still running."
-[^platform]: Docker, Compose, WSL2, folder and SteamOS texts are in platform.py.
-[^banner]: docker_banner.py defines the two buttons.
-[^preflight]: preflight.py remedies for memory, space, folder sharing and ports.
-[^clientdir]: clientdir.py refusal sentences.
+[^catalogview]: Titles and messages on the Catalog page: "Cannot install yet", "Install stopped", "Another job is still running."
+[^platform]: Docker, Compose, WSL2, folder and SteamOS texts come from the system checks.
+[^banner]: The Docker banner defines the two buttons.
+[^preflight]: The pre-install checks give remedies for memory, space, folder sharing and ports.
+[^clientdir]: The client folder checks give the refusal sentences.
 [^pyreadme]: pylauncher/README.md, FUSE paragraph.
-[^changelog]: CHANGELOG.md, v0.9.31-Public: Free Docker space... on Backups & updates.
+[^changelog]: The release notes: Free Docker space... on Backups & updates.

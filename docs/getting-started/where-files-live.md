@@ -28,7 +28,7 @@ sources:
     title: "Launcher README, odds and ends"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:25:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -68,9 +68,9 @@ You do not have to dig through folders for logs. Open **Log** in the top bar, or
 If an update stops part-way, Yu'lon may leave hidden folders named `.yulon-new`, `.yulon-download` and `.yulon-old` next to the app. They are removed the next time the new version starts. See [Updating Yu'lon](/getting-started/updating-yulon.md).[^pyreadme]
 
 [^readme]: README.md, "Where things live".
-[^platform]: platform.py `config_dir()`; the log and downloads folder names are in log.py and platform.py.
-[^state]: state.py names the file state.json.
+[^platform]: The settings folder, the log folder and the downloads folder names are set by the app for each system.
+[^state]: The app keeps its remembered state in one file named state.json.
 [^pyreadme]: pylauncher/README.md, "Odds and ends".
-[^themespec]: theme_spec.py puts custom themes in `<config folder>/themes`.
-[^logsview]: logs_view.py: the button text and its tooltip.
-[^catalogjson]: default_server_dir in catalog.json.
+[^themespec]: Custom themes go in themes in `<config folder>/themes`.
+[^logsview]: The Logs page: the button text and its tooltip.
+[^catalogjson]: default_server_dir in the game catalog.

@@ -16,7 +16,7 @@ sources:
     title: "Default folders, client-folder requirement"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:25:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -56,6 +56,6 @@ The tile's **Install** button turns into **Open server**. A new tab for the serv
 
 The images it builds and the volumes holding the database and server data live in Docker's own storage. Docker itself is installed if it is missing. And Yu'lon's own settings and log go in its config folder. See [Where Yu'lon keeps its files](/getting-started/where-files-live.md).[^native]
 
-[^native]: The opening note and the closing line are in catalog/native.py.
-[^catalogjson]: default_server_dir and requires_client_dir per game in catalog.json.
-[^catalogview]: Dialog titles, button labels and messages are in ui/catalog_view.py.
+[^native]: The opening note and the closing line are in the install steps.
+[^catalogjson]: default_server_dir and requires_client_dir per game in the game catalog.
+[^catalogview]: Dialog titles, button labels and messages are on the Catalog page.

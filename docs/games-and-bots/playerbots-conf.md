@@ -22,7 +22,7 @@ sources:
     title: "Release notes"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -72,8 +72,8 @@ The bots module renamed its settings from `AiPlayerbot.` to `Playerbots.`. Yu'lo
 
 If you change a setting and nothing happens, the container environment may be overriding it, or the server needs a restart. Reset to default on the Tuning tab puts back the installed values. See [Update and rebuild](/running-a-server/update-and-rebuild.md).
 
-[^catalog]: The conf tables and world environment of each game in catalog.json.
-[^pop]: bot_population.py: environment wins over playerbots.conf; the Tuning card.
-[^realm]: coa_realm.py: the retired battleground lines are dropped only when their value is 0.
-[^keys]: playerbots_keys.py: the prefix rename and how it is read from the checkout.
+[^catalog]: The conf tables and world environment of each game in the game catalog.
+[^pop]: The bot population controls: environment wins over playerbots.conf; the Tuning card.
+[^realm]: The realm-type switch: the retired battleground lines are dropped only when their value is 0.
+[^keys]: The playerbots settings step: the prefix rename and how it is read from the checkout.
 [^changelog]: Release notes: battleground settings take effect from the next Start.

@@ -19,7 +19,7 @@ sources:
     title: SquidBots Lite manifest
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -60,7 +60,7 @@ The add-on shows as installed on the Modules tab, and a Tortoise server's update
 ## If something goes wrong
 
 - A failed install at start-up is left alone for a day before Yu'lon tries again, so it does not retry at every start.[^default]
-- Yu'lon writes into the client folder you set: see [Point Yu'lon at your own game client](/playing/set-your-client-folder.md).
+- Yu'lon writes into the client you play with: the ready-to-play client when there is one, else the folder you set. See [Point Yu'lon at your own game client](/playing/set-your-client-folder.md).
 - The module side of add-ons is in [Install, remove and update modules](/running-a-server/modules.md).
 
 [^default]: The defaults, when they are put in and how a removal is remembered are in the default add-ons module.

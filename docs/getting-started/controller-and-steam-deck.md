@@ -22,7 +22,7 @@ sources:
     title: "How controller features are worded and their status"
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:25:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -74,8 +74,8 @@ This is new and has not been tested on a Steam Deck yet. The catalog asks you to
 - **Docker is gone after a SteamOS update:** see [Common problems](/getting-started/common-problems.md).
 - **Nothing reacts to the controller:** Yu'lon reads the pad through SDL. If that part is not available on your machine, the pad does nothing, but the keyboard keys above still work.[^gamepad]
 
-[^gamepad]: gamepad.py: A, B, LB and RB are the only mapped buttons; the D-pad and left stick move focus; the keyboard fallback is built in.
-[^steam]: steam.py: the refusal messages (Steam running, no profile, two profiles, no Proton, AppImage) and the Linux-only button.
-[^steamin]: steam_input.py writes the ConsolePort layout only when the game chose the ConsolePort pack or its mod is installed.
-[^catalogjson]: The consoleport pack's label and description in catalog.json; only WotLK, Centurion and Unbound entries carry it.
-[^changelog]: CHANGELOG.md, v0.9.31-Public.
+[^gamepad]: The controller support: A, B, LB and RB are the only mapped buttons; the D-pad and left stick move focus; the keyboard fallback is built in.
+[^steam]: The Steam shortcut: the refusal messages (Steam running, no profile, two profiles, no Proton, AppImage) and the Linux-only button.
+[^steamin]: The Steam Input step writes the ConsolePort layout only when the game chose the ConsolePort pack or its mod is installed.
+[^catalogjson]: The consoleport pack's label and description in the game catalog; only WotLK, Centurion and Unbound entries carry it.
+[^changelog]: The release notes for the version that added controller support.

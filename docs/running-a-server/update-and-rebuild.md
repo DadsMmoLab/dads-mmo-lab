@@ -19,7 +19,7 @@ sources:
     title: Database update button label and notes
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T21:00:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
@@ -52,7 +52,9 @@ This fetches the newest code from the repositories your server was built from an
 
 ## Return to the tested pin
 
-After an update the button **Return to the tested pin...** appears under **Advanced**. It compiles the server again from the commit this app was tested against. It does not undo anything a newer server already wrote into your databases, which is why no backup is offered at this step.[^view]
+After an update the button **Return to the tested pin...** appears under **Advanced**. It compiles the server again from the commit this app was tested against. It does not undo anything a newer server already wrote into your databases, which is why no backup is offered at this step.
+
+If your databases are already ahead of the tested version, Yu'lon will not go back. It says so, changes nothing, and names the backup from before the update that you can restore instead (see [Restore a backup](/running-a-server/restore-a-backup.md)).[^view]
 
 ## Advanced buttons
 

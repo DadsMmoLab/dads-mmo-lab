@@ -19,13 +19,13 @@ sources:
     title: Looking up client files in any letter case
 generated:
   by: claude-sonnet-5-5/docs-okf
-  at: 2026-11-08T20:30:00Z
+  at: 2026-11-08T20:36:29Z
 status: draft
 ---
 
 # Point Yu'lon at your own game client
 
-Yu'lon never downloads a game client. You bring your own, and you tell Yu'lon which folder it is in. Play, add-ons and the ready-to-play client are all made from that folder.[^view] Which version each game needs is in [Which client each game needs](/playing/client-versions.md).
+Yu'lon never downloads or hands out a game client you don't already have. The only game files it fetches are ones you ask for: the Conquest of Azeroth files that **Update client** replaces in your own folder, and, for Centurion only, a stock `Wow.exe` when yours is not the unmodified one (one file, checked by hash first). You tell Yu'lon which folder your client is in. Play, add-ons and the ready-to-play client are all made from that folder.[^view] Which version each game needs is in [Which client each game needs](/playing/client-versions.md).
 
 ## Steps
 
