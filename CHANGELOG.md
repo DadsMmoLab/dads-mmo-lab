@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- A user guide for players: step-by-step pages under docs/, linked from the README's new User guide section.
 
 ### Fixed
 - Controller: the D-pad reaches every option in a group of choices, like LAN (same Wi-Fi) on the Networking tab.
