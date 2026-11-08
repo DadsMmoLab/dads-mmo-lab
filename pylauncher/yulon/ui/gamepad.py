@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPlainTextEdit,
+    QRadioButton,
     QScrollArea,
     QTabBar,
     QTabWidget,
@@ -356,7 +357,21 @@ def _iter_focusable(root: QWidget) -> Iterable[QWidget]:
 
     def walk(w: QWidget) -> Iterable[QWidget]:
         policy = w.focusPolicy()
-        if w is not root and (policy & Qt.FocusPolicy.TabFocus) and w.isEnabled() and w.isVisible():
+        # Qt keeps a Tab stop for one radio of an exclusive group and takes it from the others
+        # while that one holds the focus (the Tab key then skips the group). Those others are
+        # still radios a pad must reach: a chain rebuilt while one had the focus lost the rest
+        # for good, and Left from "Only this computer" could not reach "LAN" beside it.
+        radio_of_a_group = (
+            isinstance(w, QRadioButton)
+            and w.autoExclusive()
+            and bool(policy & Qt.FocusPolicy.ClickFocus)
+        )
+        if (
+            w is not root
+            and (policy & Qt.FocusPolicy.TabFocus or radio_of_a_group)
+            and w.isEnabled()
+            and w.isVisible()
+        ):
             # read-only multi-line text is a D-pad trap; skip it.
             if isinstance(w, (QPlainTextEdit, QTextEdit)) and w.isReadOnly():
                 pass

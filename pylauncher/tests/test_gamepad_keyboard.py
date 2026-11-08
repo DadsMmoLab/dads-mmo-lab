@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QListWidget,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QTabWidget,
     QTextEdit,
@@ -1620,6 +1621,37 @@ def test_k5_back_action_hierarchy_prompter_then_back_button_then_root_noop(
     finally:
         keyboard.stop()
         gamepad.stop()
+        win.close()
+        win.deleteLater()
+        process_events()
+
+
+def test_a_radio_the_group_took_its_tab_stop_from_is_still_a_stop_of_the_pad(
+    qapp: object,
+) -> None:
+    """Qt takes a group's other radios off the Tab stops while one has focus; the pad keeps them.
+
+    A chain built with "Only this computer" focused lost the "LAN" radio beside it for good,
+    so Left from it wrapped past LAN instead of landing on it (found by the round-walk test).
+    """
+    from yulon.ui.gamepad import _iter_focusable
+
+    win = QWidget()
+    row = QVBoxLayout(win)
+    lan = QRadioButton("LAN", win)
+    local = QRadioButton("Only this computer", win)
+    row.addWidget(lan)
+    row.addWidget(local)
+    lan.setChecked(True)
+    win.show()
+    process_events()
+    try:
+        local.setFocus()
+        process_events()
+        assert not (lan.focusPolicy() & Qt.FocusPolicy.TabFocus), "Qt kept LAN's Tab stop: no proof"
+        assert lan in list(_iter_focusable(win))
+        assert local in list(_iter_focusable(win))
+    finally:
         win.close()
         win.deleteLater()
         process_events()

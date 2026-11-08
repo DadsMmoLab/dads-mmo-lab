@@ -21617,6 +21617,33 @@ def test_a_taller_window_never_takes_back_what_a_shorter_one_showed(
                 )
 
 
+def _pin_the_tabs(window: Any, nav: Any) -> Callable[[], None]:
+    """Remember the tab every tab widget in `window` shows now; the returned call puts them back.
+
+    T874: Left/Right on a focused tab bar switch its tab. A test that walks the pad over a
+    whole page, asking every direction of every stop, would otherwise be carried by the first
+    bar it presses onto another tab, and go on measuring that page under the first one's name.
+    What those walks ask is where a press leads on the page, not which tab a press ends on
+    (the navigator's tab walk has its own tests in test_gamepad_server_tabs), so they call this
+    after each press. Cheap when nothing moved.
+    """
+    from PySide6.QtWidgets import QTabWidget
+
+    shown = {tabs: tabs.currentIndex() for tabs in window.findChildren(QTabWidget)}
+
+    def put_back() -> None:
+        moved = False
+        for tabs, index in shown.items():
+            if tabs.currentIndex() != index:
+                tabs.setCurrentIndex(index)
+                moved = True
+        if moved:
+            nav.invalidate()
+            process_events()
+
+    return put_back
+
+
 def _pad_routes(nav: Any, start: Any, *, home: Any = None) -> dict[Any, list[Any]]:
     """Every widget the D-pad reaches from `start`, each with the presses that reach it.
 
@@ -21630,28 +21657,14 @@ def _pad_routes(nav: Any, start: Any, *, home: Any = None) -> dict[Any, list[Any
     scrolls (the top menu takes height from it) answers a press by where it is scrolled, and
     a route to be replayed by `_press_a_on` must not depend on where the last press left it.
     """
-    from PySide6.QtWidgets import QApplication, QTabWidget
+    from PySide6.QtWidgets import QApplication
 
     from yulon.ui.gamepad import Direction
 
     routes: dict[Any, list[Any]] = {start: []}
     frontier = [start]
-    # T874: Left/Right on a focused tab bar switch its tab. This walk asks every direction of
-    # every stop, so any bar it reaches would carry it off the page under test and leave the
-    # caller on another tab. What is asked is reach, not which tab a press ends on (the
-    # navigator's tab walk has its own tests), so every tab widget in the window is put back on
-    # the tab it was showing before each press and when the walk ends.
-    shown = {tabs: tabs.currentIndex() for tabs in start.window().findChildren(QTabWidget)}
-
-    def put_the_tabs_back() -> None:
-        moved = False
-        for tabs, index in shown.items():
-            if tabs.currentIndex() != index:
-                tabs.setCurrentIndex(index)
-                moved = True
-        if moved:
-            nav.invalidate()
-            process_events()
+    # What is asked is reach, not which tab a press ends on: see `_pin_the_tabs()`.
+    put_the_tabs_back = _pin_the_tabs(start.window(), nav)
 
     while frontier:
         here = frontier.pop(0)
@@ -22144,6 +22157,7 @@ def test_no_press_of_the_pad_passes_over_a_whole_row_or_leaves_the_screen(
                 sub.setCurrentIndex(sub_index)
             process_events()
             _scroll_home(window)
+            put_the_tabs_back = _pin_the_tabs(window, nav)
             name = sub.tabText(sub_index) if sub_index is not None else "Catalog"
             stops = list(nav._focusable(nav._context_root()))
             showing = [(w, e) for w in stops if (e := _on_screen(w, window)) is not None]
@@ -22154,6 +22168,7 @@ def test_no_press_of_the_pad_passes_over_a_whole_row_or_leaves_the_screen(
                     here.setFocus()
                     process_events()
                     nav.navigate(direction)
+                    put_the_tabs_back()
                     process_events()
                     landed = QApplication.focusWidget()
                     presses += 1
@@ -22280,6 +22295,7 @@ def test_every_box_the_pad_goes_into_can_be_left_by_pressing_on_the_same_way(
                 sub.setCurrentIndex(sub_index)
             process_events()
             _scroll_home(window)
+            put_the_tabs_back = _pin_the_tabs(window, nav)
             name = sub.tabText(sub_index) if sub_index is not None else "Catalog"
             stops = list(nav._focusable(nav._context_root()))
             for start in stops:
@@ -22300,6 +22316,7 @@ def test_every_box_the_pad_goes_into_can_be_left_by_pressing_on_the_same_way(
                     walks += 1
                     for _press in range(12):
                         nav.navigate(direction)
+                        put_the_tabs_back()
                         process_events()
                         landed = QApplication.focusWidget()
                         if landed is None or landed is here:
@@ -22419,6 +22436,7 @@ def test_pressing_one_way_never_goes_round_while_a_stop_lies_past_the_round(
                 sub.setCurrentIndex(sub_index)
             process_events()
             _scroll_home(window)
+            put_the_tabs_back = _pin_the_tabs(window, nav)
             name = sub.tabText(sub_index) if sub_index is not None else "Catalog"
             stops = list(nav._focusable(nav._context_root()))
             showing = {w: e for w in stops if (e := _on_screen(w, window)) is not None}
@@ -22432,6 +22450,7 @@ def test_pressing_one_way_never_goes_round_while_a_stop_lies_past_the_round(
                     for _press in range(20):
                         nav._last_move = None
                         nav.navigate(direction)
+                        put_the_tabs_back()
                         landed = QApplication.focusWidget()
                         if landed is None or landed is walk[-1]:
                             break
