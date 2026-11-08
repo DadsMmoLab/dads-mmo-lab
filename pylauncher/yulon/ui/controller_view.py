@@ -324,6 +324,13 @@ def _detail_of(exc: object) -> str:
     return exc.detail if isinstance(exc, SaidByYulon) else ""
 
 
+def _is_import_output(line: object) -> bool:
+    """Whether a realm switch's line is what the db-import printed, not the switch's own (T878)."""
+    from yulon import coa_switch
+
+    return isinstance(line, coa_switch.ImportOutput)
+
+
 def _for_the_log(exc: object) -> str:
     """The whole failure for the app log: the sentence and, under it, what the program said."""
     detail = _detail_of(exc)
@@ -11418,8 +11425,14 @@ class ControllerView(QWidget):
     def _realm_switched(self, lines: object) -> None:
         """A finished switch: say what moved, refresh for the new world."""
         self._set_busy(False)
-        said = "\n".join(str(line) for line in lines) if isinstance(lines, list) else str(lines)
+        # T878: the db-import's own output goes under Details, folded, as a failed Start's
+        # does (T414); on the line it pushed Play down by the length of the import. The
+        # sentences stay on the line.
+        said_lines = lines if isinstance(lines, list) else [lines]
+        said = "\n".join(str(line) for line in said_lines if not _is_import_output(line))
+        printed = "\n".join(str(line) for line in said_lines if _is_import_output(line))
         self.problem_label.setText(said)
+        self.problem_details.set_text(printed)
         self._show_realm_type()
         self.refresh_status()
         if self._play_after_start:
@@ -11434,6 +11447,10 @@ class ControllerView(QWidget):
         """A refused switch: said, with the holder's sentence when it is held."""
         self._set_busy(False)
         self.problem_label.setText(str(exc))
+        # T878: a failed import's last lines (the refusal's `detail`) stay open under the line.
+        self.problem_details.set_text(_detail_of(exc))
+        if self.problem_details.text():
+            self.problem_details.handle.set_collapsed(False)
         self.action_failed.emit(str(exc))
         self._show_realm_type()
         self.refresh_status()

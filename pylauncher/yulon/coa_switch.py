@@ -20,7 +20,7 @@ refused with the holder's sentence, before anything is imported.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -225,6 +225,14 @@ def _safe_to_start_again(entry: CatalogEntry, server_dir: Path, sql: coa_realm.S
         return False
 
 
+def _with_detail_of(refusal: BaseException, source: BaseException) -> BaseException:
+    """`refusal` carrying `source`'s `detail` (what a program printed), for the view's Details."""
+    detail = getattr(source, "detail", "")
+    if detail:
+        refusal.detail = detail  # type: ignore[attr-defined]
+    return refusal
+
+
 def _restarted_after_failed_switch(exc: BaseException, original: str) -> BaseException:
     """`exc`, plus the one plain sentence saying the original type started again."""
     message = (
@@ -236,6 +244,7 @@ def _restarted_after_failed_switch(exc: BaseException, original: str) -> BaseExc
         if isinstance(exc, coa_realm.RealmSwitchError)
         else RuntimeError(message)
     )
+    _with_detail_of(restarted, exc)
     # T857: the view's Play reads this to say the server runs again (typed, not parsed).
     restarted.server_restarted = True  # type: ignore[attr-defined]
     return restarted
@@ -249,7 +258,7 @@ def _stopped_after_failed_switch(exc: BaseException, extra: str = "") -> BaseExc
         f"or put it back.{tail}"
     )
     if isinstance(exc, coa_realm.RealmSwitchError):
-        return coa_realm.RealmSwitchError(message)
+        return _with_detail_of(coa_realm.RealmSwitchError(message), exc)
     return RuntimeError(message)
 
 
@@ -390,6 +399,28 @@ def check_switch_import(server_dir: Path, seams: ImportSeams) -> None:
         )
 
 
+class ImportOutput(str):
+    """A line the db-import one-shot printed, apart from the switch's own sentences (T878).
+
+    The Server tab puts the sentences on its line and these under Details: a first
+    switch's import prints thousands of lines, and on the line they pushed Play far
+    down the page.
+    """
+
+
+def _as_import_output(
+    lines: Generator[str, None, docker.AttachedRun],
+) -> Generator[str, None, docker.AttachedRun]:
+    """`lines` with each one marked `ImportOutput`; the generator's return value passes through."""
+    while True:
+        try:
+            line = next(lines)
+        except StopIteration as done:
+            run: docker.AttachedRun = done.value
+            return run
+        yield ImportOutput(line)
+
+
 def switch_import(
     entry: CatalogEntry,
     server_dir: Path,
@@ -421,12 +452,15 @@ def switch_import(
         raise coa_realm.RealmSwitchError(native._one_shot_left_sentence(left, earlier=True))
     check_switch_import(server_dir, seams)
     yield f"Importing the {context.target} databases ({service}). This takes several minutes."
-    run = yield from native.pump_lines(
-        lambda sink: seams.one_shot(service, server_dir, sink), cancel=None, stage="import"
+    run = yield from _as_import_output(
+        native.pump_lines(
+            lambda sink: seams.one_shot(service, server_dir, sink), cancel=None, stage="import"
+        )
     )
     if run.returncode != 0:
         failed = docker.import_failed(service, server_dir, run)
-        raise coa_realm.RealmSwitchError(str(failed)) from failed
+        # The importer's last lines ride on the refusal (T878): the view shows them under Details.
+        raise _with_detail_of(coa_realm.RealmSwitchError(str(failed)), failed) from failed
     try:
         after = seams.verify(probe, service, server_dir, run)
     except docker.DockerCommandError as exc:

@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Conquest of Azeroth: a first realm switch no longer floods the Server tab with the database import's output.
 - The Server tab no longer keeps saying "Wait: … is running." after a job has ended.
 - Conquest of Azeroth: bots join battlegrounds again, and playerbots.conf's battleground settings take effect from the next Start.
 - Conquest of Azeroth: Switch realm type no longer fails with "container ... is not running" when the server is stopped.
