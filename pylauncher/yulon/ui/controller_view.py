@@ -267,7 +267,13 @@ from yulon.ui.widgets.page import (
 )
 from yulon.ui.widgets.party_panel import PartyPanel
 from yulon.ui.widgets.prompt import InputPrompter
-from yulon.ui.widgets.reasons import ReasonLine, drop_reason, reason_of, set_enabled_why
+from yulon.ui.widgets.reasons import (
+    ReasonLine,
+    drop_reason,
+    drop_reason_if,
+    reason_of,
+    set_enabled_why,
+)
 from yulon.ui.widgets.remove_dialog import RemovalChoice, ask_removal, offered_choices
 from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 
@@ -12462,6 +12468,8 @@ class ControllerView(QWidget):
                 self._set_rebuild_dashboard_button()
         # T822: the banner's press waits for whatever this tab is running.
         self._refresh_repair_banner()
+        if waited is not None and not busy:
+            self._forget_the_wait(waited)
         # T187: the launcher window greys its settings while this tab is busy.
         self.play_state_changed.emit()
         if not busy and self._badge_held is not None:
@@ -12471,6 +12479,25 @@ class ControllerView(QWidget):
             if self._hold_ends_at is None:
                 self._hold_ends_at = self._status_asks + 1
             self.refresh_status()
+
+    def _forget_the_wait(self, waited: str) -> None:
+        """Take a finished job's "Wait: X is running." off everything still carrying it (T877).
+
+        The job greyed every press with `waited`. Those the end re-enables drop it by
+        themselves (the reason line watches their enabled event), but a press that stays
+        greyed -- Switch realm type once the type is the active one, Adopt as imported,
+        a build action this install has no route for -- flips nothing, so the reason,
+        its tooltip and its line outlived the job. One sweep here covers every job
+        that ends through `_set_busy(False)`, whichever press started it. A reason
+        any later site gave a press (its own standing reason, a different wait) is kept.
+        """
+        for widget in self.findChildren(QWidget):
+            drop_reason_if(widget, waited)
+        for action in self.findChildren(QAction):
+            # A hidden action only: a shown one is offered again by whoever shows it, and
+            # `_bind_button_to_action()` refuses a shown, greyed button with no reason.
+            if not action.isVisible() and action.property(ControllerView._GREY_WHY) == waited:
+                action.setProperty(ControllerView._GREY_WHY, None)
 
     def _ends_the_hold(self) -> bool:
         """Whether the status read answering now was asked once the holding job had ended."""

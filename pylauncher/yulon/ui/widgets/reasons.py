@@ -213,3 +213,16 @@ def drop_reason(press: QWidget) -> None:
     watching = press.property(_LINE)
     if isinstance(watching, ReasonLine):
         watching.refresh()
+
+
+def drop_reason_if(press: QWidget, reason: str) -> bool:
+    """`drop_reason()` when `press` was greyed with exactly `reason`; whether it did.
+
+    For the end of a job (T877): a press the job greyed and that the job's end leaves
+    greyed for another cause is never enabled, so no enabled event takes the job's
+    "Wait: ... is running." off it. A reason somebody gave it since is left alone.
+    """
+    if press.property(_REASON) != reason:
+        return False
+    drop_reason(press)
+    return True
