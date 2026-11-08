@@ -849,3 +849,27 @@ def test_a_failing_stop_after_a_start_timeout_keeps_the_start_refusal(
     assert started == []
     assert getattr(caught.value, "detail", "") == failed.detail
     assert caught.value.__cause__ is failed
+
+
+# -- the realm-switch fix: picking a type offers the switch ---------------------
+
+
+def test_picking_another_type_lights_the_switch_button_at_once(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Live 2026-11-06: after a pick the button stayed greyed until a Stop redrew it."""
+    from yulon.ui.controller_view import ControllerServices, ControllerView
+
+    catalog = load_catalog()
+    services = ControllerServices.for_wotlk(catalog.get("wow-coa"), tmp_path, None)
+    view = ControllerView(
+        catalog.get("wow-coa"), services, status_poll_ms=0, job_runner=lambda w, d, e: None
+    )
+    box = view.realm_type_choice
+    button = view.realm_type_switch_button
+    assert box.currentData() == "coa" and not button.isEnabled()
+    for picked in ("hero", "wcr", "wc"):
+        box.setCurrentIndex(box.findData(picked))
+        assert button.isEnabled(), picked
+    box.setCurrentIndex(box.findData("coa"))
+    assert not button.isEnabled(), "the type the server is on is no switch"
