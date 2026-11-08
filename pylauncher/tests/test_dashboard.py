@@ -1513,8 +1513,11 @@ def _unbound_watch(
     age: timedelta = timedelta(minutes=3),
     log_box: list[str] | None = None,
     clock: list[datetime] | None = None,
+    run_box: list[str] | None = None,
 ) -> dashboard.Dashboard:
     """An Unbound dashboard on a run `age` old; each tick reads the next of `runs`.
+
+    `run_box[0]`, when given, is the run's start stamp and can be changed between ticks.
 
     `log_box[0]`, when given, is the log and can be changed between ticks; with more than one
     entry each read of the log takes the next, the last one staying.
@@ -1530,7 +1533,9 @@ def _unbound_watch(
         UNBOUND,
         server,
         sql=sql,
-        state_of=lambda _c: _running(stamps[0] if len(stamps) == 1 else stamps.pop(0)),
+        state_of=lambda _c: _running(
+            run_box[0] if run_box else (stamps[0] if len(stamps) == 1 else stamps.pop(0))
+        ),
         daemon_of=lambda: "bridge-before",
         log_of=lambda _c, _since: (
             (log_box.pop(0) if len(log_box) > 1 else log_box[0]) if log_box else log
@@ -1804,6 +1809,48 @@ def test_a_world_that_said_ready_without_the_prereq_line_did_not_load_once_asked
     assert '"[UNBOUND] Prereq map built."' in second.module_line
     assert third.module_line == second.module_line
     assert sql.tables_asked == 2
+
+
+def test_a_restart_between_two_looks_gives_the_new_run_its_own_first_look(
+    tmp_path: Path,
+) -> None:
+    """T876 review: run A's first look must not count as run B's. B's tick in its own few-second
+    gap, a retry window later, is still a first look: the waiting sentence, not 'did not load'."""
+    sql = _UnboundSql()
+    clock = [NOW]
+    log = UNBOUND_LOG.replace("[UNBOUND] Prereq map built.\n", "")
+    run_a, run_b = _stamp(NOW - timedelta(minutes=3)), _stamp(NOW - timedelta(seconds=30))
+    run_box = [run_a]
+    watch = _unbound_watch(tmp_path, sql, log=log, clock=clock, run_box=run_box)
+
+    first_a = watch.tick()
+    run_box[0] = run_b
+    clock[0] = NOW + dashboard.HEALTH_RETRY_EVERY
+    first_b = watch.tick()
+
+    assert "did not load" not in first_a.module_line
+    assert first_b.module_line == first_a.module_line
+    assert "does not have Unbound's start-up lines yet" in first_b.module_line
+
+
+def test_a_clock_going_back_between_two_looks_restarts_the_window(tmp_path: Path) -> None:
+    """T876 review: a tick stamped before the first look is no 'a retry later': it is a new first
+    look, and only a look a full HEALTH_RETRY_EVERY after THAT one keeps 'did not load'."""
+    sql = _UnboundSql()
+    back = NOW - timedelta(minutes=10)
+    clock = [NOW]
+    log = UNBOUND_LOG.replace("[UNBOUND] Prereq map built.\n", "")
+    watch = _unbound_watch(tmp_path, sql, log=log, clock=clock)
+
+    first = watch.tick()
+    clock[0] = back
+    after_back = watch.tick()
+    clock[0] = back + dashboard.HEALTH_RETRY_EVERY
+    kept = watch.tick()
+
+    assert "did not load" not in first.module_line
+    assert "did not load" not in after_back.module_line
+    assert kept.module_line.startswith("Unbound did not load:")
 
 
 def test_a_good_reading_between_two_looks_is_kept_at_once(tmp_path: Path) -> None:
