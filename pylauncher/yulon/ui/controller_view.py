@@ -10084,6 +10084,9 @@ class ControllerView(QWidget):
         )
         self.realm_type_switch_button = QPushButton("Switch realm type…", tab)
         self.realm_type_switch_button.clicked.connect(self.switch_realm_type)
+        # Picking a type is what offers the switch: without this the button kept the state of
+        # the last refresh, greyed for good after a pick until a Stop or a finished job redrew it.
+        self.realm_type_choice.currentIndexChanged.connect(self._realm_type_picked)
         self._show_realm_type()
         # T36. Visible for every game, including WotLK -- AzerothCore reads no
         # client itself, but the folder is still a host path a manifest's
@@ -11354,6 +11357,11 @@ class ControllerView(QWidget):
         self.realm_type_switch_button.setVisible(self.services.realm_switch is not None)
         self.realm_type_switch_button.setEnabled(bool(offered))
         self.realm_type_choice.setEnabled(self.services.realm_switch is not None and not self._busy)
+
+    @Slot(int)
+    def _realm_type_picked(self, _index: int) -> None:
+        """A type picked in the list lights Switch realm type… when it is not the current one."""
+        self._set_realm_switch_button()
 
     @Slot()
     def switch_realm_type(self) -> None:

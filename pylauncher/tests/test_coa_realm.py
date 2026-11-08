@@ -2268,3 +2268,90 @@ def test_an_id_that_reads_as_no_number_is_unreadable(tmp_path: Path) -> None:
     with pytest.raises(coa_realm.DatabaseUnreadable, match="Player1 account reads"):
         switch_lines(tmp_path, coa(), "hero", sql)
     assert usernames(sql, "acore_auth") == []
+
+
+# -- the realm-switch fix: a switch writes only its target's keys, and a start names the realm --
+
+
+def _world_environment(plan_override: str) -> dict[str, str]:
+    services = yaml.safe_load(plan_override)["services"]
+    world = next(service for name, service in services.items() if name.endswith("worldserver"))
+    return {str(key): str(value) for key, value in world["environment"].items()}
+
+
+def test_leaving_wildcard_keeps_none_of_its_keys(tmp_path: Path) -> None:
+    """Live 2026-11-07: Wildcard to Free Pick kept Wildcard's six extra keys, and Free Pick
+    ran Wildcard's rules (the dice, game mode 64 stored on every character that logged in).
+
+    The switch publishes the override while the file still names the type it leaves.
+    """
+    entry = coa()
+    write_file(tmp_path, "wc")
+    wildcard_only = set(coa_realm.switch_env_for(entry, "wc")) - set(
+        coa_realm.switch_env_for(entry, "hero")
+    )
+    assert len(wildcard_only) == 6
+    for target in ("hero", "coa", "wcr"):
+        wanted = coa_realm.switch_env_for(entry, target)
+        plan = composegen.render(
+            entry,
+            tmp_path,
+            templates_root=installers_dir(),
+            platform_id=lambda: "linux",
+            world_env=wanted,
+        )
+        world = _world_environment(plan.override)
+        assert wildcard_only.isdisjoint(world), f"{target} kept {sorted(wildcard_only & set(world))}"
+        for key in coa_realm.realm_type_keys(entry) & set(wanted):
+            assert world[key] == wanted[key], (target, key)
+
+
+def test_a_switch_map_is_taken_whole_and_any_other_base_still_gets_the_files_type(
+    tmp_path: Path,
+) -> None:
+    entry = coa()
+    write_file(tmp_path, "wc")
+    for target in ("hero", "coa", "wcr", "wc"):
+        wanted = coa_realm.switch_env_for(entry, target)
+        assert coa_realm.world_env_for(entry, tmp_path, base=wanted) == wanted, target
+    channel = coa_realm.world_env_for(entry, tmp_path, base={"AC_CHANNEL_EXAMPLE": "1"})
+    assert channel["AC_CO_ACHALLENGES_GAME_MODES_REALM"] == "WildCard"
+    assert channel["AC_CHANNEL_EXAMPLE"] == "1"
+    assert coa_realm.world_env_for(entry, tmp_path)["AC_CO_A_GAME_MODE_MASK"] == "64"
+
+
+def test_every_realm_type_key_is_a_realm_types_own(tmp_path: Path) -> None:
+    entry = coa()
+    keys = coa_realm.realm_type_keys(entry)
+    assert "AC_CO_A_CLASS_MODEL" in keys and "AC_CO_A_GAME_MODE_MASK" in keys
+    assert keys.isdisjoint(coa().install.native.azerothcore.world_env)  # type: ignore[union-attr]
+
+
+def test_a_start_names_the_realm_after_the_active_type(tmp_path: Path) -> None:
+    """An install's own type was never switched to, so its realm kept "AzerothCore"."""
+    for type_id, name in (("coa", "Conquest of Azeroth"), ("wcr", "CoA Warcraft Reborn")):
+        sql = FakeSql()
+        coa_schemas(sql, marker=type_id)
+        write_file(tmp_path, type_id)
+        gate = coa_realm.before_servers_gate(coa(), tmp_path, start_db=lambda: None, sql=sql)
+        assert gate is not None and gate() is None
+        assert coa_realm.realm_name_update(coa(), name) in sql.executed
+
+
+def test_a_realm_that_cannot_be_named_still_starts(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql, marker="coa")
+    write_file(tmp_path, "coa")
+    sql.fail_on = "SET name="
+    gate = coa_realm.before_servers_gate(coa(), tmp_path, start_db=lambda: None, sql=sql)
+    assert gate is not None and gate() is None
+    assert not any("SET name=" in statement for statement in sql.executed)
+
+
+def test_a_refused_start_names_nothing(tmp_path: Path) -> None:
+    sql = FakeSql()
+    coa_schemas(sql, marker="hero")
+    write_file(tmp_path, "coa")
+    gate = coa_realm.before_servers_gate(coa(), tmp_path, start_db=lambda: None, sql=sql)
+    assert gate is not None and gate() == coa_realm.mismatch_sentence("hero", "coa")
+    assert not any("SET name=" in statement for statement in sql.executed)

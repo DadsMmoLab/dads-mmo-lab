@@ -371,3 +371,71 @@ def test_a_docker_that_cannot_say_who_publishes_a_port_does_not_fail_the_start(
     """Cannot tell is not a refusal, and not a Docker error on the Start line either."""
     _probe(monkeypatch, {3724}, publishers=docker.DockerCommandError("docker ps exited 1"))
     Controller(WOTLK.container_spec(), tmp_path).refuse_a_taken_port()
+
+
+# --- the realm-switch fix: a port Windows keeps after a stop, with no program on it ------------
+
+
+def _lingering(
+    monkeypatch: pytest.MonkeyPatch, answers: list[str], *, here: str, program: str | None
+) -> list[int]:
+    """`bind_host_port` answering `answers` in turn (then "in_use"), on platform `here`."""
+    asked: list[int] = []
+    left = iter(answers)
+
+    def bind(host: str, port: int) -> platform.PortBind:
+        asked.append(port)
+        return platform.PortBind(host, port, next(left, "in_use"), "test")
+
+    monkeypatch.setattr(controller_module, "bind_host_port", bind)
+    monkeypatch.setattr(controller_module, "_REBIND_PAUSE", 0.0)
+    monkeypatch.setattr(controller_module, "_LINGER_STEP", 0.0)
+    monkeypatch.setattr(controller_module, "_LINGER_TRIES", 3)
+    monkeypatch.setattr(controller_module.platform, "detect", lambda: here)
+    monkeypatch.setattr(docker, "port_publishers", lambda ports, **_kw: {})
+    monkeypatch.setattr(platform, "listening_program", lambda port, **_kw: program)
+    return asked
+
+
+def test_windows_waits_for_a_port_no_program_holds_after_a_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live 2026-11-06: a switch's own stop and start refused on 7880 with no program named,
+    and a Start 37 seconds later went through."""
+    asked = _lingering(
+        monkeypatch, ["in_use", "in_use", "in_use", "in_use", "free"], here="windows", program=None
+    )
+    spec = docker.ContainerSpec(db="t-db", auth="t-auth", world="t-world", ports=(7880,))
+    Controller(spec, tmp_path).refuse_a_taken_port()
+    assert asked == [7880] * 5
+
+
+def test_windows_still_refuses_a_port_that_never_frees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _lingering(monkeypatch, [], here="windows", program=None)
+    spec = docker.ContainerSpec(db="t-db", auth="t-auth", world="t-world", ports=(7880,))
+    with pytest.raises(PortTaken, match="7880"):
+        Controller(spec, tmp_path).refuse_a_taken_port()
+    assert len(asked) == 2 + 1 + 3, "probe, rebind, then the wait's first bind and its three"
+
+
+def test_a_port_a_named_program_holds_refuses_at_once_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _lingering(monkeypatch, [], here="windows", program="mysqld.exe")
+    spec = docker.ContainerSpec(db="t-db", auth="t-auth", world="t-world", ports=(3306,))
+    with pytest.raises(PortTaken, match="mysqld.exe"):
+        Controller(spec, tmp_path).refuse_a_taken_port()
+    assert asked == [3306, 3306]
+
+
+def test_linux_does_not_wait_for_an_unnamed_holder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Linux cannot name a root process's socket either, and that is no linger: refuse as before."""
+    asked = _lingering(monkeypatch, [], here="linux", program=None)
+    spec = docker.ContainerSpec(db="t-db", auth="t-auth", world="t-world", ports=(3306,))
+    with pytest.raises(PortTaken):
+        Controller(spec, tmp_path).refuse_a_taken_port()
+    assert asked == [3306, 3306]

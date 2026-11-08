@@ -20,6 +20,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Conquest of Azeroth: Switch realm type no longer fails with "container ... is not running" when the server is stopped.
 - Long dropdowns like the Logs tab's log list show ten rows and scroll; on a controller the D-pad moves, A chooses, B cancels.
 - Controller and Steam Deck: the D-pad now reaches a server's tabs; Left/Right on the tab row switch tabs.
+- Conquest of Azeroth: switching away from Wildcard no longer carries Wildcard's rules into the next realm type.
+- Conquest of Azeroth: picking a realm type in the list lights **Switch realm type…** right away.
+- Conquest of Azeroth: the realm list shows the realm type's name, not "AzerothCore", from the next Start.
+- Windows: Start waits for a port Windows is still letting go of after a stop, instead of blaming another program.
 
 ### Changed
 

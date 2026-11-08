@@ -54,6 +54,18 @@ _REBIND_PAUSE = 1.0
 A server stopped a moment ago (a Restart's own stop, "Stop the other server") may
 not have handed its listener back yet; a port still taken after this is taken."""
 
+_LINGER_STEP = 2.0
+_LINGER_TRIES = 45
+"""How often, and how many times, Start binds a port Windows still refuses with no program on it.
+
+Docker Desktop with WSL's mirrored networking keeps a container's published port
+unbindable for up to about a minute after the container stopped, and `netstat` shows
+no listener for it: a Restart, or a realm switch's own stop and start, then refused
+with "Another program on this computer already uses port 7880", naming no program,
+and a Start pressed 37 seconds later went through (seen live on Windows 11 with
+CoA, 2026-11-06, twice). A port a program really listens on is named and refused
+at once; this wait (90 seconds at most) is only for a holder nobody can name."""
+
 PRESS_RESTART = "Restart the server"
 """How `Controller.restart()`'s reservation names it to another Yu'lon (T761)."""
 
@@ -161,6 +173,21 @@ class PortTaken(StartRefused):
 def bind_host_port(host: str, port: int) -> platform.PortBind:
     """Bind `host:port` and let go: Start's probe of a port no container holds (T671)."""
     return platform.bind_tcp(host, port)
+
+
+def _wait_for_a_lingering_port(host: str, port: int) -> platform.PortBind:
+    """Bind `host:port` every `_LINGER_STEP` until Windows lets go of it; the last answer.
+
+    For a port refused as in use with no program listening on it (`_LINGER_TRIES`).
+    """
+    logger.info(f"port {port} is refused with no program on it; waiting for Windows to free it")
+    got = bind_host_port(host, port)
+    for _ in range(_LINGER_TRIES):
+        if got.status != "in_use":
+            return got
+        time.sleep(_LINGER_STEP)
+        got = bind_host_port(host, port)
+    return got
 
 
 class ComposeTooOld(StartRefused):
@@ -469,8 +496,11 @@ class Controller:
         port is bound and let go (`bind_host_port()`, the install preflight's own
         probe); one a container publishes is Docker's, not a program's, and is left
         alone (a foreign container was refused by name already). A refused port is
-        bound once more after `_REBIND_PAUSE`. The sentence names the port, what it
-        is for and, where the OS says, the program holding it.
+        bound once more after `_REBIND_PAUSE`; on Windows a port still in use with no
+        program listening on it is bound again for up to a minute and a half
+        (`_LINGER_TRIES`), the time WSL's mirrored networking keeps a stopped
+        container's port. The sentence names the port, what it is for and, where
+        the OS says, the program holding it.
 
         A server inside a WSL distro publishes inside that distro: a loopback port
         there (the database, SOAP, the channel) is the distro's own and is not this
@@ -503,6 +533,11 @@ class Controller:
             if got.status not in ("in_use", "reserved"):
                 continue
             program = platform.listening_program(port) if got.status == "in_use" else None
+            if got.status == "in_use" and windows and not program:
+                got = _wait_for_a_lingering_port(host, port)
+                if got.status not in ("in_use", "reserved"):
+                    continue
+                program = platform.listening_program(port) if got.status == "in_use" else None
             sentence = docker.blocked_port_sentence(
                 port, got.status, windows=windows, what=what, program=program or ""
             )
