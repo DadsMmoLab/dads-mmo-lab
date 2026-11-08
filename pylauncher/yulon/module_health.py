@@ -62,6 +62,19 @@ class HealthReading:
             self.unreadable or self.missing or self.short or self.absent_marker or placed_short
         )
 
+    @property
+    def only_the_line_missing(self) -> bool:
+        """The module's log line is the one fault: the tables and counts all read good (T876).
+
+        That is a module whose line may only be a few seconds late (CoA prints its own line about
+        3 s after the world's ready line), unlike a missing table or a short count, which a
+        wait does not mend.
+        """
+        placed_short = self.placed is not None and self.placed[1] < self.placed[2]
+        return bool(self.absent_marker) and not (
+            self.unreadable or self.missing or self.short or placed_short
+        )
+
 
 def _asker(sql: dbreads.SqlReader, schemas: dict[Db, str]) -> scriptdeploy.SqlAsk:
     """`read_checks`'s `(schema, statement)` question, over the dashboard's `(db role, ...)` one.

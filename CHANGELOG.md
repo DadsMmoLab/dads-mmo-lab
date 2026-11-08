@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Conquest of Azeroth: switching away from Wildcard no longer carries Wildcard's rules into the next realm type.
 - Conquest of Azeroth: picking a realm type in the list lights **Switch realm type…** right away.
 - Conquest of Azeroth: the realm list shows the realm type's name, not "AzerothCore", from the next Start.
+- Conquest of Azeroth: the Server tab no longer says the module did not load when its line was only a few seconds late.
 - Windows: Start waits for a port Windows is still letting go of after a stop, instead of blaming another program.
 
 ### Changed
