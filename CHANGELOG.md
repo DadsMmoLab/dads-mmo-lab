@@ -16,6 +16,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Controller: the D-pad reaches every option in a group of choices, like LAN (same Wi-Fi) on the Networking tab.
+- Conquest of Azeroth: a first realm switch no longer floods the Server tab with the database import's output.
+- The Server tab no longer keeps saying "Wait: … is running." after a job has ended.
 - Conquest of Azeroth: bots join battlegrounds again, and playerbots.conf's battleground settings take effect from the next Start.
 - Conquest of Azeroth: Switch realm type no longer fails with "container ... is not running" when the server is stopped.
 - Long dropdowns like the Logs tab's log list show ten rows and scroll; on a controller the D-pad moves, A chooses, B cancels.
