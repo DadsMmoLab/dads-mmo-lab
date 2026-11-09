@@ -247,8 +247,8 @@ WOTLK_RATES = (
     "Rate.Drop.Money                 = 5\n"
 )
 TBC_RATES = (
-    # cmangos/mangos-tbc @af6b4885, mangosd.conf.dist.in:1566-1600 (an excerpt; values
-    # unchanged from 15b6ddb4 and 37767e95)
+    # cmangos/mangos-tbc @ec0d40c3, mangosd.conf.dist.in:1566-1600 (an excerpt; values
+    # unchanged from 15b6ddb4, 37767e95 and af6b4885)
     "Rate.Drop.Item.Poor = 6\n"
     "Rate.Drop.Item.Normal = 7\n"
     "Rate.Drop.Item.Uncommon = 8\n"
@@ -273,7 +273,7 @@ TBC_RATES = (
     "Rate.Reputation.LowLevel.Kill    = 0.25\n"
 )
 VANILLA_RATES = (
-    # cmangos/mangos-classic @ff13624a, mangosd.conf.dist.in:1505-1531 (an excerpt)
+    # cmangos/mangos-classic @6d8821c7, mangosd.conf.dist.in:1511-1537 (an excerpt)
     "Rate.Drop.Item.Poor = 6\n"
     "Rate.Drop.Item.Normal = 7\n"
     "Rate.Drop.Item.Uncommon = 8\n"

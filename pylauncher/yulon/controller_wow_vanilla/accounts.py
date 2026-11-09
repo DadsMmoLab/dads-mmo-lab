@@ -43,7 +43,8 @@ them as measured:
    announces itself rather than a silently wrong row, which is why it is
    documented instead of guarded by a guess.
 2. **The length ceilings** -- read since (T673, 2026-10-11; re-read at 57312491 for T824,
-   2026-10-28 and at ff13624a for T860, 2026-11-02): mangos-classic takes names of up to
+   2026-10-28, at ff13624a for T860, 2026-11-02, and at 6d8821c7 on 2026-11-09):
+   mangos-classic takes names of up to
    16 characters, one fewer than AzerothCore's 17, and passwords of up to 16. The shared
    writer applies this core's own
 """

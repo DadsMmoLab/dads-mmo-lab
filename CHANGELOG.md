@@ -34,6 +34,10 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - World of Warcraft (WotLK) and Unbound: the server and Playerbots move to the newest upstream code (2026-11-09).
 - World of Warcraft (Centurion): the server moves to the newest upstream code (2026-11-09).
 - World of Warcraft (Mists of Pandaria): the server moves to the newest upstream code (2026-11-09).
+- World of Warcraft (TBC): the server, Playerbots and database move to the newest upstream code (2026-11-09).
+- World of Warcraft (Vanilla): the server, Playerbots and database move to the newest upstream code (2026-11-09).
+- World of Warcraft (Tortoise): the server and TortoiseBots move to the newest upstream code (2026-11-09).
+- DFO: the server moves to a newer 115US build (2026-10-16), the last one before its multi-gigabyte voice packs.
 
 ## v0.9.31-Public — 2026-11-04
 

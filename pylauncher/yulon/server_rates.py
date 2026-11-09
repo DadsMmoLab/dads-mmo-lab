@@ -21,7 +21,7 @@ wow-tbc        etc/mangosd.conf             cmangos/mangos-tbc:
                                               `mangosd.conf.dist.in:1566-1600`;
                                               `World/World.cpp:409-431,458`
 wow-vanilla    etc/mangosd.conf             cmangos/mangos-classic:
-                                              `mangosd.conf.dist.in:1505-1531`;
+                                              `mangosd.conf.dist.in:1511-1537`;
                                               `World/World.cpp:411-425,452`
 wow-tortoise   etc/mangosd.conf             tortoise-wow/tortoise-wow:
                                               `mangosd.conf.dist.in:1702-1716,1744,1776`;
@@ -37,7 +37,7 @@ means, so it is the `default` a row shows. (Tortoise's own `.dist` ships
 `Rate.Drop.Item.Uncommon = 2`; that is the file's value, and Reset to default
 puts it back, but the server's fallback is still 1.) Vanilla has no `.Vanilla` /
 `.BC` XP twins (`World.cpp:422-424`); TBC has them and multiplies them ON TOP of
-these (`Maps/Map.cpp:1493-1534`), which its rows say.
+these (`Maps/Map.cpp:1498-1539`), which its rows say.
 
 **Item drops: the five qualities that drop in play** -- grey, white, green, blue
 and purple. Legendary and Artifact are hand-placed loot, `Referenced` and the
@@ -242,7 +242,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-tbc": _GameRates(
         file="etc/mangosd.conf",
         repo="cmangos/mangos-tbc",
-        rev="af6b4885647d4eca7802b68fccf52f0bccd8ed23",
+        rev="ec0d40c3d1462cf1b1a9e66184a07da7af7dc993",
         keys=_ALL_KEYS,
         notes={
             **{
@@ -255,14 +255,14 @@ _GAMES: dict[str, _GameRates] = {
     "wow-vanilla": _GameRates(
         file="etc/mangosd.conf",
         repo="cmangos/mangos-classic",
-        rev="ff13624a4be74816796bc0f8555f03011438144e",
+        rev="6d8821c78b4f947d4cd40570657c88aefa804a24",
         keys=_ALL_KEYS,
         notes={"Rate.Drop.Money": _QUEST_MONEY},
     ),
     "wow-tortoise": _GameRates(
         file="etc/mangosd.conf",
         repo="tortoise-wow/tortoise-wow",
-        rev="33d0131a5f0f536dffaced04de859561bfc13d5a",
+        rev="48cb227f2cb698920dc2f60eeadd6546243eb75e",
         keys=_ALL_KEYS,
         notes={"Rate.XP.Kill": _TURTLE_MODE, "Rate.Drop.Money": _LEVEL_CAP_MONEY},
     ),

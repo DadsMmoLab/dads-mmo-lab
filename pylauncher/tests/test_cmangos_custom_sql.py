@@ -138,7 +138,7 @@ def test_the_whole_table_guard_stays_strict(tmp_path: Path) -> None:
     assert sqlplan.whole_table_problem(path) is not None
 
 
-@pytest.mark.parametrize("name", ["tbc-db-1c54acd2.sql", "classic-db-603ece10.sql"])
+@pytest.mark.parametrize("name", ["tbc-db-a4c6a8c8.sql", "classic-db-c33f90b8.sql"])
 def test_the_real_pinned_files_are_ones_the_update_will_run(name: str) -> None:
     path = DATA / name
     assert sqlplan.repeat_problem(path) is None

@@ -44,7 +44,7 @@ from yulon.catalog.process_install import (
 )
 from yulon.ui import lines
 
-REV = "db707d59e303b49426c62d9e35d14181e7823631"
+REV = "6d170a6a84b839ec7c6570edadac85da29b5e4d4"
 ROOT = f"115-{REV}"
 TARGET = "server/work/dfo-lan/internal/catalog/odyssey.go"
 SOURCE_FILES = {

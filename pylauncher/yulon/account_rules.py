@@ -19,11 +19,13 @@ ceiling, read at the catalog's pinned trees on 2026-10-11:
 - `azerothcore` (AzerothCore): name 17, password 16. azerothcore-wotlk 2a2211cd,
   8a4e76ea, 3f2969dd, 93333d6a and e7e2e288 (T824, 2026-10-28; T860, 2026-11-02; PINS, 2026-11-09)
   `src/server/game/Accounts/AccountMgr.h:34-35`.
-- `mangos_srp6` (CMaNGOS): name 16, password 16. mangos-tbc 15b6ddb4, 37767e95 and
-  af6b4885, mangos-classic 8ec338a1, 57312491 and ff13624a (T824, 2026-10-28; T860, 2026-11-02)
+- `mangos_srp6` (CMaNGOS): name 16, password 16. mangos-tbc 15b6ddb4, 37767e95,
+  af6b4885 and ec0d40c3, mangos-classic 8ec338a1, 57312491, ff13624a and 6d8821c7 (T824,
+  2026-10-28; T860, 2026-11-02; 2026-11-09)
   `src/game/Accounts/AccountMgr.h:34`; `ChangePassword` holds the password to the same 16.
 - `mangos_sha` (tortoise-wow, the MaNGOS-Zero line): name 16, password 16. tortoise-wow
-  6131a26f, 10393426 and 33d0131a (T824, 2026-10-28) `src/game/AccountMgr.h:50`,
+  6131a26f, 10393426, 33d0131a (T824, 2026-10-28) and 48cb227f (2026-11-09)
+  `src/game/AccountMgr.h:50`,
   `AccountMgr.cpp:136`.
 - `trinitycore` (TrinityCore112, Centurion): name 16, password 16. TrinityCore112
   25d3e6ef, 351950fb, 0f7e3f59 and e91044da (T824, 2026-10-28; T860, 2026-11-02; PINS, 2026-11-09)

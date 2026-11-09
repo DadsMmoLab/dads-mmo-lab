@@ -190,7 +190,7 @@ def test_dfo_is_pinned_and_its_archive_is_of_that_pin() -> None:
     (source,) = dfo.emulator.sources
     process = dfo.install.process
     assert process is not None
-    assert source.rev == "db707d59e303b49426c62d9e35d14181e7823631"
+    assert source.rev == "6d170a6a84b839ec7c6570edadac85da29b5e4d4"
     assert source.rev in process.archive.url and process.archive.root.endswith(source.rev)
     assert [p.file.rsplit("/", 1)[-1][:4] for p in process.patches] == [
         "0001",
