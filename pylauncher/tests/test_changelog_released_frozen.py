@@ -41,6 +41,7 @@ PINNED: dict[str, tuple[int, str]] = {
     "v0.9.22-Public": (12, "2a669c097ae7c69e2ce7beaf6d09c06dc273051685681bcb84f62d0726e60d64"),
     "v0.9.30-Public": (5, "7e96336d6efaf0f715dd2763a99a203a1eb135a0ae01d16aa0f6439da2c73ba1"),
     "v0.9.31-Public": (18, "794a3110718b09ceb3ef8a202aebe3c1f310325f433e04c3916fde741c95eb2e"),
+    "v0.9.32-Public": (20, "26a60faec2b682d434437d59a06a70018512d74c1e52981bb36b594acd8c10cf"),
     "v0.9.16-Public": (63, "016f3fde6ed8e5c28a75e752be18268b313800690c1668959e699684ca791ca7"),
     "v0.9.15-Public": (68, "2416ef743ecedb20dfc9344274d69cc4bd23b5feb983a5e899f4d456647af26b"),
     "v0.9.14-Public": (5, "fe4bbd2f1356ab73845c8d87ad124f7cb7d7ab47ff235fa8170e7c6bc9d1b27a"),
