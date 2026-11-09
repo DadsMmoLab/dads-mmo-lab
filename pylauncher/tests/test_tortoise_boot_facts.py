@@ -348,7 +348,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
     # rest are held to the SHAPE of a full commit id, because an abbreviation
     # is a prefix and a prefix can stop being unique.
     core = next(s for s in sources if s.repo.endswith("tortoise-wow"))
-    assert core.rev == "33d0131a5f0f536dffaced04de859561bfc13d5a", (
+    assert core.rev == "48cb227f2cb698920dc2f60eeadd6546243eb75e", (
         f"the core is pinned to {core.rev!r}. It was 7c0fb278, then 3a8472e on the retired "
         "Shyalya fork, 9980181c on `tortoise-wow/tortoise-wow` branch `bot-helpers` since T30 "
         "(every measurement in this file taken against it on `yulon-arch` 2026-09-11, "
@@ -369,13 +369,17 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "src/game/Objects/Unit.h and src/scripts/spells/spell_druid.cpp only (GitHub compare), "
         "so every measurement above holds; the TortoiseBots README names the core's `main` "
         "branch as its base, and `main` has the SOAP interface (src/mangosd/MaNGOSsoap.cpp); "
-        "and T824 moved it to 33d0131a, `main` on 2026-10-28, the newest at 2026-10-28 and "
-        "not live-tested: AutoUpdater.cpp's failed-migration read is still at :236-239 "
-        "(re-read on GitHub, the updater patch still applies), and nothing else in this "
+        "T824 moved it to 33d0131a, `main` on 2026-10-28, the newest at 2026-10-28 and "
+        "not live-tested; and 2026-11-09 moved it to 48cb227f, `main` that day, the newest and "
+        "not live-tested: AutoUpdater.cpp is byte-identical to 33d0131a's (the failed-migration "
+        "read is still at :236-239 and the updater patch still applies), mangosd.conf.dist.in, "
+        "realmd.conf.dist.in, sql/base and sql/create_databases.sql are unchanged, the diff is "
+        "four world-data updates, SpellEffects.cpp, Master.cpp/.h (the realm is flagged offline "
+        "until the network starts) and tools/mmap/offmesh.txt, and nothing else in this "
         "file's measurements was re-taken. Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "573c791928341c79f1086ce6cf7dab795b54978d", (
+    assert module.rev == "a90d0407251f6e8471bd79b2fba7f6b20370d281", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -443,7 +447,12 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "its top level), and the dashboard protocol 8 -> 9 (rebuilt from "
         "the same checkout, T162); and T824 moved it to 573c7919, the commit release v1.14.0 "
         "names (2026-10-28, main's tip, chosen without a live run: the newest at 2026-10-28, "
-        "not live-tested)"
+        "not live-tested); and 2026-11-09 moved it to a90d0407, the commit release v1.22.1 "
+        "names (main's tip, not live-tested): every conf key the entry writes still exists in "
+        "conf/tortoise_bots.conf.dist and ai/playerbot/aiplayerbot.conf.dist.in (their defaults "
+        "changed: AiPlayerbot.Enabled and Observability now 1, which the install's keys "
+        "override), the data/sql/world and data/sql/character folders are still there, and "
+        "TortoiseBots.cmake only gained sources"
     )
     for source in sources:
         assert re.fullmatch(

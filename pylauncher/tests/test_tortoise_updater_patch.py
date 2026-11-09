@@ -8,11 +8,11 @@ exist, and the failure line that would say why is never printed. Shyalya's fork
 dropped the read in `b405b10adb`; tortoise-wow never did. The fix is carried as
 a catalog patch (`wow-tortoise/patches/updater-no-wait-for-enter.patch`).
 
-The fixture under `tests/fixtures/tortoise-33d0131a/` is that one file, byte for
+The fixture under `tests/fixtures/tortoise-48cb227f/` is that one file, byte for
 byte, from tortoise-wow at `187af788`, read on 2026-10-09; the file is byte-identical at
 `6131a26f` (T656, compared 2026-10-10), at `10393426`, the pin since v0.9.18 (read on
-GitHub 2026-10-17), and at `33d0131a`, the pin since T824 (read on GitHub 2026-10-28),
-so the folder carries the newest pin's name.
+GitHub 2026-10-17), at `33d0131a` (T824, read on GitHub 2026-10-28) and at `48cb227f`, the pin since
+2026-11-09 (read from a fetched tree), so the folder carries the newest pin's name.
 """
 
 from __future__ import annotations
@@ -30,14 +30,14 @@ from yulon.catalog.families import patch
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-33d0131a"
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tortoise-48cb227f"
 REL = Path("src") / "shared" / "Database" / "AutoUpdater.cpp"
 PATCH_FILE = "wow-tortoise/patches/updater-no-wait-for-enter.patch"
 CORE_DEST = "src/tortoise-wow"
-AUDITED_PIN = "33d0131a5f0f536dffaced04de859561bfc13d5a"
+AUDITED_PIN = "48cb227f2cb698920dc2f60eeadd6546243eb75e"
 """The core commit whose `AutoUpdater.cpp` was read for this patch (187af788 on 2026-10-09,
 6131a26f on 2026-10-10 for T656, 10393426 on 2026-10-17 for v0.9.18, 33d0131a on 2026-10-28
-for T824: the same bytes, the read still there).
+for T824, 48cb227f on 2026-11-09: the same bytes, the read still there).
 
 A pin bump must fail `test_the_pin_is_the_one_whose_updater_was_read`
 until somebody re-reads the file at the new pin: still has the read -> keep the
@@ -74,7 +74,7 @@ def test_wow_tortoise_carries_the_updater_patch_against_the_core() -> None:
     _entry, block = _native()
     assert [(p.file, p.source) for p in block.patches] == [(PATCH_FILE, CORE_DEST)]
     reason = block.patches[0].reason
-    assert "AutoUpdater.cpp" in reason and "33d0131a" in reason and "b405b10" in reason
+    assert "AutoUpdater.cpp" in reason and "48cb227f" in reason and "b405b10" in reason
 
 
 def test_the_patch_leaves_no_read_of_stdin_after_a_failed_migration(tmp_path: Path) -> None:
