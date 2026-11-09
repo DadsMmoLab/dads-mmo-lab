@@ -238,8 +238,8 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
 
 GATE_PINS = {
     "wow-wotlk": {
-        "mod-playerbots/azerothcore-wotlk": "93333d6a9eb00fdf0179adde30da3c17618207d6",
-        "mod-playerbots/mod-playerbots": "05a1f6fceb8a32aa879b13f5f48934c6e46a774c",
+        "mod-playerbots/azerothcore-wotlk": "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2",
+        "mod-playerbots/mod-playerbots": "405f81196161017eebae3ee7a612d786a3ed2a9d",
     },
     "wow-tbc": {
         "cmangos/mangos-tbc": "af6b4885647d4eca7802b68fccf52f0bccd8ed23",
@@ -258,6 +258,17 @@ Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
 `dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26, 2026-10-08,
 2026-10-10 and 2026-10-17:
 
+* PINS (2026-11-09) moved `wow-wotlk` (and `wow-unbound`) to the newest heads of that day WITHOUT a
+  live gate: core `93333d6a` -> `e7e2e288` (90 commits) and module `05a1f6f` -> `405f8119` (18
+  commits); `wow-centurion` `0f7e3f59` -> `e91044da` (one commit, `spell_priest.cpp` only) and
+  `wow-mop` `e135742e` -> `efe7f291` (eleven CI and README commits only). Read from the GitHub
+  compares and the new trees: the core's base SQL lost only the `spell_proc_event` table
+  (dropped by update 2026_10_28_00; not one of Yu'lon's tables) and `acore_string` lost its
+  locale columns (2026_10_31_00), no gossip menu in 49990..70000 was touched, the three Docker
+  recipe files are byte for byte the same, `Player.h::SetSkill`, `AccountMgr.h` and
+  `WorldSession::IsHeadless()` are unchanged, and the module drops five config keys Yu'lon
+  never names. Unbound's five core patches apply in order to the new core. The pins of the other
+  games are moved and checked in their own entries.
 * T860 (2026-11-02) moved all three to upstream's heads of that day WITHOUT a live gate:
   `wow-wotlk` core `3f2969dd` -> `93333d6a` and module `e88cc409` -> `05a1f6f`; `wow-tbc`
   `37767e95` -> `af6b4885`, `6823423e` -> `de1b1823`, `1c54acd2` unchanged; `wow-vanilla`

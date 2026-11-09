@@ -8,19 +8,22 @@ from __future__ import annotations
 
 import re
 
-PIN = "93333d6a9eb00fdf0179adde30da3c17618207d6"
-"""mod-playerbots/azerothcore-wotlk: wow-wotlk's pin, and wow-unbound's core, since T860
-(2026-11-02; 3f2969dd since T824, 8a4e76ea since v0.9.18, 2a2211cd, T655, before).
-`PIN_COLUMNS` was read at `FORMER_PINS[3]`, f19a1879, and shown to hold here (see `VALID_AT`)."""
+PIN = "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2"
+"""mod-playerbots/azerothcore-wotlk: wow-wotlk's pin, and wow-unbound's core, since PINS
+(2026-11-09; 93333d6a since T860, 2026-11-02; 3f2969dd since T824, 8a4e76ea since v0.9.18,
+2a2211cd, T655, before). `PIN_COLUMNS` was read at `FORMER_PINS[4]`, f19a1879,
+and shown to hold here (see `VALID_AT`)."""
 
 FORMER_PINS = (
+    "93333d6a9eb00fdf0179adde30da3c17618207d6",
     "3f2969ddb0da42b48b4fca050c02b19163ba1e20",
     "8a4e76eac8c4ccebf547113afe7b51d6c3e91641",
     "2a2211cd8f3d157da432ec0175ddd4b8a191931f",
     "f19a18799a35f7c24bdcdc9ea399c601f166259b",
     "7f12e89ee5f467a50e62eba1d525eac7dc953d03",
 )
-"""wow-wotlk's earlier pins, newest first: 3f2969dd from T824 (2026-10-28) to T860;
+"""wow-wotlk's earlier pins, newest first: 93333d6a from T860 (2026-11-02) to PINS (2026-11-09);
+3f2969dd from T824 (2026-10-28) to T860;
 8a4e76ea from v0.9.18 (2026-10-17) to T824; f19a1879 from T389 (2026-10-08, the revision
 `PIN_COLUMNS` was read at; wow-unbound's core from T580, 2026-10-09) until T655; 2a2211cd
 from T655; 7f12e89e before that (and the core wow-unbound shipped on)."""
@@ -39,8 +42,14 @@ v0.9.18, read from the GitHub compare 2026-10-17) no file under `data/sql/base` 
 `ALTERs module_string_locale.locale`, a module-owned table not among `PIN_COLUMNS`. Between
 3f2969dd and 93333d6a (37 commits, T860, read from the GitHub compare 2026-11-02) no file under
 `data/sql/base` changed and the 10 new `db_world` updates hold no ALTER, CREATE, DROP, RENAME or
-TRUNCATE statement. Each pin
-move must add its revision here after checking the same two things."""
+TRUNCATE statement. Between
+93333d6a and e7e2e288 (90 commits, PINS, read from the GitHub compare and a checkout
+2026-11-09) one file under `data/sql/base` changed: `db_world/spell_proc_event.sql` was deleted,
+because update 2026_10_28_00 runs `DROP TABLE IF EXISTS spell_proc_event`; the other DDL in the
+23 new `db_world` updates is `CREATE TABLE IF NOT EXISTS acore_string_locale` (2026_10_25_00) and
+`ALTER TABLE acore_string DROP COLUMN locale_*` (2026_10_31_00). None of those three tables is
+among `PIN_COLUMNS`. Each pin move must add its revision here after checking the same two
+things."""
 
 PIN_COLUMNS: dict[str, frozenset[str]] = {
     "creature": frozenset(

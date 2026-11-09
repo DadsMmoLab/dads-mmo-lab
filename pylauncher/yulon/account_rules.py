@@ -17,7 +17,7 @@ same allow-list's. The longest are each core's own `MAX_ACCOUNT_STR` and passwor
 ceiling, read at the catalog's pinned trees on 2026-10-11:
 
 - `azerothcore` (AzerothCore): name 17, password 16. azerothcore-wotlk 2a2211cd,
-  8a4e76ea, 3f2969dd and 93333d6a (T824, 2026-10-28; T860, 2026-11-02)
+  8a4e76ea, 3f2969dd, 93333d6a and e7e2e288 (T824, 2026-10-28; T860, 2026-11-02; PINS, 2026-11-09)
   `src/server/game/Accounts/AccountMgr.h:34-35`.
 - `mangos_srp6` (CMaNGOS): name 16, password 16. mangos-tbc 15b6ddb4, 37767e95 and
   af6b4885, mangos-classic 8ec338a1, 57312491 and ff13624a (T824, 2026-10-28; T860, 2026-11-02)
@@ -26,10 +26,11 @@ ceiling, read at the catalog's pinned trees on 2026-10-11:
   6131a26f, 10393426 and 33d0131a (T824, 2026-10-28) `src/game/AccountMgr.h:50`,
   `AccountMgr.cpp:136`.
 - `trinitycore` (TrinityCore112, Centurion): name 16, password 16. TrinityCore112
-  25d3e6ef, 351950fb and 0f7e3f59 (T824, 2026-10-28; T860, 2026-11-02)
+  25d3e6ef, 351950fb, 0f7e3f59 and e91044da (T824, 2026-10-28; T860, 2026-11-02; PINS, 2026-11-09)
   `src/server/game/Accounts/AccountMgr.h:41-42`.
 - `trinitycore_sha` (the TrinityCore family's MoP line): name 16, password 16. The
-  `wow-mop` core e135742e (T850-C, 2026-11-01)
+  `wow-mop` core e135742e (T850-C, 2026-11-01; efe7f291 since PINS, 2026-11-09,
+  no source change between)
   `src/server/game/Accounts/AccountMgr.h:46-47` (`MAX_ACCOUNT_STR` / `MAX_PASS_STR`,
   `CreateAccount`'s `utf8length(username) > MAX_ACCOUNT_STR` and `ChangePassword`'s
   `utf8length(newPassword) > MAX_ACCOUNT_STR`). Its `account.username` column is

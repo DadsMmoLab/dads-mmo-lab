@@ -31,6 +31,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Windows: Start waits for a port Windows is still letting go of after a stop, instead of blaming another program.
 
 ### Changed
+- World of Warcraft (WotLK) and Unbound: the server and Playerbots move to the newest upstream code (2026-11-09).
+- World of Warcraft (Centurion): the server moves to the newest upstream code (2026-11-09).
+- World of Warcraft (Mists of Pandaria): the server moves to the newest upstream code (2026-11-09).
 
 ## v0.9.31-Public — 2026-11-04
 

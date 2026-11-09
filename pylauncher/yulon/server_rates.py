@@ -213,7 +213,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-wotlk": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="93333d6a9eb00fdf0179adde30da3c17618207d6",
+        rev="e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2",
         keys=_ALL_KEYS,
         notes={},
     ),
@@ -221,11 +221,12 @@ _GAMES: dict[str, _GameRates] = {
     # 7f12e89e; T580 (2026-10-09) moved it to f19a1879, wow-wotlk's pin since T389; T655
     # (2026-10-10) moved both to 2a2211cd (worldserver.conf.dist unchanged between the two);
     # the move to 8a4e76ea (2026-10-17) changed only the default of `DungeonFinder.OptionsMask`;
-    # T860 (2026-11-02) moved both to 93333d6a, the newest, not live-tested (same conf.dist).
+    # T860 (2026-11-02) moved both to 93333d6a, the newest, not live-tested (same conf.dist);
+    # the 2026-11-09 pins move to e7e2e288 (the rate keys are unchanged; two comments reworded).
     "wow-unbound": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="93333d6a9eb00fdf0179adde30da3c17618207d6",
+        rev="e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2",
         keys=_ALL_KEYS,
         notes={},
     ),
@@ -268,7 +269,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-centurion": _GameRates(
         file="etc/worldserver.conf",
         repo="thomasjteachey/TrinityCore112",
-        rev="0f7e3f5992620e02edd6238a790fee9827af60ec",
+        rev="e91044dae91b427c0fadbf753c2294af77656c58",
         keys=_ALL_KEYS,
         notes={},
     ),
