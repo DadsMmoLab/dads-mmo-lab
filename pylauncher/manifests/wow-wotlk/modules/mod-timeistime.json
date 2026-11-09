@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "id": "mod-timeistime",
+  "name": "Time Is Time",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "Makes the day and night cycle run faster or slower.",
+  "folder": "mod-TimeIsTime",
+  "source": {
+    "repo": "dunjeon/mod-TimeIsTime",
+    "branch": "master"
+  },
+  "build": {
+    "rebuild": true
+  },
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod-time_is_time.conf",
+      "keys": [
+        {
+          "key": "TimeIsTime.Announce",
+          "label": "Announce the module",
+          "explain": "Announce TimeIsTime. Settings: 0 = off, 1 = on. Default: 1.",
+          "type": "bool"
+        },
+        {
+          "key": "TimeIsTime.Enable",
+          "label": "Enable Time Is Time",
+          "explain": "Enable TimeIsTime. Settings: 0 = off, 1 = on. Default: 1.",
+          "type": "bool"
+        },
+        {
+          "key": "TimeIsTime.SpeedRate",
+          "label": "Day and night speed",
+          "explain": "Adjust the number of game days per real day by altering the Realm Timer. 60.0 = 1 game day every 24 minutes, 30.0 = every 48 minutes, 15.0 = every 96 minutes (1.6 hours), 7.5 = every 192 minutes (3.2 hours), 3.75 = every 384 minutes (6.4 hours), 1.875 = every 768 minutes (12.8 hours), 1.0 = every 1440 minutes (24 hours). Default: 1.0 (Blizzlike).",
+          "type": "float"
+        },
+        {
+          "key": "TimeIsTime.TimeStart",
+          "label": "Start the game clock at (Unix time)",
+          "explain": "Start the (client side) game clock at the chosen Epoch (Unix) time at the same time each login. Default: 0 (Local Time).",
+          "type": "int"
+        },
+        {
+          "key": "TimeIsTime.HourOffset",
+          "label": "Hour offset",
+          "explain": "Set together with TimeStart: start the (client side) game clock at the chosen Epoch (Unix) time at the same time each login. Default: 0.0.",
+          "type": "float"
+        }
+      ],
+      "template": "conf/mod-time_is_time.conf.dist"
+    }
+  ],
+  "notes": [
+    "The core finds this module by its folder name (the loader defines Addmod_TimeIsTimeScripts), so the clone keeps the author's capitals in modules/mod-TimeIsTime while the id is the lower-case slug.",
+    "Restart the worldserver after changing the settings."
+  ]
+}

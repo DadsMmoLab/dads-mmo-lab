@@ -14,6 +14,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- WotLK: the Time Is Time module makes the day and night cycle run faster or slower.
 
 ### Fixed
 
