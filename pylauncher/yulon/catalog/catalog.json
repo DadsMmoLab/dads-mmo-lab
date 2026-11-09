@@ -9,7 +9,8 @@
       "notes": [
         "The tile said, until T194: \"The flagship install; module/ALE/mod/keg management is manifest-driven.\"",
         "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested.",
-        "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested."
+        "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested.",
+        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots",
@@ -19,13 +20,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "93333d6a9eb00fdf0179adde30da3c17618207d6"
+            "rev": "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "05a1f6fceb8a32aa879b13f5f48934c6e46a774c"
+            "rev": "405f81196161017eebae3ee7a612d786a3ed2a9d"
           }
         ]
       },
@@ -1694,7 +1695,8 @@
       "description": "Centurion is level-60 player-versus-player WoW on the 3.3.5a client, with hardcore world characters, tournament battlegrounds and arenas, and 150 bots that quest, roam and fill the battlegrounds. Yu'lon builds the server from Centurion's own source and makes your English 3.3.5a client ready to play it, with Centurion's patches and addons.",
       "notes": [
         "T824 (2026-10-28): TrinityCore112 CENTURION 25d3e6ef -> 351950fb, the newest at 2026-10-28, not live-tested.",
-        "T860 (2026-11-02): TrinityCore112 CENTURION 351950fb -> 0f7e3f59, the newest at 2026-11-02, not live-tested."
+        "T860 (2026-11-02): TrinityCore112 CENTURION 351950fb -> 0f7e3f59, the newest at 2026-11-02, not live-tested.",
+        "PINS (2026-11-09): TrinityCore112 CENTURION 0f7e3f59 -> e91044da, the newest at 2026-11-09, not live-tested."
       ],
       "emulator": {
         "name": "Centurion (TrinityCore 3.3.5 fork with its own playerbots)",
@@ -1703,7 +1705,7 @@
             "repo": "thomasjteachey/TrinityCore112",
             "branch": "CENTURION",
             "dest": "src/centurion",
-            "rev": "0f7e3f5992620e02edd6238a790fee9827af60ec"
+            "rev": "e91044dae91b427c0fadbf753c2294af77656c58"
           }
         ]
       },
@@ -2608,7 +2610,8 @@
       "notes": [
         "T554: the multi-class server. Own folder, containers, images, volumes, databases and ports, so it runs beside WoW WotLK.",
         "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested.",
-        "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested."
+        "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested.",
+        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots + mod-ale + Wrath Unbound",
@@ -2618,13 +2621,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "93333d6a9eb00fdf0179adde30da3c17618207d6"
+            "rev": "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "05a1f6fceb8a32aa879b13f5f48934c6e46a774c"
+            "rev": "405f81196161017eebae3ee7a612d786a3ed2a9d"
           },
           {
             "repo": "azerothcore/mod-ale",
@@ -3469,7 +3472,7 @@
         "status": "beta",
         "description": "Mists of Pandaria 5.4.8 (Legends of Azeroth Pandaria) with 500 playerbots that quest, travel, group and level from 1 to 90, Pandaria included. Yu'lon builds the server from LoA Pandaria's own source and makes your English 5.4.8 client ready to play it. Bring the Recall WoW client.",
         "notes": [
-            "T850: 1LineAtaTime/LoA-Pandaria-Playerbots, branch `playerbot` @ e135742e1891d3e653d27966da2dc70e793f203e (tag v1.0.4, 2026-10-26, \"Fix the Linux build\"): a TrinityCore/SkyFire-lineage 5.4.8 fork (Legends of Azeroth Pandaria) with mod_playerbots ported from AzerothCore. The lab's handoff of 2026-10-28 logged in, created a character and ran 500 bots on this exact commit on Docker Desktop; the catalog ENTRY is not live-tested (GAP §2 and §4).",
+            "T850: 1LineAtaTime/LoA-Pandaria-Playerbots, branch `playerbot` @ efe7f29107e15a98e0bc4b3ebf61f54696e0827f (PINS, 2026-11-09, the newest; it moved from tag v1.0.4, e135742e1891d3e653d27966da2dc70e793f203e, 2026-10-26, \"Fix the Linux build\", and the 11 commits between touch only CI workflows and README.md, no source or SQL): a TrinityCore/SkyFire-lineage 5.4.8 fork (Legends of Azeroth Pandaria) with mod_playerbots ported from AzerothCore. The lab's handoff of 2026-10-28 logged in, created a character and ran 500 bots on e135742e on Docker Desktop; the catalog ENTRY is not live-tested (GAP §2 and §4).",
             "The four databases come from the release asset LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip (142,501,177 B, sha256 db8dd845e3a5da4bc3a6f28afa68ed839aceb222101db949ae74840a5a2365a0): four .sql files at the ZIP'S ROOT, no folder (GAP §0). Source pin, asset and zip layout read at GAP §0; NOT from the checkout, whose sql/base holds no world.",
             "Client data is MPQ, not CASC: 5.4.8 predates CASC, and the extractors open fixed names (upstream src/tools/map_extractor/System.cpp:104-117,1275-1400 and vmap4_extractor/vmapexport.cpp:68-79,130-165). Target build is 18273 -- `18414 but Blizz didnt rename the MPQ files` (System.cpp:101) -- so the 18 wow-update MPQ names carry 16016..18273, never 18414.",
             "GAP §2's \"Characters tab\" row: NOTHING has been run against a live LoA Pandaria server, so every Characters verb is withheld with the \"each is offered once it has been checked against a live server\" sentence, Revive included; fill them in after the first live check.",
@@ -3482,7 +3485,7 @@
                     "repo": "1LineAtaTime/LoA-Pandaria-Playerbots",
                     "branch": "playerbot",
                     "dest": "src/mop",
-                    "rev": "e135742e1891d3e653d27966da2dc70e793f203e"
+                    "rev": "efe7f29107e15a98e0bc4b3ebf61f54696e0827f"
                 }
             ]
         },

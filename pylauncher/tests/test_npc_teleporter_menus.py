@@ -51,6 +51,7 @@ PINS_MEASURED = (
     "8a4e76eac",
     "3f2969ddb",
     "93333d6a",
+    "e7e2e288e",
 )
 USED_AT_BOTH_PINS = (
     (50000, 50008),
@@ -88,7 +89,11 @@ Mentor (900001) carries `gossip_menu_id` 0 and talks through Lua. T860 (2026-11-
 93333d6a from the GitHub compare: no base SQL changed since 3f2969dd, and its 10 db_world
 updates hold no ALTER, CREATE, DROP, RENAME or TRUNCATE, no event-62 smart_scripts row, no
 gossip_menu or gossip_menu_option row and no type 14 or 15 condition with an id in
-49990..70000. 58000..60999 and
+49990..70000. PINS (2026-11-09) read e7e2e288 from the GitHub compare and a checkout: no base
+SQL changed except the deletion of `spell_proc_event.sql`, and its 23 db_world updates hold no
+event-62 smart_scripts row with a parameter in the range (62 rows read), no gossip_menu_id, no
+gossip_menu_option row and no type 14 or 15 condition in it (the one gossip_menu row, and the
+one type-14 condition, are for menu 8532). 58000..60999 and
 62000..89999 are unused.
 """
 

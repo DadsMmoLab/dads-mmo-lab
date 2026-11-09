@@ -15,7 +15,8 @@ and how it recovers from a compile it never saw finish.
 The header and binding excerpts are the measured bytes (line 113 of
 `src/PlayerbotAIConfig.h` at mod-playerbots 037c0141 and 79bd4281, line 115 at
 d750b4b3, at e88cc409 (T824, read on GitHub 2026-10-28) and at 05a1f6f (T860, read on
-GitHub 2026-11-02, same members); lines 515 and
+GitHub 2026-11-02, same members) and at 405f8119 (PINS, read in a checkout 2026-11-09, same
+members); lines 515 and
 528 of `src/LuaEngine/methods/Playerbots/PlayerBotAIMethods.h` at mod-ale cead0cb).
 """
 
