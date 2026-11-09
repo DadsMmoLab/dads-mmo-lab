@@ -59,6 +59,7 @@ UPDATE gameobject_template SET data2=5, data3=0, data8=0 WHERE entry=176110;
 UPDATE gameobject_template SET data2=5, data3=18110, data4=1, data8=1 WHERE entry=177304;
 
 -- The Demon Seed GO: make it despawnable on use with short autoclose value
+UPDATE `gameobject` SET `spawntimesecsmin` = 60, `spawntimesecsmax` = 60 WHERE `id` = 3524;
 UPDATE gameobject_template SET data3=65536, data5=1 WHERE entry=3524;
 
 -- Add missing GO template 175622 spawn by GO Rookery Egg 175124 (guessed data)
@@ -118,6 +119,7 @@ UPDATE gameobject_template SET `data3`=0, `data5`=1 WHERE entry=102413;
 UPDATE gameobject_template SET data6=0 WHERE entry=178559;
 
 -- Inconspicuous Landmark 142189 - consumable, despawn on s.11462 expire
+UPDATE `gameobject` SET `spawntimesecsmin` = 30, `spawntimesecsmax` = 60 WHERE `id` = 142189;
 UPDATE `gameobject_template` SET `data5` = 1 WHERE `entry` = 142189; -- 19660800 / 65536 = 300sec
 
 -- hack - this bypasses despawn prevention due to GO casting a hidden 6 second spell the GO should cast - note will be put down even in core
@@ -181,6 +183,8 @@ UPDATE spell_template SET AttributesEx=AttributesEx|0x00000800 WHERE Id IN( -- S
 -- Single Spells
 6562, -- Heroic Presence (Racial Passive)
 9612, -- Ink Spray
+13589, -- Haste Aura
+20218, -- Sanctity Aura
 23060, -- Battle Squawk
 34123, -- Tree of Life (Passive)
 34410, -- Hellscream's Warsong

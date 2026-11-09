@@ -18,8 +18,13 @@ none: `RandomBotJoinLfgOutleveledExpansion`, `AllowBattlegroundCommands` and
 command note), so it is 891 keys and no rename either. The tip T860 pins, 05a1f6f
 (2026-11-02), adds four keys and renames none: `AutoPickTalentsForPlayerControlledBots`,
 `RpgTargetSearchDistance`, `CollectDetailedQuestStats` and `ProbTeleToQuestGivers`, so it is
-895 keys. The `GetOption` literals in `src/` agree (395 and 396). So a key's own name is kept
-and its prefix is swapped, in both directions.
+895 keys. The `GetOption` literals in `src/` agree (395 and 396). The tip PINS (2026-11-09)
+pins, 405f8119, adds four keys and renames none (`RandomBotCountMode`, `RandomBotCountMinTime`,
+`RandomBotCountMaxTime` and `BlessingRefreshThresholdSeconds`) and removes five
+(`EnablePeriodicOnlineOffline`, `PeriodicOnlineOfflineRatio`, `MinRandomBotInWorldTime`,
+`MaxRandomBotInWorldTime` and `PermanentlyInWorldTime`), so it is 894 keys; none of the
+removed five is one Yu'lon names. So a key's own name is kept and its prefix is swapped, in both
+directions.
 
 **Three kinds of name the swap never touches**, read in both trees:
 

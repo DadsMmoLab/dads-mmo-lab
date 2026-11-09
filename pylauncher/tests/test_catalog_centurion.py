@@ -50,6 +50,11 @@ signal handler :304-308, `World initialized` moved to World.cpp:2554 and the fat
 still defaults every bot feature off, and `cs_misc.cpp:797-798` still holds the revive fix
 (added to `REVIVE_FIXED_PINS`).
 
+PINS (2026-11-09) moved the pin to e91044da, the newest CENTURION tip, without a live run: the
+GitHub compare from 0f7e3f59 is one commit that touches only
+`src/server/scripts/Spells/spell_priest.cpp`, so every reading above holds at the new commit
+(added to `REVIVE_FIXED_PINS`).
+
 The entry's family blocks were tested before this entry existed against the fixture in
 `tests/support_trinitycore.py`; the last test here holds the two together, so a template
 proved on the fixture is proved on what ships.
@@ -75,7 +80,7 @@ ENTRY: CatalogEntry = load_catalog().get("wow-centurion")
 NATIVE = ENTRY.install.native
 assert NATIVE is not None and NATIVE.trinitycore is not None
 TC = NATIVE.trinitycore
-REV = "0f7e3f5992620e02edd6238a790fee9827af60ec"
+REV = "e91044dae91b427c0fadbf753c2294af77656c58"
 CHECKOUT = "src/centurion"
 PATCHES = f"{CHECKOUT}/centurion/patches"
 CORE = "/opt/trinitycore"

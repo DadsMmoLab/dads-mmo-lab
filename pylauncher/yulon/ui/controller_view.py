@@ -267,7 +267,13 @@ from yulon.ui.widgets.page import (
 )
 from yulon.ui.widgets.party_panel import PartyPanel
 from yulon.ui.widgets.prompt import InputPrompter
-from yulon.ui.widgets.reasons import ReasonLine, drop_reason, reason_of, set_enabled_why
+from yulon.ui.widgets.reasons import (
+    ReasonLine,
+    drop_reason,
+    drop_reason_if,
+    reason_of,
+    set_enabled_why,
+)
 from yulon.ui.widgets.remove_dialog import RemovalChoice, ask_removal, offered_choices
 from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 
@@ -316,6 +322,13 @@ def _said_by_yulon(exc: object) -> bool:
 def _detail_of(exc: object) -> str:
     """What a program printed beside Yu'lon's sentence, for Details; "" for none (T214)."""
     return exc.detail if isinstance(exc, SaidByYulon) else ""
+
+
+def _is_import_output(line: object) -> bool:
+    """Whether a realm switch's line is what the db-import printed, not the switch's own (T878)."""
+    from yulon import coa_switch
+
+    return isinstance(line, coa_switch.ImportOutput)
 
 
 def _for_the_log(exc: object) -> str:
@@ -2133,7 +2146,7 @@ def _realm_switch(
         write_override=lambda env: _write_realm_override(entry, server_dir, env),
         stop=lambda: _stop_for_realm_switch(entry, server_dir, wsl_distro=wsl_distro),
         start_db=lambda: docker.start_database(
-            spec, server_dir, because="nothing was switched", wsl_distro=wsl_distro
+            spec, server_dir, because="the realm type could not be read", wsl_distro=wsl_distro
         ),
         start=lambda: _start_for_realm_switch(entry, server_dir, sql, wsl_distro=wsl_distro),
         bot_prefix=bot_prefix,
@@ -10084,6 +10097,9 @@ class ControllerView(QWidget):
         )
         self.realm_type_switch_button = QPushButton("Switch realm type…", tab)
         self.realm_type_switch_button.clicked.connect(self.switch_realm_type)
+        # Picking a type is what offers the switch: without this the button kept the state of
+        # the last refresh, greyed for good after a pick until a Stop or a finished job redrew it.
+        self.realm_type_choice.currentIndexChanged.connect(self._realm_type_picked)
         self._show_realm_type()
         # T36. Visible for every game, including WotLK -- AzerothCore reads no
         # client itself, but the folder is still a host path a manifest's
@@ -11355,6 +11371,11 @@ class ControllerView(QWidget):
         self.realm_type_switch_button.setEnabled(bool(offered))
         self.realm_type_choice.setEnabled(self.services.realm_switch is not None and not self._busy)
 
+    @Slot(int)
+    def _realm_type_picked(self, _index: int) -> None:
+        """A type picked in the list lights Switch realm type… when it is not the current one."""
+        self._set_realm_switch_button()
+
     @Slot()
     def switch_realm_type(self) -> None:
         """Ask, then stop, switch and start again on the worker thread (T812 C3b)."""
@@ -11404,8 +11425,14 @@ class ControllerView(QWidget):
     def _realm_switched(self, lines: object) -> None:
         """A finished switch: say what moved, refresh for the new world."""
         self._set_busy(False)
-        said = "\n".join(str(line) for line in lines) if isinstance(lines, list) else str(lines)
+        # T878: the db-import's own output goes under Details, folded, as a failed Start's
+        # does (T414); on the line it pushed Play down by the length of the import. The
+        # sentences stay on the line.
+        said_lines = lines if isinstance(lines, list) else [lines]
+        said = "\n".join(str(line) for line in said_lines if not _is_import_output(line))
+        printed = "\n".join(str(line) for line in said_lines if _is_import_output(line))
         self.problem_label.setText(said)
+        self.problem_details.set_text(printed)
         self._show_realm_type()
         self.refresh_status()
         if self._play_after_start:
@@ -11420,6 +11447,10 @@ class ControllerView(QWidget):
         """A refused switch: said, with the holder's sentence when it is held."""
         self._set_busy(False)
         self.problem_label.setText(str(exc))
+        # T878: a failed import's last lines (the refusal's `detail`) stay open under the line.
+        self.problem_details.set_text(_detail_of(exc))
+        if self.problem_details.text():
+            self.problem_details.handle.set_collapsed(False)
         self.action_failed.emit(str(exc))
         self._show_realm_type()
         self.refresh_status()
@@ -12454,6 +12485,8 @@ class ControllerView(QWidget):
                 self._set_rebuild_dashboard_button()
         # T822: the banner's press waits for whatever this tab is running.
         self._refresh_repair_banner()
+        if waited is not None and not busy:
+            self._forget_the_wait(waited)
         # T187: the launcher window greys its settings while this tab is busy.
         self.play_state_changed.emit()
         if not busy and self._badge_held is not None:
@@ -12463,6 +12496,30 @@ class ControllerView(QWidget):
             if self._hold_ends_at is None:
                 self._hold_ends_at = self._status_asks + 1
             self.refresh_status()
+
+    def _forget_the_wait(self, waited: str) -> None:
+        """Take a finished job's "Wait: X is running." off everything still carrying it (T877).
+
+        The job greyed every press with `waited`. Those the end re-enables drop it by
+        themselves (the reason line watches their enabled event), but a press that stays
+        greyed -- Switch realm type once the type is the active one, Adopt as imported,
+        a build action this install has no route for -- flips nothing, so the reason,
+        its tooltip and its line outlived the job. One sweep here covers every job
+        that ends through `_set_busy(False)`, whichever press started it. A reason
+        any later site gave a press (its own standing reason, a different wait) is kept.
+        """
+        # A build job's end (`_rebuild_finished`) can have left Adopt greyed with "Wait: the
+        # server build is running." set by the build's own last step: the build is over, so
+        # dropping it is right (T877 review).
+        for widget in self.findChildren(QWidget):
+            drop_reason_if(widget, waited)
+        for action in self.findChildren(QAction):
+            # Shown actions only. A hidden one keeps its reason: nobody draws its button,
+            # `_offer_build_action()` gives the right one when it is shown again, and a
+            # reason cleared here makes that showing grey the button with no reason at all,
+            # which `_bind_button_to_action()` refuses with a ValueError in a Qt slot.
+            if action.isVisible() and action.property(ControllerView._GREY_WHY) == waited:
+                action.setProperty(ControllerView._GREY_WHY, None)
 
     def _ends_the_hold(self) -> bool:
         """Whether the status read answering now was asked once the holding job had ended."""

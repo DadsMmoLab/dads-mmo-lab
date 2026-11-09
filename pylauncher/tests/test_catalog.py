@@ -238,18 +238,18 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
 
 GATE_PINS = {
     "wow-wotlk": {
-        "mod-playerbots/azerothcore-wotlk": "93333d6a9eb00fdf0179adde30da3c17618207d6",
-        "mod-playerbots/mod-playerbots": "05a1f6fceb8a32aa879b13f5f48934c6e46a774c",
+        "mod-playerbots/azerothcore-wotlk": "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2",
+        "mod-playerbots/mod-playerbots": "405f81196161017eebae3ee7a612d786a3ed2a9d",
     },
     "wow-tbc": {
-        "cmangos/mangos-tbc": "af6b4885647d4eca7802b68fccf52f0bccd8ed23",
-        "cmangos/playerbots": "de1b1823ab8352c6ebaeaa98cc576e1b2e2195d8",
-        "cmangos/tbc-db": "1c54acd200540076c3078d22a66fd417d0f6dd60",
+        "cmangos/mangos-tbc": "ec0d40c3d1462cf1b1a9e66184a07da7af7dc993",
+        "cmangos/playerbots": "8d102f91c882bd0d75ff6fd73665631d1e76e85c",
+        "cmangos/tbc-db": "a4c6a8c8bbc83d920fb75ebca3f4b8fc30aafed1",
     },
     "wow-vanilla": {
-        "cmangos/mangos-classic": "ff13624a4be74816796bc0f8555f03011438144e",
-        "cmangos/playerbots": "de1b1823ab8352c6ebaeaa98cc576e1b2e2195d8",
-        "cmangos/classic-db": "603ece109099ce44a5447a1b1cffd65c7272d71c",
+        "cmangos/mangos-classic": "6d8821c78b4f947d4cd40570657c88aefa804a24",
+        "cmangos/playerbots": "8d102f91c882bd0d75ff6fd73665631d1e76e85c",
+        "cmangos/classic-db": "c33f90b8eeb3f8bacb53d5cbfee45075c80b416c",
     },
 }
 """The commit each shipped source is pinned to, and the gate that ran on it.
@@ -258,6 +258,17 @@ Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
 `dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26, 2026-10-08,
 2026-10-10 and 2026-10-17:
 
+* PINS (2026-11-09) moved `wow-wotlk` (and `wow-unbound`) to the newest heads of that day WITHOUT a
+  live gate: core `93333d6a` -> `e7e2e288` (90 commits) and module `05a1f6f` -> `405f8119` (18
+  commits); `wow-centurion` `0f7e3f59` -> `e91044da` (one commit, `spell_priest.cpp` only) and
+  `wow-mop` `e135742e` -> `efe7f291` (eleven CI and README commits only). Read from the GitHub
+  compares and the new trees: the core's base SQL lost only the `spell_proc_event` table
+  (dropped by update 2026_10_28_00; not one of Yu'lon's tables) and `acore_string` lost its
+  locale columns (2026_10_31_00), no gossip menu in 49990..70000 was touched, the three Docker
+  recipe files are byte for byte the same, `Player.h::SetSkill`, `AccountMgr.h` and
+  `WorldSession::IsHeadless()` are unchanged, and the module drops five config keys Yu'lon
+  never names. Unbound's five core patches apply in order to the new core. The pins of the other
+  games are moved and checked in their own entries.
 * T860 (2026-11-02) moved all three to upstream's heads of that day WITHOUT a live gate:
   `wow-wotlk` core `3f2969dd` -> `93333d6a` and module `e88cc409` -> `05a1f6f`; `wow-tbc`
   `37767e95` -> `af6b4885`, `6823423e` -> `de1b1823`, `1c54acd2` unchanged; `wow-vanilla`
@@ -267,6 +278,14 @@ Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
   shares both WotLK sources, `wow-tortoise` (`10393426` -> `33d0131a`, TortoiseBots `ff668fee`
   -> `573c7919`, release v1.14.0) and `wow-centurion` (`351950fb` -> `0f7e3f59`) are pinned in
   their own tests; their reasons were checked against the new revs, not against a live run.
+* 2026-11-09 moved the CMaNGOS and Tortoise sources to upstream's heads of that day WITHOUT a live
+  gate (the owner's "pin to newest on everything we can"): `wow-tbc` mangos-tbc `af6b4885` ->
+  `ec0d40c3`, playerbots `de1b1823` -> `8d102f91`, tbc-db `1c54acd2` -> `a4c6a8c8`; `wow-vanilla`
+  mangos-classic `ff13624a` -> `6d8821c7`, playerbots `de1b1823` -> `8d102f91`, classic-db
+  `603ece10` -> `c33f90b8`; `wow-tortoise` core `33d0131a` -> `48cb227f`, TortoiseBots `573c7919` ->
+  `a90d0407` (release v1.22.1). The vmap-extractor patch applies to both CMaNGOS cores and the
+  updater patch to the Tortoise core, every SQL glob and conf key the entries name still
+  exists, and the 11 Server rates keys still do.
 * T824 (2026-10-28) moved all three to upstream's heads of that day WITHOUT a live gate:
   `wow-wotlk` core `8a4e76ea` -> `3f2969dd` and module `d750b4b3` -> `e88cc409`; `wow-tbc`
   `15b6ddb4` -> `37767e95`, `da4419af` -> `6823423e`, `ebe51a83` -> `1c54acd2`; `wow-vanilla`
@@ -1118,7 +1137,7 @@ def test_tortoise_clones_the_core_branch_the_bots_module_requires_and_the_module
         "`main` carries the headless bot sessions (`bot-helpers` was merged into it) and, "
         "since v0.9.18, the SOAP interface of PR #491 that `1181dev` held alone from "
         "2026-09-17: 1181dev's last commit 6131a26f is an ancestor of the pinned main tip "
-        "33d0131a (main is well ahead of it), and the TortoiseBots README names the core's "
+        "48cb227f (main is well ahead of it), and the TortoiseBots README names the core's "
         "`main` branch as its base; `bot-helpers` itself has no SOAP"
     )
     assert core.dest == "src/tortoise-wow"

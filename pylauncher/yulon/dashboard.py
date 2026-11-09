@@ -498,6 +498,9 @@ class Dashboard:
         self._health_waiting: tuple[str, datetime, str] | None = None
         """`(run, when, sentence)` of the last reading that was not kept: replayed for
         `HEALTH_RETRY_EVERY`, then asked again."""
+        self._health_line_late: tuple[str, datetime] | None = None
+        """`(run, when)` of the first reading of a run whose only fault was the module's log
+        line, with the world's ready line already in the log (T876): the second look keeps it."""
         # T581: the realm row's offline bit, kept in step with what this tick reads. Built
         # here only over real Docker, for the reason `login_log_of` is: a test that injects
         # the container state hands its own keeper or asks nothing of this.
@@ -826,9 +829,14 @@ class Dashboard:
         Empty for an entry without a `health` block. Asked only after the world said ready, so
         the module has printed its lines and made its tables. What the database and the log
         said is kept by `run` and asked once; one that could not be read is not kept, so the next
-        tick asks again. The switches are laid beside it afresh at every tick: the settings file
-        can change under a running world (the Tuning card), and "(on at the next start)" is
-        about the file as it is now.
+        tick asks again. A reading whose only fault is the module's own log line missing is not
+        kept on the first look either, even with the ready line in the log (T876): CoA prints its
+        line about 3 s after the world's ready line, so a tick in that gap would show "did not
+        load" for the whole run. It is asked again `HEALTH_RETRY_EVERY` later and kept as bad
+        only if the line is still missing then. Any other bad reading (a table missing, a count
+        short) is kept on the first look. The switches are laid beside it afresh at every tick:
+        the settings file can change under a running world (the Tuning card), and "(on at the
+        next start)" is about the file as it is now.
         """
         native_block = self.entry.install.native
         block = native_block.azerothcore if native_block is not None else None
@@ -864,10 +872,28 @@ class Dashboard:
             # holds the module's own lines, so it cannot be early. No ready marker to look for
             # at all (`_banner is None`) leaves nothing to wait for. Readiness is judged from the
             # very log the reading was made from, never from a second read of it.
-            if got.good or self._banner is None or self._banner.search(log):
-                self._health_run, self._health_got, self._health_running = run, got, running
+            # T876: even then, a reading whose ONLY fault is the module's log line (tables and
+            # counts good) is given a second look `HEALTH_RETRY_EVERY` later: the line can come
+            # a few seconds after the ready line (CoA: about 3 s), and a "did not load" kept from
+            # a tick in that gap stays wrong for the whole run. Only a second look that still
+            # finds the line missing keeps it.
+            ready = self._banner is None or bool(self._banner.search(log))
+            late = self._health_line_late
+            if ready and got.only_the_line_missing:
+                now = self._now()
+                if late is not None and late[0] == run and now - late[1] >= HEALTH_RETRY_EVERY:
+                    keep = True
+                else:
+                    keep = False
+                    if late is None or late[0] != run or now < late[1]:
+                        self._health_line_late = (run, now)
             else:
-                if got.absent_marker:
+                keep = got.good or ready
+            if keep:
+                self._health_run, self._health_got, self._health_running = run, got, running
+                self._health_line_late = None
+            else:
+                if got.absent_marker and not ready:
                     # Neither the world's ready line nor any of the module's own is in this
                     # run's log. That says what was seen, not why: the world may still be
                     # loading or hung, or the log may have been cut. "Did not load" would be a
@@ -877,6 +903,15 @@ class Dashboard:
                         unreadable=(
                             "this run's world log has neither its ready line nor "
                             f"{got.name}'s start-up lines"
+                        ),
+                    )
+                elif got.absent_marker:
+                    # The ready line is there and the module's is not yet (T876): said as what
+                    # it is, never as "did not load".
+                    got = module_health.HealthReading(
+                        got.name,
+                        unreadable=(
+                            f"this run's world log does not have {got.name}'s start-up lines yet"
                         ),
                     )
                 line = module_health.sentence(got)  # a bad one never says a switch

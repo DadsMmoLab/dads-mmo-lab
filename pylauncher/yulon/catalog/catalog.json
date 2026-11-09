@@ -9,7 +9,8 @@
       "notes": [
         "The tile said, until T194: \"The flagship install; module/ALE/mod/keg management is manifest-driven.\"",
         "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested.",
-        "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested."
+        "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested.",
+        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots",
@@ -19,13 +20,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "93333d6a9eb00fdf0179adde30da3c17618207d6"
+            "rev": "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "05a1f6fceb8a32aa879b13f5f48934c6e46a774c"
+            "rev": "405f81196161017eebae3ee7a612d786a3ed2a9d"
           }
         ]
       },
@@ -310,7 +311,8 @@
       "description": "TBC (2.4.3) on CMaNGOS with the CMaNGOS playerbots fork.",
       "notes": [
         "T824 (2026-10-28): mangos-tbc 15b6ddb4 -> 37767e95, playerbots da4419af -> 6823423e and tbc-db ebe51a83 -> 1c54acd2, the newest at 2026-10-28, not live-tested.",
-        "T860 (2026-11-02): mangos-tbc 37767e95 -> af6b4885 and playerbots 6823423e -> de1b1823; tbc-db stays 1c54acd2 (already the newest); not live-tested."
+        "T860 (2026-11-02): mangos-tbc 37767e95 -> af6b4885 and playerbots 6823423e -> de1b1823; tbc-db stays 1c54acd2 (already the newest); not live-tested.",
+        "2026-11-09: mangos-tbc af6b4885 -> ec0d40c3, playerbots de1b1823 -> 8d102f91 and tbc-db 1c54acd2 -> a4c6a8c8, the newest at 2026-11-09; not live-tested."
       ],
       "emulator": {
         "name": "CMaNGOS mangos-tbc + cmangos/playerbots + tbc-db",
@@ -318,17 +320,17 @@
           {
             "repo": "cmangos/mangos-tbc",
             "dest": "src/mangos-tbc",
-            "rev": "af6b4885647d4eca7802b68fccf52f0bccd8ed23"
+            "rev": "ec0d40c3d1462cf1b1a9e66184a07da7af7dc993"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-tbc/src/modules/Bots",
-            "rev": "de1b1823ab8352c6ebaeaa98cc576e1b2e2195d8"
+            "rev": "8d102f91c882bd0d75ff6fd73665631d1e76e85c"
           },
           {
             "repo": "cmangos/tbc-db",
             "dest": "src/tbc-db",
-            "rev": "1c54acd200540076c3078d22a66fd417d0f6dd60"
+            "rev": "a4c6a8c8bbc83d920fb75ebca3f4b8fc30aafed1"
           }
         ]
       },
@@ -779,7 +781,8 @@
       "description": "Vanilla (1.12.1) on CMaNGOS with the CMaNGOS playerbots fork.",
       "notes": [
         "T824 (2026-10-28): mangos-classic 8ec338a1 -> 57312491, playerbots da4419af -> 6823423e and classic-db ec4f5961 -> 603ece10, the newest at 2026-10-28, not live-tested.",
-        "T860 (2026-11-02): mangos-classic 57312491 -> ff13624a and playerbots 6823423e -> de1b1823; classic-db stays 603ece10 (already the newest); not live-tested."
+        "T860 (2026-11-02): mangos-classic 57312491 -> ff13624a and playerbots 6823423e -> de1b1823; classic-db stays 603ece10 (already the newest); not live-tested.",
+        "2026-11-09: mangos-classic ff13624a -> 6d8821c7, playerbots de1b1823 -> 8d102f91 and classic-db 603ece10 -> c33f90b8, the newest at 2026-11-09; not live-tested."
       ],
       "emulator": {
         "name": "CMaNGOS mangos-classic + cmangos/playerbots + classic-db",
@@ -787,17 +790,17 @@
           {
             "repo": "cmangos/mangos-classic",
             "dest": "src/mangos-classic",
-            "rev": "ff13624a4be74816796bc0f8555f03011438144e"
+            "rev": "6d8821c78b4f947d4cd40570657c88aefa804a24"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-classic/src/modules/Bots",
-            "rev": "de1b1823ab8352c6ebaeaa98cc576e1b2e2195d8"
+            "rev": "8d102f91c882bd0d75ff6fd73665631d1e76e85c"
           },
           {
             "repo": "cmangos/classic-db",
             "dest": "src/classic-db",
-            "rev": "603ece109099ce44a5447a1b1cffd65c7272d71c"
+            "rev": "c33f90b8eeb3f8bacb53d5cbfee45075c80b416c"
           }
         ]
       },
@@ -1248,7 +1251,8 @@
         "It replaces the retired Shyalya fork that vendored the cmangos playerbots; a server already installed from that fork goes on opening, starting and being played, and is not migrated.",
         "Commands reach this world over SOAP again: the core builds gsoap from source behind ENABLE_SOAP, which the image template switches on (T86, 2026-09-17).",
         "Installed, started and pressed headless through the app's own seams on the test box; no client rendered there (T30, T86).",
-        "T824 (2026-10-28): core 10393426 -> 33d0131a and TortoiseBots ff668fee -> 573c7919 (release v1.14.0), the newest at 2026-10-28, not live-tested."
+        "T824 (2026-10-28): core 10393426 -> 33d0131a and TortoiseBots ff668fee -> 573c7919 (release v1.14.0), the newest at 2026-10-28, not live-tested.",
+        "2026-11-09: core 33d0131a -> 48cb227f and TortoiseBots 573c7919 -> a90d0407 (release v1.22.1), the newest at 2026-11-09, not live-tested."
       ],
       "emulator": {
         "name": "tortoise-wow/tortoise-wow @ main (the Penqle core) + Sagiroth/TortoiseBots",
@@ -1257,13 +1261,13 @@
             "repo": "tortoise-wow/tortoise-wow",
             "branch": "main",
             "dest": "src/tortoise-wow",
-            "rev": "33d0131a5f0f536dffaced04de859561bfc13d5a"
+            "rev": "48cb227f2cb698920dc2f60eeadd6546243eb75e"
           },
           {
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "573c791928341c79f1086ce6cf7dab795b54978d",
+            "rev": "a90d0407251f6e8471bd79b2fba7f6b20370d281",
             "follow": "releases"
           }
         ]
@@ -1561,7 +1565,7 @@
                 "file": "wow-tortoise/patches/updater-no-wait-for-enter.patch",
                 "source": "src/tortoise-wow",
                 "obsolete_when_absent": "std::getline(std::cin",
-                "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788, the same bytes at 6131a26f, at 10393426 and at 33d0131a, the pin since T824); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
+                "reason": "tortoise-wow's DB auto-updater ends a failed migration with std::getline(std::cin) (src/shared/Database/AutoUpdater.cpp:236-239 at 187af788, the same bytes at 6131a26f, at 10393426, at 33d0131a and at 48cb227f, the pin since 2026-11-09); the world container keeps stdin open for the Console tab, so the read never returns and a failed update hangs the world with no signal handler, no SOAP and no error line. The patch drops the read so the world reports the failure and exits, as Shyalya's fork did in b405b10adb"
               }
             ],
             "rerunnable_modules": [
@@ -1694,7 +1698,8 @@
       "description": "Centurion is level-60 player-versus-player WoW on the 3.3.5a client, with hardcore world characters, tournament battlegrounds and arenas, and 150 bots that quest, roam and fill the battlegrounds. Yu'lon builds the server from Centurion's own source and makes your English 3.3.5a client ready to play it, with Centurion's patches and addons.",
       "notes": [
         "T824 (2026-10-28): TrinityCore112 CENTURION 25d3e6ef -> 351950fb, the newest at 2026-10-28, not live-tested.",
-        "T860 (2026-11-02): TrinityCore112 CENTURION 351950fb -> 0f7e3f59, the newest at 2026-11-02, not live-tested."
+        "T860 (2026-11-02): TrinityCore112 CENTURION 351950fb -> 0f7e3f59, the newest at 2026-11-02, not live-tested.",
+        "PINS (2026-11-09): TrinityCore112 CENTURION 0f7e3f59 -> e91044da, the newest at 2026-11-09, not live-tested."
       ],
       "emulator": {
         "name": "Centurion (TrinityCore 3.3.5 fork with its own playerbots)",
@@ -1703,7 +1708,7 @@
             "repo": "thomasjteachey/TrinityCore112",
             "branch": "CENTURION",
             "dest": "src/centurion",
-            "rev": "0f7e3f5992620e02edd6238a790fee9827af60ec"
+            "rev": "e91044dae91b427c0fadbf753c2294af77656c58"
           }
         ]
       },
@@ -2608,7 +2613,8 @@
       "notes": [
         "T554: the multi-class server. Own folder, containers, images, volumes, databases and ports, so it runs beside WoW WotLK.",
         "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested.",
-        "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested."
+        "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested.",
+        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots + mod-ale + Wrath Unbound",
@@ -2618,13 +2624,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "93333d6a9eb00fdf0179adde30da3c17618207d6"
+            "rev": "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "05a1f6fceb8a32aa879b13f5f48934c6e46a774c"
+            "rev": "405f81196161017eebae3ee7a612d786a3ed2a9d"
           },
           {
             "repo": "azerothcore/mod-ale",
@@ -3138,8 +3144,6 @@
                         "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "150",
                         "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "150",
                         "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN": "1",
-                        "AC_AI_PLAYERBOT_RANDOM_BOT_JOIN_BG": "0",
-                        "AC_AI_PLAYERBOT_RANDOM_BOT_AUTO_JOIN_BG": "0",
                         "AC_AI_PLAYERBOT_SYNC_LEVEL_WITH_PLAYERS": "1",
                         "AC_AI_PLAYERBOT_RANDOM_BOT_CONCENTRATE_IN_PLAYER_ZONE": "0"
                     },
@@ -3471,7 +3475,7 @@
         "status": "beta",
         "description": "Mists of Pandaria 5.4.8 (Legends of Azeroth Pandaria) with 500 playerbots that quest, travel, group and level from 1 to 90, Pandaria included. Yu'lon builds the server from LoA Pandaria's own source and makes your English 5.4.8 client ready to play it. Bring the Recall WoW client.",
         "notes": [
-            "T850: 1LineAtaTime/LoA-Pandaria-Playerbots, branch `playerbot` @ e135742e1891d3e653d27966da2dc70e793f203e (tag v1.0.4, 2026-10-26, \"Fix the Linux build\"): a TrinityCore/SkyFire-lineage 5.4.8 fork (Legends of Azeroth Pandaria) with mod_playerbots ported from AzerothCore. The lab's handoff of 2026-10-28 logged in, created a character and ran 500 bots on this exact commit on Docker Desktop; the catalog ENTRY is not live-tested (GAP §2 and §4).",
+            "T850: 1LineAtaTime/LoA-Pandaria-Playerbots, branch `playerbot` @ efe7f29107e15a98e0bc4b3ebf61f54696e0827f (PINS, 2026-11-09, the newest; it moved from tag v1.0.4, e135742e1891d3e653d27966da2dc70e793f203e, 2026-10-26, \"Fix the Linux build\", and the 11 commits between touch only CI workflows and README.md, no source or SQL): a TrinityCore/SkyFire-lineage 5.4.8 fork (Legends of Azeroth Pandaria) with mod_playerbots ported from AzerothCore. The lab's handoff of 2026-10-28 logged in, created a character and ran 500 bots on e135742e on Docker Desktop; the catalog ENTRY is not live-tested (GAP §2 and §4).",
             "The four databases come from the release asset LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip (142,501,177 B, sha256 db8dd845e3a5da4bc3a6f28afa68ed839aceb222101db949ae74840a5a2365a0): four .sql files at the ZIP'S ROOT, no folder (GAP §0). Source pin, asset and zip layout read at GAP §0; NOT from the checkout, whose sql/base holds no world.",
             "Client data is MPQ, not CASC: 5.4.8 predates CASC, and the extractors open fixed names (upstream src/tools/map_extractor/System.cpp:104-117,1275-1400 and vmap4_extractor/vmapexport.cpp:68-79,130-165). Target build is 18273 -- `18414 but Blizz didnt rename the MPQ files` (System.cpp:101) -- so the 18 wow-update MPQ names carry 16016..18273, never 18414.",
             "GAP §2's \"Characters tab\" row: NOTHING has been run against a live LoA Pandaria server, so every Characters verb is withheld with the \"each is offered once it has been checked against a live server\" sentence, Revive included; fill them in after the first live check.",
@@ -3484,7 +3488,7 @@
                     "repo": "1LineAtaTime/LoA-Pandaria-Playerbots",
                     "branch": "playerbot",
                     "dest": "src/mop",
-                    "rev": "e135742e1891d3e653d27966da2dc70e793f203e"
+                    "rev": "efe7f29107e15a98e0bc4b3ebf61f54696e0827f"
                 }
             ]
         },
@@ -4050,7 +4054,7 @@
       "status": "beta",
       "description": "Dungeon Fighter Online, Neople's side-scrolling brawler, on the 115US community server, on Windows and on a Steam Deck or Linux. Play with your own US 2.38.3.25 client. Early days upstream: the towns and first dungeons work, many later ones not yet.",
       "notes": [
-        "Pinned to 115US main db707d59 (2026-10-10). Upstream lands fifty commits a day and its newest builds were refusing logins on 2026-10-11, so this pin moves only by hand.",
+        "Pinned to 115US main 6d170a6a (2026-10-16). Upstream lands fifty commits a day and its newest builds were refusing logins on 2026-10-11, so this pin was moved by hand on 2026-11-09 (db707d59 -> 6d170a6a, 107 commits), at the owner's request and not live-tested. The newest commit, 3840db8a, was not taken: it carries 97 Git LFS files (2.3 GB, the Japanese voice packs) that gitgud puts into its archive download, which would make the pinned archive about 2.6 GB instead of 83 MB; 6d170a6a is the last commit before they arrive, and 0001 to 0004 apply to it unchanged.",
         "0001 and 0002 were written by Dad's MMO Lab on 2026-10-11 against dea70aff and are still needed there: the 2.38.3.25 client's PVF keys sit outside the fixed slots the Go port reads, and 3.25 renumbered the PVF string table under three script hashes. 0003 is Yu'lon's: the GUI launcher in the source tree would otherwise pull upstream's newest code over the pin.",
         "No Docker: the channel list listens on port 7001 (on every address, 0.0.0.0, measured) and hands out a game server on 127.0.0.2 at a port it picks each run, which no published container port can stand in for. Only this computer can reach that game server, so only this computer can play.",
         "The first Start builds a 760 MB inner PVF and its caches from the player's client: up to ten minutes on the Deck, 45 s on Windows 11 (inner PVF 2 s). Later Starts reuse them: 30 s on Windows, 26 to 90 s on the Deck.",
@@ -4063,7 +4067,7 @@
             "repo": "https://gitgud.io/fuckworld/115",
             "branch": "main",
             "dest": "src",
-            "rev": "db707d59e303b49426c62d9e35d14181e7823631"
+            "rev": "6d170a6a84b839ec7c6570edadac85da29b5e4d4"
           }
         ]
       },
@@ -4078,10 +4082,10 @@
           "templates": "dfo/process",
           "checkout": "src",
           "archive": {
-            "url": "https://gitgud.io/fuckworld/115/-/archive/db707d59e303b49426c62d9e35d14181e7823631/115-db707d59e303b49426c62d9e35d14181e7823631.zip",
-            "sha256": "afe0dd1cb52f3b2ce8fdfd3cf4c2a344da12d79c7928254e809d1152cb45341d",
-            "size": 82205221,
-            "root": "115-db707d59e303b49426c62d9e35d14181e7823631"
+            "url": "https://gitgud.io/fuckworld/115/-/archive/6d170a6a84b839ec7c6570edadac85da29b5e4d4/115-6d170a6a84b839ec7c6570edadac85da29b5e4d4.zip",
+            "sha256": "f4385b0f04065d9159577da607bed44175b10f70bef7de1f636be3b5889c112d",
+            "size": 83456125,
+            "root": "115-6d170a6a84b839ec7c6570edadac85da29b5e4d4"
           },
           "patches": [
             {

@@ -19,6 +19,34 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Changed
 
+## v0.9.32-Public — 2026-11-09
+
+### New
+- A user guide for players: step-by-step pages under docs/, linked from the README's new User guide section.
+
+### Fixed
+- Untested on a Steam Deck: the D-pad reaches every option in a group of choices, like LAN (same Wi-Fi) on the Networking tab.
+- Conquest of Azeroth: a first realm switch no longer floods the Server tab with the database import's output.
+- The Server tab no longer keeps saying "Wait: … is running." after a job has ended.
+- Conquest of Azeroth: bots join battlegrounds again, and playerbots.conf's battleground settings take effect from the next Start.
+- Conquest of Azeroth: Switch realm type no longer fails with "container ... is not running" when the server is stopped.
+- Long dropdowns like the Logs tab's log list show ten rows and scroll; on a controller (untested on a Deck) the D-pad moves and A picks.
+- Untested on a Steam Deck: the D-pad now reaches a server's tabs; Left/Right on the tab row switch tabs.
+- Conquest of Azeroth: switching away from Wildcard no longer carries Wildcard's rules into the next realm type.
+- Conquest of Azeroth: picking a realm type in the list lights **Switch realm type…** right away.
+- Conquest of Azeroth: the realm list shows the realm type's name, not "AzerothCore", from the next Start.
+- Conquest of Azeroth: the Server tab no longer says the module did not load when its line was only a few seconds late.
+- Windows: Start waits for a port Windows is still letting go of after a stop, instead of blaming another program.
+
+### Changed
+- World of Warcraft (WotLK) and Unbound: the server and Playerbots move to the newest upstream code (2026-11-09).
+- World of Warcraft (Centurion): the server moves to the newest upstream code (2026-11-09).
+- World of Warcraft (Mists of Pandaria): the server moves to the newest upstream code (2026-11-09).
+- World of Warcraft (TBC): the server, Playerbots and database move to the newest upstream code (2026-11-09).
+- World of Warcraft (Vanilla): the server, Playerbots and database move to the newest upstream code (2026-11-09).
+- World of Warcraft (Tortoise): the server and TortoiseBots move to the newest upstream code (2026-11-09).
+- DFO: the server moves to a newer 115US build (2026-10-16), the last one before its multi-gigabyte voice packs.
+
 ## v0.9.31-Public — 2026-11-04
 
 ### New

@@ -19,13 +19,16 @@ refused with the holder's sentence, before anything is imported.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+import logging
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 
 from yulon import coa_realm, docker
 from yulon.catalog.catalog import CatalogEntry
+
+logger = logging.getLogger(__name__)
 
 SWITCH_PRESS = "Switch realm type"
 """The press name the switch holds the server under, and the hold's sentence."""
@@ -79,32 +82,52 @@ class RealmSwitch:
         """Stop, move every table set to `target_id`, point the folder at it, start.
 
         The hold wraps the whole sequence, and the engine's own pre-checks run inside
-        it BEFORE the Stop: a refusal there stops nothing, and a second switch while
-        one holds is refused with the hold's sentence before the engine is asked
-        anything. After the Stop the press says what the failure left behind: a
-        failure BEFORE the engine's first database write starts the ORIGINAL type
-        again and says so in one plain sentence; a failure after the first write
-        (the crash marker now stands) leaves the server stopped, and the next press
-        of Switch finishes or undoes it. The engine still refuses on a running
-        server (metadata locks), so the Stop is what lets it through; the restart
-        after a pre-write failure runs only when the engine says starting is safe.
+        it BEFORE the Stop: a refusal there stops nothing but a database this press
+        started, and a second switch while one holds is refused with the hold's
+        sentence before the engine is asked anything. After the Stop the press says
+        what the failure left behind: a failure BEFORE the engine's first database
+        write starts the ORIGINAL type again and says so in one plain sentence; a
+        failure after the first write (the crash marker now stands) leaves the
+        server stopped, and the next press of Switch finishes or undoes it. The
+        engine still refuses on a running server (metadata locks), so the Stop is
+        what lets it through; the restart after a pre-write failure runs only when
+        the engine says starting is safe.
 
-        The Stop is the tab's own (it saves every character) and stops the
-        database too, which every read of the switch needs (T812 C8 D5, the live
-        run: "the acore_characters schema could not be listed (container ... is
-        not running)"). So the database alone is started again right after it
-        (`start_db`, the start-db seam the install and the start gate use),
-        before the engine reads anything; the world and auth stay down.
+        The database alone is started BEFORE the first read (`start_db`, the start-db
+        seam the install and the start gate use): a stopped server leaves its database
+        down too, and every read of the switch needs it (T812 C8 D5, the live run:
+        "the acore_characters schema could not be listed (container ... is not
+        running)"). A pre-check refusal stops the database again only when this press
+        started it on a server that was not running, leaving the server as the player
+        had it; a down database beside running world/auth is a broken server, and a
+        validation refusal must not stop that. A start_db failure stops the database
+        again too when the server was not running (the start brings the container up
+        and then waits for health, so a timeout leaves it running) and then refuses
+        with the start refusal; on a running server nothing is stopped. After the
+        Stop the database alone is started again, before the engine reads anything;
+        the world and auth stay down.
         """
         with self._hold_server(SWITCH_PRESS):
-            original = coa_realm.pre_check(
-                self._entry,
-                self._server_dir,
-                target_id,
-                sql=self._sql,
-                bot_prefix=self._bot_prefix,
-                check_import=self._check_import,
-            )
+            was_running = self._servers_running()
+            try:
+                db_was_down = bool(self._start_db())
+            except Exception as exc:
+                if not was_running:
+                    self._stop_database_this_press_started()
+                raise _start_db_refusal(exc) from exc
+            try:
+                original = coa_realm.pre_check(
+                    self._entry,
+                    self._server_dir,
+                    target_id,
+                    sql=self._sql,
+                    bot_prefix=self._bot_prefix,
+                    check_import=self._check_import,
+                )
+            except Exception:
+                if db_was_down and not was_running:
+                    self._stop_database_this_press_started()
+                raise
             self._stop()
             before = len(_writes_of(self._sql))
             try:
@@ -135,6 +158,19 @@ class RealmSwitch:
                 raise _stopped_after_failed_switch(exc) from exc
             self._start()
 
+    def _stop_database_this_press_started(self) -> None:
+        """Stop again a database this press may have started, guarding the cleanup.
+
+        The early `start_db` starts the container and THEN waits for health, so a
+        failure can leave it running on a stopped server; the pre-check path has
+        the same shape. A cleanup failure is logged and never hides the refusal
+        it cleans up after (T873-C C1).
+        """
+        try:
+            self._stop()
+        except Exception as stop_exc:
+            logger.warning(f"{self._entry.id}: the cleanup stop failed: {stop_exc}")
+
 
 def confirm_text(target_label: str, target_realm_name: str) -> str:
     """The switch confirm dialog's question for the target type (T812 C3b fix round 1)."""
@@ -146,6 +182,29 @@ def confirm_text(target_label: str, target_realm_name: str) -> str:
         f"The first switch to {target_label} sets up its databases (a few minutes).\n\n"
         f"Switch to {target_label} ({target_realm_name})?"
     )
+
+
+def _start_db_refusal(exc: BaseException) -> coa_realm.RealmSwitchError:
+    """A start_db failure as the switch's own refusal, without repeating itself.
+
+    The wiring's `start_db` already ends its sentence with "nothing was switched":
+    appending it again would say it twice, so such a message passes through as
+    written. Anything else is wrapped once, with "nothing was switched" appended.
+    A `detail` (the log command) rides on the chained exception AND on the refusal
+    itself, where the view reads it for Details; never in the message.
+    """
+    text = str(exc)
+    if text.rstrip().rstrip(".").endswith("nothing was switched"):
+        refused = coa_realm.RealmSwitchError(text)
+    else:
+        refused = coa_realm.RealmSwitchError(
+            "The database could not be started to read the realm type "
+            f"({exc}); nothing was switched."
+        )
+    detail = getattr(exc, "detail", "")
+    if detail:
+        refused.detail = detail
+    return refused
 
 
 def _writes_of(sql: coa_realm.SqlRunner) -> list[str]:
@@ -166,6 +225,14 @@ def _safe_to_start_again(entry: CatalogEntry, server_dir: Path, sql: coa_realm.S
         return False
 
 
+def _with_detail_of(refusal: BaseException, source: BaseException) -> BaseException:
+    """`refusal` carrying `source`'s `detail` (what a program printed), for the view's Details."""
+    detail = getattr(source, "detail", "")
+    if detail:
+        refusal.detail = detail  # type: ignore[attr-defined]
+    return refusal
+
+
 def _restarted_after_failed_switch(exc: BaseException, original: str) -> BaseException:
     """`exc`, plus the one plain sentence saying the original type started again."""
     message = (
@@ -177,6 +244,7 @@ def _restarted_after_failed_switch(exc: BaseException, original: str) -> BaseExc
         if isinstance(exc, coa_realm.RealmSwitchError)
         else RuntimeError(message)
     )
+    _with_detail_of(restarted, exc)
     # T857: the view's Play reads this to say the server runs again (typed, not parsed).
     restarted.server_restarted = True  # type: ignore[attr-defined]
     return restarted
@@ -190,7 +258,7 @@ def _stopped_after_failed_switch(exc: BaseException, extra: str = "") -> BaseExc
         f"or put it back.{tail}"
     )
     if isinstance(exc, coa_realm.RealmSwitchError):
-        return coa_realm.RealmSwitchError(message)
+        return _with_detail_of(coa_realm.RealmSwitchError(message), exc)
     return RuntimeError(message)
 
 
@@ -331,6 +399,28 @@ def check_switch_import(server_dir: Path, seams: ImportSeams) -> None:
         )
 
 
+class ImportOutput(str):
+    """A line the db-import one-shot printed, apart from the switch's own sentences (T878).
+
+    The Server tab puts the sentences on its line and these under Details: a first
+    switch's import prints thousands of lines, and on the line they pushed Play far
+    down the page.
+    """
+
+
+def _as_import_output(
+    lines: Generator[str, None, docker.AttachedRun],
+) -> Generator[str, None, docker.AttachedRun]:
+    """`lines` with each one marked `ImportOutput`; the generator's return value passes through."""
+    while True:
+        try:
+            line = next(lines)
+        except StopIteration as done:
+            run: docker.AttachedRun = done.value
+            return run
+        yield ImportOutput(line)
+
+
 def switch_import(
     entry: CatalogEntry,
     server_dir: Path,
@@ -362,14 +452,17 @@ def switch_import(
         raise coa_realm.RealmSwitchError(native._one_shot_left_sentence(left, earlier=True))
     check_switch_import(server_dir, seams)
     yield f"Importing the {context.target} databases ({service}). This takes several minutes."
-    run = yield from native.pump_lines(
-        lambda sink: seams.one_shot(service, server_dir, sink), cancel=None, stage="import"
+    run = yield from _as_import_output(
+        native.pump_lines(
+            lambda sink: seams.one_shot(service, server_dir, sink), cancel=None, stage="import"
+        )
     )
     if run.returncode != 0:
         failed = docker.import_failed(service, server_dir, run)
-        raise coa_realm.RealmSwitchError(str(failed)) from failed
+        # The importer's last lines ride on the refusal (T878): the view shows them under Details.
+        raise _with_detail_of(coa_realm.RealmSwitchError(str(failed)), failed) from failed
     try:
         after = seams.verify(probe, service, server_dir, run)
     except docker.DockerCommandError as exc:
-        raise coa_realm.RealmSwitchError(str(exc)) from exc
+        raise _with_detail_of(coa_realm.RealmSwitchError(str(exc)), exc) from exc
     yield f"The {context.target} databases now read as {after.state}."
