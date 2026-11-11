@@ -424,6 +424,12 @@ def asked(monkeypatch: pytest.MonkeyPatch) -> _Asked:
 def _tab(server: _Server, tmp_path: Path) -> tuple[ControllerView, list[str]]:
     services = ControllerServices.for_entry(server.entry, tmp_path / server.entry.id)
     services.accounts = server.admin
+    # T881 D: the real services above answer `db_refusal` for this folder (no
+    # `.db_password` here), but the tab is handed the stub `server.admin` and no real
+    # SQL seam at all. `_grey_set_password()` now keeps T785's refusal in force, so
+    # leaving it set greys the press these tests make against the stub. The refusal is
+    # about a seam this harness replaced, so it is cleared with it.
+    services.db_refusal = None
     # T881 B: the real channel has no credential in this harness, and Set password is
     # greyed while that is so. These tests press the SEAM (a stub), not the channel, so
     # the tab is handed no channel setup at all -- which is also what a harness had
