@@ -8071,6 +8071,65 @@ def test_a_start_writes_nothing_when_the_network_choice_file_is_damaged(
     ]
 
 
+def test_a_start_writes_nothing_when_the_network_choice_file_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stat that raises PermissionError must not read as "no file" (T881 C).
+
+    Python 3.12+ answers `exists()` False for a permission error, so the old
+    check fell through to the automatic rewrite -- over the owner's loopback
+    choice a file inside an unsearchable folder holds. `stat()` names the case:
+    nothing is written, one warning says so, and the Start goes ahead.
+    """
+    choice = tmp_path / networking.INTENT_FILE
+    real_stat = Path.stat
+
+    def stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if self == choice:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+    with caplog.at_level("WARNING", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert ran == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == [
+        "the network choice file for this server could not be read, so the realm address "
+        "was not checked at Start"
+    ]
+
+
+def test_a_start_continues_when_checking_the_network_choice_file_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Any other OSError from the check is the step's own failure: Start is not blocked.
+
+    The old `exists()` sat outside the step's `try`, so a raise here held the
+    Start up. The whole check is inside that handling now, and a state it cannot
+    name writes nothing.
+    """
+    choice = tmp_path / networking.INTENT_FILE
+    real_stat = Path.stat
+
+    def stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if self == choice:
+            raise OSError(5, "Input/output error", str(self))
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == []
+
+
 def test_a_start_reads_the_address_listing_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

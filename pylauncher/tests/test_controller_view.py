@@ -6239,15 +6239,16 @@ def test_a_database_refusal_keeps_its_reason_on_set_password_when_the_channel_ch
     assert reason_of(view.set_password_button) == refusal
 
 
-def test_the_accounts_tab_names_an_account_whose_a_recent_login_used_a_wrong_password(
+def test_the_accounts_tab_names_an_account_with_a_recent_wrong_password_login(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T881 B: the authserver's own words, through the listing the factory builds.
+    """T881 B: the authserver's own words, through a listing this test builds by hand.
 
     The note is part of `InstallAccounts.listing()` -- parsed by
     `useraccounts.wrong_password_note` against the names the listing holds, which is
-    what keeps a bot's failed login (and the app's own) out of it. Driving the real
-    listing is what fails if its `auth_server_log` seam is unhooked.
+    what keeps a bot's failed login (and the app's own) out of it. This does not go
+    through the factory; the `auth_server_log=` wiring on the `_for_wotlk` site is
+    proved by test_the_wotlk_accounts_factory_hands_the_authserver_log_to_the_listing.
     """
 
     class _Rows:
@@ -6277,6 +6278,37 @@ def test_the_accounts_tab_names_an_account_whose_a_recent_login_used_a_wrong_pas
     assert "BOB" in said
     assert "BOTONE" not in said, "a bot's failed login was reported as a player's"
     assert not view.account_login_notes.isHidden()
+
+
+def test_the_wotlk_accounts_factory_hands_the_authserver_log_to_the_listing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T881 review: the `_for_wotlk` site itself passes the authserver log through.
+
+    The tab test above builds its listing by hand, so it cannot see a factory that
+    forgot `auth_server_log=`. This builds the accounts object through the real
+    factory path, with the container-log reader faked to the authserver's own
+    sentence, and asks the listing it built: a factory that drops that keyword
+    leaves the note empty and fails here.
+    """
+    monkeypatch.setattr(
+        DockerSql,
+        "query",
+        lambda self, db, statement: "7\tHORDETEST\t0\n",
+    )
+    monkeypatch.setattr(
+        docker,
+        "last_lines",
+        lambda container, lines, *, wsl_distro=None, timeout=20.0, max_bytes=None: (
+            "2026-11-09 20:00:00 [Info] account HORDETEST tried to login with invalid password\n"
+        ),
+    )
+
+    services = ControllerServices.for_wotlk(WOTLK, tmp_path, None)
+
+    assert services.accounts is not None
+    listing = cast(useraccounts.Listing, services.accounts.listing())
+    assert "HORDETEST" in listing.wrong_password
 
 
 def test_setting_a_password_names_the_chosen_account_and_clears_the_field(
