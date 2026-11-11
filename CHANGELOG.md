@@ -16,7 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
-- Start moves a realm off a network address this computer no longer has, so players are not sent to an old address.
+- WotLK, Unbound and Conquest of Azeroth: Start moves a realm off a network address this computer no longer has.
 - The Accounts tab says when the last login used a wrong password, and names the button Set password needs.
 - Networking: the realm name is read again once the server is up, instead of saying the database did not answer.
 - Support files now list this computer's addresses and the address each realm tells players.

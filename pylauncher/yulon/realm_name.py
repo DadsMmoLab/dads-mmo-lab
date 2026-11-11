@@ -302,10 +302,15 @@ class RealmNames:
             return NameState(
                 saved,
                 False,
-                "The database was not running when this was read, so this is the name "
+                "The database did not answer when this was read, so this is the name "
                 "saved for this server.",
             )
-        return NameState("", False, "The database was not running when this was read.")
+        return NameState(
+            "",
+            False,
+            "The database did not answer when this was read. "
+            "The name is read again once the server is up.",
+        )
 
     def save(self, name: str) -> SaveResult:
         """Check, apply (if the database is up) and remember `name`.

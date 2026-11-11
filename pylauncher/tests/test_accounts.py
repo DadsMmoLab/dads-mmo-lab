@@ -503,6 +503,26 @@ def test_create_while_the_database_container_is_stopped_says_start_the_server_fi
     assert isinstance(raised.value.__cause__, ApplyError), "the raw reason left the chain"
 
 
+def test_a_docker_daemon_that_is_down_keeps_its_own_message() -> None:
+    """T881 review: "Start the server first" is wrong advice when Docker itself is down.
+
+    The matcher used to include `Cannot connect to the Docker daemon`, so a daemon error
+    became a sentence about the game server. Only the container-is-not-running forms
+    name a stopped stack.
+    """
+    sql = _FakeSql()
+    sql.query_error = ApplyError(
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+        "Is the docker daemon running?"
+    )
+
+    with pytest.raises(accounts.AccountError) as raised:
+        accounts.create_account(sql, "Nodocker", PASSWORD)
+
+    assert str(raised.value) != accounts.NOT_RUNNING
+    assert "Cannot connect to the Docker daemon" in str(raised.value)
+
+
 def test_a_realmcharacters_failure_is_reported_in_this_modules_vocabulary_too() -> None:
     """Every statement, not just the first — that was the shape of the leak."""
     sql = _FakeSql()

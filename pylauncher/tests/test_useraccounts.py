@@ -316,7 +316,7 @@ def test_the_listing_names_a_player_whose_last_login_used_a_wrong_password(tmp_p
 
     listing = _install(tmp_path, sql=sql, log=lambda: log).listing()
 
-    assert listing.wrong_password == "The last login as ALICE used a wrong password."
+    assert listing.wrong_password == "A recent login as ALICE used a wrong password."
     assert "BOTONE" not in listing.wrong_password
 
 

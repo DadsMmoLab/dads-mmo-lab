@@ -1953,6 +1953,9 @@ class InstallChannel:
         except DbPasswordUnknown as unknown:
             # Nothing was written: the password is read before `enable()` writes anything.
             raise EnableRefused(str(unknown)) from unknown
+        # T881 review: the press just wrote the channel on, so the note the Server tab
+        # reads from the last check -- files that switch it off -- is no longer true.
+        self.channel_is_off = False
         self._rearm("Turn on", waiting_too=True)
         return done
 

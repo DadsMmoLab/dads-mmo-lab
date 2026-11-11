@@ -4405,6 +4405,15 @@ def _realm_address_keeper(
     stale address is still the only way the owner can reach the Networking tab.
     Every failure -- Docker will not start the database, the row will not read,
     the UPDATE fails -- is one WARNING line and the start goes ahead.
+
+    Two narrowings the review added (T881 B). A network choice FILE that exists
+    but does not read must not be treated as "no file": `read_network_intent()`
+    answers None for both by design (install/Apply take the reachable path), and
+    the automatic rewrite is exactly what an owner's damaged `loopback` choice
+    must stop. So the keeper checks the file itself and writes nothing. And the
+    address listing is read ONCE and handed to every `holds_here()` question the
+    rule asks; under WSL each read is a PowerShell round trip with an 8 s bound,
+    and a row with two private columns asked it three times.
     """
     columns = networking.realmlist_columns(entry)
     read_row = networking.realmlist_address_query(entry)
@@ -4413,10 +4422,38 @@ def _realm_address_keeper(
         # Read at press time, not at tab build: Apply writes this file, and a Start
         # after a fresh choice must obey the choice.
         intent = networking.read_network_intent(server_dir)
+        if intent is None and (server_dir / networking.INTENT_FILE).exists():
+            # T881 review: a damaged file reads as None on purpose for the install and
+            # Apply roads (§35), but here that would be "no file" -- the automatic
+            # rewrite. The owner's choice may have been any mode, so nothing is written.
+            logger.warning(
+                "the network choice file for this server could not be read, so the realm "
+                "address was not checked at Start"
+            )
+            return
         if intent is not None and intent.mode == "loopback":
             # §41: the loopback is the owner's answer, and nothing here may ask the host
             # about it, let alone start a database for it.
             return
+        # T881 review: under WSL every `holds_here()` read the Windows listing costs a
+        # PowerShell round trip (8 s bound), and the rule asks it several times per row.
+        # The plan reads it at most once for the same reason (T784 b); so does this,
+        # lazily, and only under WSL.
+        read_listing: list[platform.LocalListing | None] = []
+        in_wsl: list[bool] = []
+
+        def listing() -> platform.LocalListing | None:
+            if not in_wsl:
+                in_wsl.append(platform.in_wsl())
+            if not in_wsl[0]:
+                return None
+            if not read_listing:
+                read_listing.append(platform.local_ipv4_listing(wsl=True))
+            return read_listing[0]
+
+        def holds(address: str) -> bool | None:
+            return networking.holds_here(address, listing=listing())
+
         try:
             docker.start_database(
                 spec,
@@ -4428,9 +4465,7 @@ def _realm_address_keeper(
             if row is None:
                 logger.info("the realm row could not be read, so its advertised address stands")
                 return
-            verdict = networking.stale_realm_address(
-                row, intent, networking.holds_here, platform.detect_lan_ip
-            )
+            verdict = networking.stale_realm_address(row, intent, holds, platform.detect_lan_ip)
             if verdict.action == "warn":
                 logger.warning(verdict.warning)
                 return
@@ -17019,7 +17054,7 @@ class ControllerView(QWidget):
         # under them used to: at 1080p it left the list 192 px over 700 of
         # nothing.
         box.addLayout(columns, 1)
-        # T881 B: "The last login as NAME used a wrong password." -- read from the
+        # T881 B: "A recent login as NAME used a wrong password." -- read from the
         # authserver's own log on the list's worker, and blank when nothing hit.
         self.account_login_notes = QLabel("", tab)
         self.account_login_notes.setWordWrap(True)
@@ -17724,9 +17759,14 @@ class ControllerView(QWidget):
         return useraccounts.NO_CHANNEL
 
     def _grey_set_password(self) -> None:
-        """Set password: greyed on the channel's own refusal, else on nothing being chosen."""
+        """Set password: greyed on the database's or the channel's refusal, else no choice.
+
+        T785's `db_refusal` outranks the channel and "choose an account": the database
+        password is unknown, and that is the reason the press would fail whatever the
+        channel says (T881 review round).
+        """
         chosen = self.account_list.currentItem() is not None
-        reason = self._set_password_reason()
+        reason = self.services.db_refusal or self._set_password_reason()
         set_enabled_why(
             self.set_password_button, reason or (None if chosen else ACCOUNT_NEEDS_CHOICE)
         )

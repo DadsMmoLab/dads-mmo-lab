@@ -7957,7 +7957,7 @@ def _start_services(
     monkeypatch.setattr(apply.DockerSql, "run_statement", lambda self, db, s: ran.append((db, s)))
     monkeypatch.setattr(apply.DockerSql, "query", lambda self, db, s: row)
     monkeypatch.setattr(docker, "start_database", lambda *a, **k: True)
-    monkeypatch.setattr(networking, "holds_here", holds)
+    monkeypatch.setattr(networking, "holds_here", lambda address, **kwargs: holds(address))
     monkeypatch.setattr(platform, "detect_lan_ip", detect)
     services = controller_view._for_wotlk(WOTLK, server_dir, None, None)
     return services, ran
@@ -8044,3 +8044,66 @@ def test_a_start_writes_nothing_when_the_address_list_cannot_be_read(
     assert ran == []
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert [line for line in warnings if "could not be read" in line], warnings
+
+
+def test_a_start_writes_nothing_when_the_network_choice_file_is_damaged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A file that exists and does not read is not "no file" (T881 review).
+
+    `read_network_intent()` answers None for a damaged record on purpose, so the
+    install and Apply roads take the reachable path. At Start that same None would
+    run the automatic rewrite -- over an owner's choice this build cannot read -- so
+    nothing is written, and the one warning says why.
+    """
+    (tmp_path / networking.INTENT_FILE).write_text("{not json", encoding="utf-8")
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+    with caplog.at_level("WARNING", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert ran == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == [
+        "the network choice file for this server could not be read, so the realm address "
+        "was not checked at Start"
+    ]
+
+
+def test_a_start_reads_the_address_listing_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One reading answers every address question the rule asks (T881 review).
+
+    Under WSL each read of the Windows listing is a PowerShell round trip with an
+    8 s bound, and a row with both columns private asked `holds_here()` twice and
+    the detect check a third time. Each ask now gets the same reading.
+    """
+    reads: list[bool] = []
+    listing = object()
+
+    def local_ipv4_listing(*, wsl: bool) -> object:
+        reads.append(wsl)
+        return listing
+
+    seen: list[tuple[str, object]] = []
+
+    def holds(
+        address: str, *, under_wsl: bool | None = None, listing: object = None
+    ) -> bool | None:
+        seen.append((address, listing))
+        return address == LAN_HELD
+
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(platform, "local_ipv4_listing", local_ipv4_listing)
+    monkeypatch.setattr(networking, "holds_here", holds)
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert reads == [True]
+    assert seen and all(each is listing for _, each in seen), seen
+    assert ran == [("auth", networking.realmlist_sql(WOTLK, LAN_HELD, LAN_HELD))]

@@ -328,12 +328,19 @@ class ViewReads:
         # T881 A: asked here, on the worker, because `holds_here()` can read the
         # Windows listing through PowerShell under WSL. A realm row that advertises
         # an address this PC no longer has is the difference between the banner's
-        # "PLAY still works" and the truth.
+        # "PLAY still works" and the truth. Only a private address is a claim about
+        # THIS network (T881 review): a public endpoint or a DDNS name is somebody's
+        # decision, so it is never asked, and a hostname costs no DNS lookup.
+        announced_held = (
+            networking.holds_here(announced)
+            if announced and networking.private_ipv4(announced)
+            else None
+        )
         return ServerReading(
             accounts,
             online,
             announced,
-            announced_held=networking.holds_here(announced) if announced else None,
+            announced_held=announced_held,
         )
 
     def _uptime(self) -> timedelta | None:

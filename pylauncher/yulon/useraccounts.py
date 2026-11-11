@@ -932,4 +932,4 @@ def wrong_password_note(log_text: str | None, names: Iterable[str]) -> str:
         found.append(name)
         if len(found) == WRONG_PASSWORD_NOTES:
             break
-    return " ".join(f"The last login as {name} used a wrong password." for name in found)
+    return " ".join(f"A recent login as {name} used a wrong password." for name in found)

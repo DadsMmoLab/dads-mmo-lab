@@ -120,14 +120,16 @@ as well, so every shape `_CONTAINER_NOT_UP` matches gets this one sentence.
 """
 
 _CONTAINER_NOT_UP = re.compile(
-    r"container .* is not running|No such container|Cannot connect to the Docker daemon",
+    r"container .* is not running|No such container",
     re.IGNORECASE,
 )
 """Docker's own answers for "there is no database to ask" (T881 F).
 
-A stopped container, one that was removed, and a daemon that is not there at all. The
-text is matched because `ApplyError` carries exactly that text (`DockerSql` raises it with
-the client's or the daemon's own words); no code path here invents it.
+A stopped container and one that was removed. A daemon that is not there at all is NOT
+this rule (review round): "Cannot connect to the Docker daemon" means Docker itself is
+down, and "Start the server first" is then wrong advice. The text is matched because
+`ApplyError` carries exactly that text (`DockerSql` raises it with the client's or the
+daemon's own words); no code path here invents it.
 """
 
 _ACCOUNTS_DB: Db = "auth"

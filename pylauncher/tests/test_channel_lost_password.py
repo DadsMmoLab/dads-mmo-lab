@@ -319,25 +319,6 @@ def _box(game: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     monkeypatch.setattr(controller_view_module, "_sql_for", lambda *_a, **_k: auth)
     services = ControllerServices.for_entry(entry, server_dir)
     assert services.channel_setup is not None
-    # T881 D: a pending row in the wild exists only after "Turn on the command
-    # channel" wrote the files on, so the fixture presses it the same way. Without
-    # this the folder has no override, `is_enabled()` reads False, and every waiting
-    # line here would say the channel is off -- a different state, and not the one
-    # these tests are about. The test that wants it off writes a file that says so.
-    operations = entry.operations
-    assert operations is not None
-    if operations.enable_conf is not None:
-        # `enable()` edits the conf the server reads, and refuses to create one.
-        conf = server_dir / operations.enable_conf.file
-        conf.parent.mkdir(parents=True, exist_ok=True)
-        conf.write_text('[worldserver]\nDataDir = "."\n', encoding="utf-8")
-    channel_setup.enable(
-        entry,
-        server_dir,
-        templates_root=services.channel_setup.templates_root,
-        world_running=False,
-        db_password=services.channel_setup._password(),
-    )
     services.update_to_latest = None  # Refresh asks GitHub for news otherwise
     view = ControllerView(entry, services, status_poll_ms=0)
     try:
@@ -358,6 +339,31 @@ def _offers_repair(box: _Box) -> bool:
 
 def _saved(box: _Box) -> soap.Endpoint | None:
     return channel_setup.load_credential(box.entry.id, box.install_id)
+
+
+def _press_enable(box: _Box) -> None:
+    """The real "Turn on the command channel" press, for a test that needs the files on.
+
+    The fixture does not press it: a waiting row in the wild exists only after this press,
+    but pressing it for every test made each one start from a state its name did not say.
+    A test that needs the channel's files on asks for it here.
+    """
+    operations = box.entry.operations
+    assert operations is not None
+    setup = box.view.services.channel_setup
+    assert setup is not None
+    if operations.enable_conf is not None:
+        # `enable()` edits the conf the server reads, and refuses to create one.
+        conf = setup.server_dir / operations.enable_conf.file
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text('[worldserver]\nDataDir = "."\n', encoding="utf-8")
+    channel_setup.enable(
+        box.entry,
+        setup.server_dir,
+        templates_root=setup.templates_root,
+        world_running=False,
+        db_password=setup._password(),
+    )
 
 
 # -- the tests ------------------------------------------------------------------
@@ -412,6 +418,7 @@ def test_repair_while_the_world_loads_keeps_the_password_and_refresh_proves_it(
     box: _Box,
 ) -> None:
     """The reset is a database write, so it works before the world answers; the proof waits."""
+    _press_enable(box)
     box.view._settle_the_channel()
     box.wire.loading = True
 
@@ -482,6 +489,7 @@ def test_a_start_that_lands_while_the_world_loads_asks_again_a_minute_later(
     to be proved" until something else asked. An install already asks once
     more a minute later; a Start now does the same, and only while it waits.
     """
+    _press_enable(box)
     with box.auth.lock:
         box.auth.conn.execute("DELETE FROM account WHERE username = ?", (box.app,))
     scheduled: list[tuple[int, object]] = []
@@ -517,6 +525,7 @@ def test_a_repair_that_waits_for_the_world_outlives_a_close_of_yulon(
     stale password "verified", and the world's first answer is a refusal and
     a second Repair.
     """
+    _press_enable(box)
     operations = box.entry.operations
     assert operations is not None and operations.port is not None
     channel_setup.save_credential(
@@ -734,10 +743,10 @@ def _switch_the_channel_off(entry: CatalogEntry, server_dir: Path) -> None:
         conf.parent.mkdir(parents=True, exist_ok=True)
         conf.write_text('[worldserver]\nDataDir = "."\n', encoding="utf-8")
         return
-    # The trees whose channel is the override's channel lines: the fixture pressed
-    # Enable, so take exactly those lines out again.
+    # The trees whose channel is the override's channel lines: the test pressed
+    # Enable first, so take exactly those lines out again.
     override = server_dir / composegen.OVERRIDE_FILE
-    assert override.is_file(), "the ground: the fixture pressed Enable"
+    assert override.is_file(), "the ground: the test pressed Enable"
     override.write_text(
         "".join(
             line
@@ -753,6 +762,7 @@ def test_with_the_channel_off_repair_leaves_enable_on_offer(box: _Box) -> None:
 
     Hiding Enable then left a player with a channel that could never be proved.
     """
+    _press_enable(box)
     _switch_the_channel_off(box.entry, box.view.services.channel_setup.server_dir)
     assert box.view.services.channel_setup.is_enabled() is False, "the ground: files say off"
     box.view._settle_the_channel()
@@ -777,6 +787,7 @@ def test_a_pending_channel_on_an_install_whose_files_switch_it_off_names_the_swi
     if it is not running" about a server that was running. The Server tab names the
     press now, and the log gets that line once per run -- not once per Start.
     """
+    _press_enable(box)
     setup = box.view.services.channel_setup
     assert setup is not None
     _switch_the_channel_off(box.entry, setup.server_dir)
@@ -906,6 +917,7 @@ def test_an_override_of_a_conf_tree_that_reads_differently_is_unknown(box: _Box)
 
 def test_a_start_finds_a_waiting_row_whose_account_was_deleted(box: _Box) -> None:
     """The world is up and silent (channel off): only the database can say the row is gone."""
+    _press_enable(box)
     box.view._settle_the_channel()
     box.wire.loading = True
     box.view.repair_channel_button.click()
@@ -930,6 +942,7 @@ def _gave_up(box: _Box) -> None:
     whose channel is off spends the three tries and the row stops at "not set
     up … it is over to you" for the rest of the app run.
     """
+    _press_enable(box)
     box.view._settle_the_channel()
     # T723: only a reply spends a try, so the world replies, with something that
     # is no proof; a world that is silent or not listening no longer gives up.

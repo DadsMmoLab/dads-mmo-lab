@@ -6215,33 +6215,65 @@ def test_set_password_is_greyed_with_the_channel_button_named_when_the_channel_i
     assert "Server tab" in reason
 
 
-def test_the_accounts_tab_names_an_account_whose_last_login_used_a_wrong_password(
+def test_a_database_refusal_keeps_its_reason_on_set_password_when_the_channel_changes(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T881 B: the authserver's own words, against the players the list shows.
+    """T785's refusal outranks the channel's note and "choose an account" (T881 review).
 
-    The sentence is part of the listing (`useraccounts.Listing.wrong_password`), parsed
-    by `useraccounts.wrong_password_note` against the names the list holds -- which is
-    what keeps a bot's failed login (and the app's own) out of it.
+    `_show_channel()` runs after every channel look and used to replace Set password's
+    reason with `NO_CHANNEL`, so the tooltip told the reader to turn on a channel while
+    the real reason was the unknown database password.
     """
+    from yulon.ui.widgets.reasons import reason_of
+
+    refusal = "This server's .db_password is missing, so Yu'lon cannot know it and tried none."
+    services = _with_channel(
+        ps, tmp_path, _StubSetup(state=channel_setup.Pending(account="YULON_AB", password="pw"))
+    )
+    services.db_refusal = refusal
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_channel()
+
+    assert not view.set_password_button.isEnabled()
+    assert reason_of(view.set_password_button) == refusal
+
+
+def test_the_accounts_tab_names_an_account_whose_a_recent_login_used_a_wrong_password(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T881 B: the authserver's own words, through the listing the factory builds.
+
+    The note is part of `InstallAccounts.listing()` -- parsed by
+    `useraccounts.wrong_password_note` against the names the listing holds, which is
+    what keeps a bot's failed login (and the app's own) out of it. Driving the real
+    listing is what fails if its `auth_server_log` seam is unhooked.
+    """
+
+    class _Rows:
+        def query(self, db: object, statement: str) -> str:
+            return "7\tALICE\t0\n9\tBOB\t3\n"
+
     log = (
         "2026-11-09 20:00:00 [Info] account ALICE tried to login with invalid password\n"
         "2026-11-09 20:01:00 [Info] account BOTONE tried to login with invalid password\n"
         "2026-11-09 20:02:00 [Info] account BOB tried to login with invalid password\n"
     )
-    stub = _StubAccounts()
-    stub.list_result = useraccounts.Listing(
-        accounts=list(stub.list_result.accounts),
-        wrong_password=useraccounts.wrong_password_note(log, ["ALICE", "BOB"]),
+    services = _services(ps, tmp_path, [])
+    services.accounts = useraccounts.InstallAccounts(
+        WOTLK,
+        tmp_path,
+        sql=_Rows(),
+        channel_for_saved=lambda: None,
+        app_account="YULON_ABC12345",
+        auth_server_log=lambda: log,
     )
-    view = ControllerView(
-        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
-    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
 
     view.refresh_accounts()
 
     said = view.account_login_notes.text()
-    assert "The last login as ALICE used a wrong password." in said
+    assert "A recent login as ALICE used a wrong password." in said
     assert "BOB" in said
     assert "BOTONE" not in said, "a bot's failed login was reported as a player's"
     assert not view.account_login_notes.isHidden()
@@ -32725,7 +32757,7 @@ def test_with_no_known_database_password_save_name_is_grey_and_says_the_real_rea
     services.realm_name_current = lambda: realm_name.NameState(
         "Kept Realm",
         False,
-        "The database was not running when this was read, so this is the name saved "
+        "The database did not answer when this was read, so this is the name saved "
         "for this server.",
     )
     view = ControllerView(WOTLK, services, status_poll_ms=0)
