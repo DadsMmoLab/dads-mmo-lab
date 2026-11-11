@@ -7,7 +7,7 @@
   "description": "Makes the day and night cycle run faster or slower.",
   "folder": "mod-TimeIsTime",
   "source": {
-    "repo": "dunjeon/mod-TimeIsTime",
+    "repo": "pjerra/mod-TimeIsTime",
     "branch": "master"
   },
   "build": {
@@ -46,6 +46,18 @@
           "label": "Hour offset",
           "explain": "Set together with TimeStart: start the (client side) game clock at the chosen Epoch (Unix) time at the same time each login. Default: 0.0.",
           "type": "float"
+        },
+        {
+          "key": "TimeIsTime.RealignDate",
+          "label": "Keep the calendar on the real date",
+          "explain": "With a day speed above 1.0, keep the in-game calendar on the server's real date: only a real midnight moves the date forward, while the day and night cycle still runs at the chosen speed. Settings: 0 = off, 1 = on. Default: 1.",
+          "type": "bool"
+        },
+        {
+          "key": "TimeIsTime.RealignDateLookahead",
+          "label": "Calendar lookahead (minutes)",
+          "explain": "Only used when Keep the calendar on the real date is on. Minutes added to the server clock when the date is checked, so a sped-up midnight just before the real one still lands on the new day. 0 turns it off. Default: 1.0.",
+          "type": "float"
         }
       ],
       "template": "conf/mod-time_is_time.conf.dist"
@@ -53,6 +65,7 @@
   ],
   "notes": [
     "The core finds this module by its folder name (the loader defines Addmod_TimeIsTimeScripts), so the clone keeps the author's capitals in modules/mod-TimeIsTime while the id is the lower-case slug.",
-    "Restart the worldserver after changing the settings."
+    "Restart the worldserver after changing the settings.",
+    "The source is pjerra's fork of dunjeon/mod-TimeIsTime: the latest upstream plus NathanHandley's calendar fix (upstream issue #2), turned on by default."
   ]
 }

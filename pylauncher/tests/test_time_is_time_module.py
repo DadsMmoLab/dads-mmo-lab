@@ -20,8 +20,10 @@ TIME_IS_TIME_DIST_KEYS = (
     "TimeIsTime.SpeedRate",
     "TimeIsTime.TimeStart",
     "TimeIsTime.HourOffset",
+    "TimeIsTime.RealignDate",
+    "TimeIsTime.RealignDateLookahead",
 )
-"""`conf/mod-time_is_time.conf.dist` of dunjeon/mod-TimeIsTime, master (version 20250608)."""
+"""`conf/mod-time_is_time.conf.dist` of pjerra/mod-TimeIsTime, master (upstream 155aaf1 + NathanHandley cab7766)."""  # noqa: E501
 
 
 def _module(item: str) -> Manifest:
@@ -42,3 +44,11 @@ def test_time_is_time_is_listed_and_its_conf_keys_are_the_dists() -> None:
     (conf,) = m.conf
     assert conf.template == "conf/mod-time_is_time.conf.dist"
     assert tuple(key.key for key in conf.keys) == TIME_IS_TIME_DIST_KEYS
+
+
+def test_time_is_time_comes_from_the_fork_with_the_calendar_fix() -> None:
+    m = _module("mod-timeistime")
+    assert m.source.repo == "pjerra/mod-TimeIsTime"
+    (conf,) = m.conf
+    by_key = {key.key: key for key in conf.keys}
+    assert by_key["TimeIsTime.RealignDate"].type == "bool"
