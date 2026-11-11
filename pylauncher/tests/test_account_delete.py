@@ -424,6 +424,11 @@ def asked(monkeypatch: pytest.MonkeyPatch) -> _Asked:
 def _tab(server: _Server, tmp_path: Path) -> tuple[ControllerView, list[str]]:
     services = ControllerServices.for_entry(server.entry, tmp_path / server.entry.id)
     services.accounts = server.admin
+    # T881 B: the real channel has no credential in this harness, and Set password is
+    # greyed while that is so. These tests press the SEAM (a stub), not the channel, so
+    # the tab is handed no channel setup at all -- which is also what a harness had
+    # before the greying existed.
+    services.channel_setup = None
     view = ControllerView(server.entry, services, status_poll_ms=0, job_runner=run_inline)
     failed: list[str] = []
     view.action_failed.connect(failed.append)

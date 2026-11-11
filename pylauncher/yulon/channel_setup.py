@@ -306,6 +306,18 @@ CHANNEL_ROLLBACK_PRESS = "Turn the command channel back off"
 CHANNEL_ENABLE_PRESS = "Turn on the command channel"
 """The press name on the reservation `enable` takes (T607)."""
 
+CHANNEL_OFF_IN_FILES = (
+    "The command channel is off in this server's files: press Turn on the command channel on "
+    "the Server tab."
+)
+"""What a waiting row means when the files switch the channel off (T881 D).
+
+The Server tab shows this line, and the log gets it ONCE per run: the world cannot
+answer SOAP with the channel off, so every Start used to log "not reached; no try
+spent" and leave the reader with a row that would never be proved and no reason why.
+The button is named exactly as the tab spells it, as `useraccounts.NO_CHANNEL` is.
+"""
+
 
 @dataclass(frozen=True)
 class Enabled:
@@ -1095,6 +1107,7 @@ def ensure(
     config_dir: Path | None = None,
     state: State | None = None,
     gm_level: int = 3,
+    channel_is_off: bool = False,
 ) -> State:
     """Move the setup one step: create if it must, verify, and persist if verified.
 
@@ -1105,6 +1118,11 @@ def ensure(
 
     `create` is the install's own account seam (the SRP6 row path this app
     already has), and it is called only from `Idle`.
+
+    `channel_is_off` is `InstallChannel`'s reading of the install's files for a
+    waiting row (T881 D): the world cannot answer, so the silent ask that spends
+    no try is not worth a log line at every Start. The one sentence that names
+    the press is logged by the caller, once per run.
 
     One app per machine is assumed. Two Yu'lon windows settling the same
     install at once can each mint a password from `Idle`, and the second
@@ -1172,9 +1190,13 @@ def ensure(
             # channel is off or the world still loads, or a timeout). That says
             # nothing about the account, so it spends no try: the row stays
             # `Pending`, which the tab shows as waiting, and the next ask proves it.
-            logger.info(
-                f"the command channel for {game} was not reached; no try spent, still pending"
-            )
+            if not channel_is_off:
+                # T881 D: when the files switch the channel off, this line said the same
+                # nothing at every Start; the caller logged the one sentence instead.
+                logger.info(
+                    f"the command channel for {game} was not reached; no try spent, "
+                    "still pending"
+                )
             return current
         logger.info(f"the command channel for {game} did not answer yet; not saving anything")
         return current.verify_failed()
@@ -1406,6 +1428,8 @@ class InstallChannel:
         self._settles = 0
         self.channel_is_off = False
         """Set by `check()`, `settle()` and `repair()`: waiting, and the files say off (T423)."""
+        self._off_said = False
+        """Whether `CHANNEL_OFF_IN_FILES` has been logged this run (T881 D)."""
 
     @contextmanager
     def _held(self, press: str) -> Iterator[None]:
@@ -1614,14 +1638,31 @@ class InstallChannel:
                 f"{self.entry.id}: the waiting command channel has its tries back after {why}"
             )
 
+    def _files_switch_off(self, state: State) -> bool:
+        """Whether a waiting row's files switch the channel off; logged once per run (T881 D).
+
+        Sets `channel_is_off`, which the Server tab reads, and logs
+        `CHANNEL_OFF_IN_FILES` the first time this run and never again: the point is
+        that a Start no longer writes "not reached; no try spent" every five minutes
+        of a world that can never answer.
+        """
+        self.channel_is_off = isinstance(state, Pending) and self.is_enabled() is False
+        if self.channel_is_off and not self._off_said:
+            self._off_said = True
+            logger.info(CHANNEL_OFF_IN_FILES)
+        return self.channel_is_off
+
     def _noted(self, state: State) -> State:
         """Remember, for the tab, whether a waiting row waits on a channel that is off (T423).
 
         Read here, on the worker that ran the look or the press, and not by the
         tab: `is_enabled()` reads files, which for an install inside a WSL
         distro can boot a stopped one if it is done on the GUI thread.
+
+        T881 D: when it IS off, the log gets the one sentence that names the press
+        that fixes it -- once per run, not once per Start.
         """
-        self.channel_is_off = isinstance(state, Pending) and self.is_enabled() is False
+        self._files_switch_off(state)
         return state
 
     def _account_is_gone(self, account: str) -> bool:
@@ -1931,6 +1972,13 @@ class InstallChannel:
             return self._state
         account = account_name(self.install_id)
         asked_from = self._state
+        # T881 D: a waiting row on files that switch the channel off cannot be proved --
+        # the world has no SOAP listener to answer through. The round trip is still made,
+        # because only it can tell "the world is not listening" from "these files are
+        # stale", and only a real reply spends a try (T723). What changes is the line: the
+        # first ask this run logs the sentence that names the press, and `ensure()` stops
+        # writing "not reached; no try spent" after every Start.
+        off = isinstance(asked_from, Pending) and self._files_switch_off(asked_from)
         password = (
             asked_from.password
             if isinstance(asked_from, Pending | Verified)
@@ -1959,6 +2007,7 @@ class InstallChannel:
                 config_dir=self._config_dir,
                 state=asked_from,
                 gm_level=operations.gm_level or 3,
+                channel_is_off=off,
             )
         except ServerHeldElsewhere as held:
             # Another Yu'lon is working on this server: no account was made. The setup stays

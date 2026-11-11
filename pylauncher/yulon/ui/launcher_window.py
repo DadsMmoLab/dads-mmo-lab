@@ -253,6 +253,12 @@ class ServerReading:
     accounts: tuple[str, ...] | None
     online: Online | None
     announced: str | None
+    announced_held: bool | None = None
+    """Whether this computer holds `announced`, or None when nobody could tell (T881 A).
+
+    Read on the worker with `networking.holds_here()`, which can ask Windows under
+    WSL, so it is never asked on the GUI thread and never for a reading nobody made.
+    """
 
 
 UNREAD = ServerReading(accounts=None, online=None, announced=None)
@@ -318,7 +324,17 @@ class ViewReads:
             counts = launcher_reads.online_counts(sql, self.entry, marker)
             if counts is not None:
                 online = Online(counts[0], counts[1], self._uptime())
-        return ServerReading(accounts, online, launcher_reads.announced_address(sql, self.entry))
+        announced = launcher_reads.announced_address(sql, self.entry)
+        # T881 A: asked here, on the worker, because `holds_here()` can read the
+        # Windows listing through PowerShell under WSL. A realm row that advertises
+        # an address this PC no longer has is the difference between the banner's
+        # "PLAY still works" and the truth.
+        return ServerReading(
+            accounts,
+            online,
+            announced,
+            announced_held=networking.holds_here(announced) if announced else None,
+        )
 
     def _uptime(self) -> timedelta | None:
         try:
@@ -1439,6 +1455,16 @@ class LauncherWindow(QWidget):
         ):
             self.realm_mismatch_label.setText("")
             self.realm_mismatch_label.setVisible(False)
+            return
+        if self._server is not None and self._server.announced_held is False:
+            # T881 A: the row names an address this computer no longer has, so
+            # "PLAY still works" was the one sentence that was not true.
+            self.realm_mismatch_label.setText(
+                f"The game logs in at {typed}, then the server sends it on to {announced}, "
+                "which this computer does not have, so PLAY will not reach the world. On "
+                "the Networking tab, press Show plan, then Apply."
+            )
+            self.realm_mismatch_label.setVisible(True)
             return
         self.realm_mismatch_label.setText(
             f"The game logs in at {typed}, then the server sends it on to {announced}. "

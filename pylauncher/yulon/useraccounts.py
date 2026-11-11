@@ -19,9 +19,10 @@ level store has not been measured refuses rather than guessing.
 
 from __future__ import annotations
 
+import re
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from yulon import account_rules, commands, passwordcheck
@@ -50,10 +51,15 @@ class Listing:
     `problem` is not decoration: an empty list and an unreadable database look
     identical on screen, and one of them means "this server has no accounts"
     while the other means "do not trust what you are looking at".
+
+    `wrong_password` is the newest-login sentence from the authserver's own log
+    (T881 B), for the player accounts in `accounts` only. Empty when nothing hit,
+    when no log could be read, and when nobody wired a reader.
     """
 
     accounts: list[Account] = field(default_factory=list)
     problem: str = ""
+    wrong_password: str = ""
 
 
 APP_PREFIX = account_rules.RESERVED_PREFIX
@@ -613,6 +619,7 @@ class InstallAccounts:
         app_account: str,
         sleep: Callable[[float], None] = time.sleep,
         hold_server: ServerHold | None = None,
+        auth_server_log: Callable[[], str | None] | None = None,
     ) -> None:
         self._hold_server = hold_server
         """Reserves the server across processes for a write (T610); None holds nothing."""
@@ -622,6 +629,11 @@ class InstallAccounts:
         self._channel_for_saved = channel_for_saved
         self.app_account = app_account
         self._sleep = sleep
+        self._auth_server_log = auth_server_log
+        """The authserver's log tail, for `wrong_password_note()` (T881 B); None says nothing.
+
+        IO, so `listing()` -- which the tab runs on its worker -- is the only caller.
+        """
 
     @property
     def sql(self) -> SqlReader:
@@ -629,17 +641,30 @@ class InstallAccounts:
         return self._sql
 
     def listing(self) -> Listing:
-        """The accounts, with this install's live bot marker."""
+        """The accounts, with this install's live bot marker, and the wrong-password note.
+
+        The note is read from the authserver's log here, with the list, because the
+        sentence is about the names the list holds: a bot's failed login -- or this
+        app's own -- must never be reported as a person's, and the listing's own WHERE
+        is what leaves those out (T881 B). A log that cannot be read is no sentence.
+        """
         answer = resolve_marker(self.entry, self.server_dir)
         if answer.marker is None:
             return Listing(problem=answer.problem or "this install's bot marker could not be read")
-        return accounts(self._sql, self.entry, answer.marker, app_account=self.app_account)
+        found = accounts(self._sql, self.entry, answer.marker, app_account=self.app_account)
+        if found.problem or self._auth_server_log is None or not found.accounts:
+            return found
+        names = [account.username for account in found.accounts]
+        return replace(
+            found,
+            wrong_password=wrong_password_note(self._auth_server_log(), names),
+        )
 
     @holding("Change an account's password")
     def set_password(self, account: str, password: str) -> Outcome:
         channel = self._channel()
         if channel is None:
-            return Outcome(False, problem=_NO_CHANNEL)
+            return Outcome(False, problem=NO_CHANNEL)
         return set_password(
             channel,
             account=account,
@@ -693,7 +718,7 @@ class InstallAccounts:
     def set_gm_level(self, account: str, level: int) -> Outcome:
         channel = self._channel()
         if channel is None:
-            return Outcome(False, problem=_NO_CHANNEL)
+            return Outcome(False, problem=NO_CHANNEL)
         # From the entry, not from a default: a tree whose level lives on the
         # account row has no realm to name (8.3b), and the trees do not agree on
         # how high the levels go (8.3d -- the tortoise fork accepts 4).
@@ -749,7 +774,7 @@ class InstallAccounts:
         if self._channel() is None:
             # Said before the question rather than after it: a person who has
             # just said yes should not then be told nothing could be asked.
-            return DeletePlan(account, problem=_NO_CHANNEL)
+            return DeletePlan(account, problem=NO_CHANNEL)
         answer = resolve_marker(self.entry, self.server_dir)
         if answer.marker is None:
             return DeletePlan(
@@ -782,7 +807,7 @@ class InstallAccounts:
             return Outcome(False, problem=plan.problem)
         channel = self._channel()
         if channel is None:
-            return Outcome(False, problem=_NO_CHANNEL)
+            return Outcome(False, problem=NO_CHANNEL)
         if plan.account_id != confirmed.account_id:
             return Outcome(
                 False,
@@ -854,7 +879,57 @@ _GONE_READS = 21
 """Twenty-one reads half a second apart: about ten seconds, the bound the live test asked for."""
 
 
-_NO_CHANNEL = (
+NO_CHANNEL = (
     "the command channel is not set up for this install yet, and these changes are made by "
-    "the server rather than by writing rows. Turn it on from the Server tab."
+    "the server rather than by writing rows. Press Turn on the command channel on the Server "
+    "tab."
 )
+"""The refusal every write here gives when no proved channel exists (T881 B).
+
+The button is named EXACTLY as the Server tab spells it: the Accounts tab greys Set
+password with this sentence as its reason, and "from the Server tab" left the reader
+looking for a control that is called something else (T881's report: the channel was
+switched off in the server's own files, so the press never proved it, and nothing said
+which press would).
+"""
+
+
+_INVALID_PASSWORD = re.compile(
+    r"account\s+\"?([^\s\"]+)\"?\s+tried to login with invalid password", re.IGNORECASE
+)
+"""The authserver's own line for a login that used the wrong password (T881 B).
+
+AzerothCore's authserver logs `account <NAME> tried to login with invalid password`,
+and this is the one place that spelling lives. Matched case-insensitively, with the
+optional quotes CMaNGOS puts around the name.
+"""
+
+WRONG_PASSWORD_NOTES = 3
+"""How many accounts one line names. The newest first, and never more than a handful."""
+
+
+def wrong_password_note(log_text: str | None, names: Iterable[str]) -> str:
+    """The sentence for the newest wrong-password logins among `names`, or "" (T881 B).
+
+    `names` is the account list the tab just showed, which is already the accounts a
+    person may act on: bots and this app's own account are left out by the listing's
+    WHERE, so a bot's failed login can never be reported as somebody's. Names are
+    compared case-insensitively and returned as the listing spells them, because the
+    log's spelling is the server's and the list's is what the row draws.
+
+    Newest first from a bounded log tail: the last occurrences in the text are the
+    last logins. `None` (the log could not be read) and a log with no hits both answer
+    "", which is how the tab knows to say nothing.
+    """
+    if not log_text:
+        return ""
+    known = {name.casefold(): name for name in names}
+    found: list[str] = []
+    for match in reversed(_INVALID_PASSWORD.findall(log_text)):
+        name = known.get(match.casefold())
+        if name is None or name in found:
+            continue
+        found.append(name)
+        if len(found) == WRONG_PASSWORD_NOTES:
+            break
+    return " ".join(f"The last login as {name} used a wrong password." for name in found)

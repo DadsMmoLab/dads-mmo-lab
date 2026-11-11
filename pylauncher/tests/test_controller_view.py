@@ -6188,6 +6188,65 @@ def test_neither_change_is_offered_until_an_account_is_chosen(
     assert view.set_gm_button.isEnabled() is True
 
 
+def test_set_password_is_greyed_with_the_channel_button_named_when_the_channel_is_off(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T881 B: owner answer 7 means no password row outside the channel.
+
+    The report's install had the channel switched off in its own files, so the pending
+    credential was never proved; Set password stayed live and every press answered with
+    a sentence that named no control. It is greyed now, with the button's own name in
+    the reason, and the reason is the same sentence the seam would have refused with.
+    """
+    from yulon.ui.widgets.reasons import reason_of
+
+    services = _with_accounts(ps, tmp_path, _StubAccounts())
+    services.channel_setup = _StubSetup(
+        state=channel_setup.Pending(account="YULON_ABC12345", password="x")
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    view.refresh_accounts()
+    view.account_list.setCurrentRow(0)
+
+    assert not view.set_password_button.isEnabled()
+    reason = reason_of(view.set_password_button)
+    assert reason == useraccounts.NO_CHANNEL
+    assert "Turn on the command channel" in reason
+    assert "Server tab" in reason
+
+
+def test_the_accounts_tab_names_an_account_whose_last_login_used_a_wrong_password(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T881 B: the authserver's own words, against the players the list shows.
+
+    The sentence is part of the listing (`useraccounts.Listing.wrong_password`), parsed
+    by `useraccounts.wrong_password_note` against the names the list holds -- which is
+    what keeps a bot's failed login (and the app's own) out of it.
+    """
+    log = (
+        "2026-11-09 20:00:00 [Info] account ALICE tried to login with invalid password\n"
+        "2026-11-09 20:01:00 [Info] account BOTONE tried to login with invalid password\n"
+        "2026-11-09 20:02:00 [Info] account BOB tried to login with invalid password\n"
+    )
+    stub = _StubAccounts()
+    stub.list_result = useraccounts.Listing(
+        accounts=list(stub.list_result.accounts),
+        wrong_password=useraccounts.wrong_password_note(log, ["ALICE", "BOB"]),
+    )
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_accounts()
+
+    said = view.account_login_notes.text()
+    assert "The last login as ALICE used a wrong password." in said
+    assert "BOB" in said
+    assert "BOTONE" not in said, "a bot's failed login was reported as a player's"
+    assert not view.account_login_notes.isHidden()
+
+
 def test_setting_a_password_names_the_chosen_account_and_clears_the_field(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -32574,6 +32633,36 @@ def test_the_realm_name_field_is_filled_from_the_server_but_never_over_what_is_t
     assert view.realm_name_edit.text() == "Mine"
 
 
+def test_the_realm_name_is_read_again_when_the_server_comes_up(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T881 C: read once at tab build, so a database that was down left a stale note.
+
+    The report's Networking tab said "The database did not answer and no name is saved
+    yet" for the rest of the run, because nothing asked again after the server start
+    brought the database up. The poll's transition from not-running to running is what
+    asks now -- once, not on every tick of a world that stays up.
+    """
+    from yulon.controller import InstallStatus
+
+    reads: list[str] = []
+    services = _services(ps, tmp_path, [])
+    services.realm_name_current = lambda: (
+        reads.append("read") or realm_name.NameState("Seeded Realm", True)
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    reads.clear()
+
+    view._status_ready(InstallStatus(db=False, auth=False, world=False))
+    assert reads == [], "a stopped server read the realm name again"
+    view._status_ready(InstallStatus(db=True, auth=True, world=False))
+    assert reads == [], "a database with no world read the realm name again"
+    view._status_ready(InstallStatus(db=True, auth=True, world=True))
+    assert reads == ["read"], "the world came up and the realm name was not read again"
+    view._status_ready(InstallStatus(db=True, auth=True, world=True))
+    assert reads == ["read"], "a second poll of a running world read the name again"
+
+
 def test_pressing_save_name_sends_the_trimmed_name_to_the_seam_and_shows_its_sentence(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -32636,7 +32725,8 @@ def test_with_no_known_database_password_save_name_is_grey_and_says_the_real_rea
     services.realm_name_current = lambda: realm_name.NameState(
         "Kept Realm",
         False,
-        "The database did not answer, so this is the name saved for this server.",
+        "The database was not running when this was read, so this is the name saved "
+        "for this server.",
     )
     view = ControllerView(WOTLK, services, status_poll_ms=0)
 

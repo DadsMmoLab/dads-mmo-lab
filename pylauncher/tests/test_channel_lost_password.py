@@ -22,6 +22,7 @@ import base64
 import hashlib
 import http.server
 import re
+import socket
 import sqlite3
 import subprocess
 import threading
@@ -279,6 +280,7 @@ def box(
 
 
 def _box(game: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Box]:
+    """One game's install over the stand-in world."""
     entry = CATALOG.get(game)
     operations = entry.operations
     level = entry.accounts.level
@@ -317,6 +319,25 @@ def _box(game: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     monkeypatch.setattr(controller_view_module, "_sql_for", lambda *_a, **_k: auth)
     services = ControllerServices.for_entry(entry, server_dir)
     assert services.channel_setup is not None
+    # T881 D: a pending row in the wild exists only after "Turn on the command
+    # channel" wrote the files on, so the fixture presses it the same way. Without
+    # this the folder has no override, `is_enabled()` reads False, and every waiting
+    # line here would say the channel is off -- a different state, and not the one
+    # these tests are about. The test that wants it off writes a file that says so.
+    operations = entry.operations
+    assert operations is not None
+    if operations.enable_conf is not None:
+        # `enable()` edits the conf the server reads, and refuses to create one.
+        conf = server_dir / operations.enable_conf.file
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text('[worldserver]\nDataDir = "."\n', encoding="utf-8")
+    channel_setup.enable(
+        entry,
+        server_dir,
+        templates_root=services.channel_setup.templates_root,
+        world_running=False,
+        db_password=services.channel_setup._password(),
+    )
     services.update_to_latest = None  # Refresh asks GitHub for news otherwise
     view = ControllerView(entry, services, status_poll_ms=0)
     try:
@@ -703,26 +724,84 @@ def test_a_database_that_cannot_be_asked_leaves_the_proved_channel_alone(
     assert not _offers_repair(box)
 
 
+def _switch_the_channel_off(entry: CatalogEntry, server_dir: Path) -> None:
+    """Make `InstallChannel.is_enabled()` answer False for either kind of tree (T881 D)."""
+    operations = entry.operations
+    assert operations is not None
+    if operations.enable_conf is not None:
+        # The trees that read the channel from their conf: a conf with none of its keys.
+        conf = server_dir / operations.enable_conf.file
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text('[worldserver]\nDataDir = "."\n', encoding="utf-8")
+        return
+    # The trees whose channel is the override's channel lines: the fixture pressed
+    # Enable, so take exactly those lines out again.
+    override = server_dir / composegen.OVERRIDE_FILE
+    assert override.is_file(), "the ground: the fixture pressed Enable"
+    override.write_text(
+        "".join(
+            line
+            for line in override.read_text(encoding="utf-8").splitlines(keepends=True)
+            if not any(key in line for key in operations.enable_env)
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_with_the_channel_off_repair_leaves_enable_on_offer(box: _Box) -> None:
     """The row is there, the setting is off: the world cannot answer, so Repair ends waiting.
 
     Hiding Enable then left a player with a channel that could never be proved.
     """
-    operations = box.entry.operations
-    assert operations is not None
-    if operations.enable_conf is not None:
-        # The trees that read the channel from their conf: a conf with none of its keys.
-        conf = box.view.services.channel_setup.server_dir / operations.enable_conf.file
-        conf.parent.mkdir(parents=True, exist_ok=True)
-        conf.write_text('[worldserver]\nDataDir = "."\n', encoding="utf-8")
+    _switch_the_channel_off(box.entry, box.view.services.channel_setup.server_dir)
+    assert box.view.services.channel_setup.is_enabled() is False, "the ground: files say off"
     box.view._settle_the_channel()
     assert _offers_repair(box)
     box.wire.loading = True  # a world with the channel off answers nobody
 
     box.view.repair_channel_button.click()
 
-    assert "waiting to be proved" in _line(box)
+    assert isinstance(
+        box.view.services.channel_setup.setup_state(), channel_setup.Pending
+    ), "Repair left the row waiting, which is what Enable is offered for"
+    assert _line(box) == channel_setup.CHANNEL_OFF_IN_FILES
     assert not box.view.enable_channel_button.isHidden(), "Enable is not offered"
+
+
+def test_a_pending_channel_on_an_install_whose_files_switch_it_off_names_the_switch(
+    box: _Box, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T881 D: a waiting row on files that switch the channel off can never be proved.
+
+    Every Start logged "not reached; no try spent", and the tab said "Start the server
+    if it is not running" about a server that was running. The Server tab names the
+    press now, and the log gets that line once per run -- not once per Start.
+    """
+    setup = box.view.services.channel_setup
+    assert setup is not None
+    _switch_the_channel_off(box.entry, setup.server_dir)
+    # A row an earlier Start left while the world was still loading, in this run's memory
+    # (the disk record's own path is T138's, and it does not decide this line).
+    setup._state = channel_setup.Pending(account=box.app, password="minted-but-never-proved")
+    # A closed port: what the world looks like from here with SOAP switched off --
+    # the ask is refused, so it reaches nothing and spends no try (T723).
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead = probe.getsockname()[1]
+    box.wire.port = dead
+
+    with caplog.at_level("INFO", logger="yulon.channel_setup"):
+        box.view._settle_the_channel()  # what a finished Start runs
+        box.view._settle_the_channel()  # and the next Start of the same install
+
+        assert _line(box) == channel_setup.CHANNEL_OFF_IN_FILES
+        state = setup.setup_state()
+        assert isinstance(state, channel_setup.Pending), "the row stopped waiting"
+        assert state.tries == 0, "an ask the world never heard spent a try"
+
+    said = [record.getMessage() for record in caplog.records]
+    assert said.count(channel_setup.CHANNEL_OFF_IN_FILES) == 1, said
+    assert not any("no try spent" in line for line in said), said
 
 
 def test_with_the_channel_on_a_waiting_repair_does_not_offer_enable(

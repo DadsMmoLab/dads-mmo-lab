@@ -68,6 +68,7 @@ password.
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 from dataclasses import dataclass
 from typing import Literal, NamedTuple, Protocol, get_args
@@ -107,6 +108,27 @@ ALL_REALMS = -1
 # usefully hold.
 NO_GM = 0
 MAX_GM_LEVEL = 3
+
+NOT_RUNNING = "Start the server first."
+"""What an account action says when its database container is not up (T881 F).
+
+The press used to answer with docker's own words -- *"mysql in ac-database exited 1:
+Error response from daemon: container 3c922e8e... is not running"* -- which names nothing
+a person can do. They were on the Accounts tab while the database was stopped, and "Start
+the server first" is the whole of the remedy: Start creates a container that was removed
+as well, so every shape `_CONTAINER_NOT_UP` matches gets this one sentence.
+"""
+
+_CONTAINER_NOT_UP = re.compile(
+    r"container .* is not running|No such container|Cannot connect to the Docker daemon",
+    re.IGNORECASE,
+)
+"""Docker's own answers for "there is no database to ask" (T881 F).
+
+A stopped container, one that was removed, and a daemon that is not there at all. The
+text is matched because `ApplyError` carries exactly that text (`DockerSql` raises it with
+the client's or the daemon's own words); no code path here invents it.
+"""
 
 _ACCOUNTS_DB: Db = "auth"
 
@@ -1002,6 +1024,10 @@ def _query_rows(sql: SqlSeam, statement: str, what: str) -> list[str]:
     try:
         output = sql.query(_ACCOUNTS_DB, statement)
     except ApplyError as exc:
+        if _CONTAINER_NOT_UP.search(str(exc)):
+            # T881 F: the Accounts tab's Create while the database is stopped. Docker's
+            # own words name a container and an exit code; the reader's remedy is Start.
+            raise AccountError(NOT_RUNNING) from exc
         raise AccountError(f"could not {what}: {exc}") from exc
     return [line.strip() for line in output.splitlines() if line.strip()]
 

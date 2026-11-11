@@ -45,12 +45,12 @@ import os
 import re
 import zipfile
 import zlib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from yulon import __version__
+from yulon import __version__, platform
 from yulon.log import get_logger
 from yulon.support import runlog
 from yulon.support import sources as src
@@ -129,6 +129,12 @@ class Seams:
     machine: Callable[[], list[str]] | None = None
     docker_size: Callable[[str | None], tuple[int, int] | None] | None = None
     now: Callable[[], datetime] = _utc_now
+    listing: Callable[[], platform.LocalListing] | None = None
+    """This computer's own IPv4 addresses for `system-info.txt` (T881 E); None asks the host."""
+    lan_ip: Callable[[], str | None] | None = None
+    """The address the detector would advertise (T881 E); None asks the host."""
+    realm_log: Callable[[InstallFacts, Collection[str | None]], str | None] | None = None
+    """One install's authserver tail (T881 E); None reads it, honouring the silent set."""
 
 
 @dataclass(frozen=True)
@@ -364,6 +370,9 @@ def build(
         silent_targets=silent,
         machine=seams.machine,
         engine=seams.docker_size,
+        listing=seams.listing,
+        lan_ip=seams.lan_ip,
+        realm_log=seams.realm_log,
     )
     collector.text("system-info.txt", info, "info")
     stamp = seams.now().strftime("%Y-%m-%d %H:%M:%S UTC")

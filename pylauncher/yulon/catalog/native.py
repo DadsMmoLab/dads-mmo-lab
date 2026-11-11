@@ -7818,6 +7818,14 @@ class Seams:
     is a first-class answer here (no network, or a route that could not be
     read) and `_advertise_realm()` treats it as such; see `REALM_ADDRESS_UNKNOWN`.
     """
+    holds: Callable[[str], bool | None] = networking.holds_here
+    """Whether this computer still holds a private address a realm row advertises (T881 A).
+
+    `_advertise_realm()` asks it about the row it finds, so a resume moves a row off
+    a LAN address this PC was given once and no longer has. A seam for `lan_ip`'s
+    reason: the real answer depends on this box's interfaces, and a test that
+    asserted the rule through it would be a statement about a DHCP lease.
+    """
     # The 7.3 primitives. Four of the five real functions take a `wsl_distro`
     # keyword that these types do not carry — exactly as `container_exists`,
     # `start_db` and `start` above have not carried it since 7.1. **That
@@ -17774,8 +17782,10 @@ class StagedInstaller:
           overwrote that public address with a LAN one and printed "players on
           other machines can reach this server", which was the opposite of what
           had just happened (review, 2026-09-03). The question that matters is
-          whether the row can be reached from another machine at all, which is
-          exactly what `networking.advertisable()` already answers. This applies
+          whether the row can be reached from another machine at all, which
+          `networking.row_still_reachable()` answers: `networking.advertisable()`
+          for the loopback and the name, and -- since T881 -- a private IPv4 must
+          be an address this computer still holds. This applies
           only when no address was chosen: a chosen address is compared with the
           row by equality instead, as the owner's-choice bullet above says;
         * the UPDATE failed — said, with what the database answered, plus where
@@ -17822,8 +17832,15 @@ class StagedInstaller:
                     "was left exactly as it is."
                 )
                 return
-        elif stored is not None and all(networking.advertisable(value) for value in stored):
-            # EVERY column the UPDATE would write must already be reachable. One
+        elif stored is not None and networking.row_still_reachable(
+            networking.RealmRow(
+                address=stored[0] if stored else "",
+                local_address=stored[1] if len(stored) > 1 else "",
+            ),
+            self._seams.holds,
+        ):
+            # EVERY column the UPDATE would write must already be reachable, and a
+            # private address must still be one this computer holds (T881 A). One
             # loopback among them still leaves a client that is sent to its own
             # machine, so `all()` and not `any()`.
             shown = ", ".join(dict.fromkeys(stored))

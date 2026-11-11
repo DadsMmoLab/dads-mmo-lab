@@ -287,10 +287,11 @@ def test_current_prefers_the_database_then_the_saved_name_then_says_nothing(
     realm_name.record_name(tmp_path, "Saved One")
     down = RealmNames(WOTLK, tmp_path, FakeSql(down="no")).current()
     assert (down.shown, down.from_database) == ("Saved One", False)
-    assert "did not answer" in down.note
+    assert "was not running when this was read" in down.note
 
     empty = RealmNames(WOTLK, tmp_path / "other", FakeSql(down="no")).current()
     assert (empty.shown, empty.from_database) == ("", False)
+    assert empty.note == "The database was not running when this was read."
 
 
 def test_a_name_with_a_backslash_survives_a_round_trip_through_the_database(
