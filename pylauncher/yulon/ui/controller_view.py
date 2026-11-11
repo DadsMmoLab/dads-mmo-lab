@@ -2185,6 +2185,7 @@ def _start_for_realm_switch(
         before_servers=_before_the_servers(
             _realm_type_gate(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
             _realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+            _realm_address_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
         ),
     )
     controller.start()
@@ -4227,6 +4228,35 @@ def _settings_mods(store: ManifestStore) -> Callable[[], tuple[Manifest, ...]]:
     return mods
 
 
+LOGIN_HITS_LINES = 400
+"""How much of the authserver's log the Accounts tab reads for wrong-password hits (T881 B).
+
+A tail rather than everything: the hits a person cares about are the last ones, and this
+runs whenever the list is refreshed, so the read has to stay as cheap as a status poll.
+"""
+
+
+def _auth_server_log(
+    spec: docker.ContainerSpec, *, wsl_distro: str | None
+) -> Callable[[], str | None]:
+    """This install's authserver log tail, through the reader every container log uses (T881 B).
+
+    `docker.last_lines()` -- the reader the snapshots, the support bundle and the
+    installer's `last_words` already go through -- so this adds no docker command shape,
+    keeps both streams (a container without a tty writes its errors to stderr) and is
+    bounded. A read that fails is None, which the accounts listing reads as no sentence.
+    """
+
+    def read() -> str | None:
+        try:
+            return docker.last_lines(spec.auth, LOGIN_HITS_LINES, wsl_distro=wsl_distro)
+        except Exception as exc:  # noqa: BLE001 - a log nobody could read says nothing
+            logger.info(f"could not read {spec.auth}'s log for wrong-password hits: {exc}")
+            return None
+
+    return read
+
+
 def _before_the_servers(
     *steps: Callable[[], str | None] | None,
 ) -> Callable[[], str | None] | None:
@@ -4349,6 +4379,124 @@ def _realm_port_keeper(
             "server was not started: its players would be sent to another server's world. "
             "Press Start again."
         )
+
+    return keep
+
+
+def _realm_address_keeper(
+    entry: CatalogEntry,
+    spec: docker.ContainerSpec,
+    server_dir: Path,
+    sql: DockerSql,
+    *,
+    wsl_distro: str | None,
+) -> Callable[[], None]:
+    """Before the servers start, move a realm row off an address this computer lost (T881 A).
+
+    The third step beside the realm-type gate and the realm port keeper, and it
+    asks the rule `networking.stale_realm_address()` states: a remembered
+    `loopback` or a chosen address is left alone, and a row of private addresses
+    this computer no longer holds is rewritten to the one it holds now. Without
+    it Start brought the whole server up against a row nobody could be sent to,
+    which is exactly the player report this ticket is.
+
+    It never refuses a start: unlike the port keeper, whose row decides where
+    every client is sent and which is therefore worth a refusal, a start with a
+    stale address is still the only way the owner can reach the Networking tab.
+    Every failure -- Docker will not start the database, the row will not read,
+    the UPDATE fails -- is one WARNING line and the start goes ahead.
+
+    Two narrowings the review added (T881 B). A network choice FILE that is there
+    but cannot be read must not be treated as "no file": `read_network_intent()`
+    answers None for both by design (install/Apply take the reachable path), and
+    the automatic rewrite is exactly what an owner's damaged `loopback` choice
+    must stop. So the keeper stats the file itself and writes nothing. And the
+    address listing is read ONCE and handed to every `holds_here()` question the
+    rule asks; under WSL each read is a PowerShell round trip with an 8 s bound,
+    and a row with two private columns asked it three times.
+    """
+    columns = networking.realmlist_columns(entry)
+    read_row = networking.realmlist_address_query(entry)
+
+    def keep() -> None:
+        # T881 review: the whole step is inside the existing handler. Deciding the
+        # choice file's state means `stat()`, which can raise, and a check that raised
+        # out of here would hold Start up.
+        try:
+            # Read at press time, not at tab build: Apply writes this file, and a Start
+            # after a fresh choice must obey the choice.
+            intent = networking.read_network_intent(server_dir)
+            if intent is None:
+                # T881 review: a damaged file reads as None on purpose for the install
+                # and Apply roads (§35), but here that would be "no file" -- the
+                # automatic rewrite. `stat()` is what tells the two apart, because
+                # Python 3.12+ answers `exists()` False for a permission error as well.
+                # Only a missing file lets the automatic rule run; a file that is there
+                # but cannot be stat'ed, or is there and does not read, is warned about
+                # the same way and nothing is written.
+                try:
+                    (server_dir / networking.INTENT_FILE).stat()
+                except (FileNotFoundError, NotADirectoryError):
+                    unreadable = False
+                except OSError:
+                    unreadable = True
+                else:
+                    unreadable = True
+                if unreadable:
+                    logger.warning(
+                        "the network choice file for this server could not be read, so the "
+                        "realm address was not checked at Start"
+                    )
+                    return
+            if intent is not None and intent.mode == "loopback":
+                # §41: the loopback is the owner's answer, and nothing here may ask the
+                # host about it, let alone start a database for it.
+                return
+            # T881 review: under WSL every `holds_here()` read the Windows listing costs a
+            # PowerShell round trip (8 s bound), and the rule asks it several times per
+            # row. The plan reads it at most once for the same reason (T784 b); so does
+            # this, lazily, and only under WSL.
+            read_listing: list[platform.LocalListing | None] = []
+            in_wsl: list[bool] = []
+
+            def listing() -> platform.LocalListing | None:
+                if not in_wsl:
+                    in_wsl.append(platform.in_wsl())
+                if not in_wsl[0]:
+                    return None
+                if not read_listing:
+                    read_listing.append(platform.local_ipv4_listing(wsl=True))
+                return read_listing[0]
+
+            def holds(address: str) -> bool | None:
+                return networking.holds_here(address, listing=listing())
+
+            docker.start_database(
+                spec,
+                server_dir,
+                because="the address the realm advertises could not be checked",
+                wsl_distro=wsl_distro,
+            )
+            row = networking.realmlist_row(sql.query("auth", read_row), columns)
+            if row is None:
+                logger.info("the realm row could not be read, so its advertised address stands")
+                return
+            verdict = networking.stale_realm_address(row, intent, holds, platform.detect_lan_ip)
+            if verdict.action == "warn":
+                logger.warning(verdict.warning)
+                return
+            if verdict.action != "rewrite" or verdict.address is None:
+                return
+            sql.run_statement(
+                "auth",
+                networking.realmlist_sql(entry, verdict.address, verdict.local_address or None),
+            )
+            logger.info(
+                f"the realm advertised {verdict.was}, which is no longer this computer's; "
+                f"it now advertises {verdict.address}"
+            )
+        except Exception as exc:  # noqa: BLE001 - any failure here says so and starts anyway
+            logger.warning(f"the realm's advertised address was not checked: {exc}")
 
     return keep
 
@@ -4509,6 +4657,8 @@ def _for_wotlk(
         channel_for_saved=channel.live_channel,
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+        # T881 B: the authserver's own "tried to login with invalid password" lines.
+        auth_server_log=_auth_server_log(spec, wsl_distro=wsl_distro),
     )
     # 8.4a. The Characters tab, over the same channel the account writes use
     # and the same reader the lists use: this app reads rows and the server
@@ -4688,6 +4838,7 @@ def _for_wotlk(
                 before_servers=_before_the_servers(
                     _realm_type_gate(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
                     _realm_port_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+                    _realm_address_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
                 ),
                 # T678 review round 3: a copy before Repair clears an unfinished first import.
                 safety_copy=lambda: wotlk_maintenance.safety_copy_sentence(
@@ -5010,6 +5161,8 @@ def _for_tbc(
         channel_for_saved=channel.live_channel,
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+        # T881 B: the authserver's own "tried to login with invalid password" lines.
+        auth_server_log=_auth_server_log(spec, wsl_distro=wsl_distro),
     )
     # 8.4b. The same seam as 8.4a over this tree's own measured facts: its
     # teleport verb is `tele name` (`teleport` is not a command here at all),
@@ -5196,6 +5349,8 @@ def _for_vanilla(
         channel_for_saved=channel.live_channel,
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+        # T881 B: the authserver's own "tried to login with invalid password" lines.
+        auth_server_log=_auth_server_log(spec, wsl_distro=wsl_distro),
     )
     # 8.4c. The same seam as 8.4a and 8.4b over facts read from THIS install's
     # own checkout on m910q, 2026-09-07 — and one of them is a different number
@@ -5414,6 +5569,8 @@ def _for_centurion(
             channel_for_saved=channel.live_channel,
             hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
             app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+            # T881 B: the authserver's own wrong-password lines.
+            auth_server_log=_auth_server_log(spec, wsl_distro=wsl_distro),
         )
         if entry.accounts.level is not None
         else None
@@ -5687,6 +5844,8 @@ def _for_tortoise(
         channel_for_saved=channel.live_channel,
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+        # T881 B: the authserver's own "tried to login with invalid password" lines.
+        auth_server_log=_auth_server_log(spec, wsl_distro=wsl_distro),
     )
     characters_admin = play_module.InstallPlay(
         entry,
@@ -6129,11 +6288,16 @@ def _is_console_channel(entry: CatalogEntry) -> bool:
     return operations is not None and operations.channel == "attach"
 
 
-def _channel_sentence(state: object) -> str:
+def _channel_sentence(state: object, *, channel_is_off: bool = False) -> str:
     """One line for where the channel setup has got to.
 
     A function rather than a method so what it says can be read without a
     widget, the same reason `dashboard.line()` is one.
+
+    `channel_is_off` is the setup's own note (`InstallChannel.channel_is_off`),
+    read on its worker: a waiting row on an install whose files switch the
+    channel off can never be proved, so the line says which press fixes that
+    instead of "Start the server if it is not running" (T881 D).
     """
     if isinstance(state, channel_setup.Verified):
         # The time is the whole point of showing this at all: a channel proved
@@ -6148,6 +6312,8 @@ def _channel_sentence(state: object) -> str:
             return f"Command channel: {state.reason}"
         return f"Command channel: refused. {state.reason}"
     if isinstance(state, channel_setup.Pending):
+        if channel_is_off:
+            return channel_setup.CHANNEL_OFF_IN_FILES
         return (
             f"Command channel: the account {state.account} exists and is waiting to be proved. "
             "Start the server if it is not running."
@@ -9589,6 +9755,11 @@ class ControllerView(QWidget):
         # ready marker. Until one does, all-containers-running reads STARTING.
         self._world_ready = False
         self._last_polled: InstallStatus | None = None
+        # T881 C: whether the last FRESH poll found the world running, so the realm
+        # name is read again when it comes up (and only then -- not on every tick).
+        self._realm_name_world_up = False
+        # T881 C: the Networking tab's page, so a tab change can tell it became current.
+        self._networking_page: QWidget | None = None
         # T540: the verdict the line shows now, for the tray's cards (players,
         # bots, uptime). The same reading, kept; None whenever the line is gone.
         self.last_verdict: dashboard_module.Verdict | None = None
@@ -9862,6 +10033,10 @@ class ControllerView(QWidget):
         self._build_modules_tab()
         self._build_tuning_tab()
         self._build_networking_tab()
+        # T881 C: the Networking tab reads the realm name again whenever it becomes
+        # current; connected here, after every tab exists, so building one never
+        # fires it before the slots are ready.
+        self._tabs.currentChanged.connect(self._sub_tab_changed)
         # T785: after every tab exists, before anything reads from one.
         self._grey_for_the_database()
 
@@ -11642,7 +11817,7 @@ class ControllerView(QWidget):
 
     def _show_channel(self, state: object) -> None:
         """One place where a channel state becomes what the tab looks like."""
-        self.channel_label.setText(_channel_sentence(state))
+        self.channel_label.setText(_channel_sentence(state, channel_is_off=self._channel_is_off()))
         self.channel_label.setVisible(True)
         self.repair_channel_button.setVisible(isinstance(state, channel_setup.Refused))
         # T188 A4: offered only while there is something to turn on -- not under
@@ -11670,6 +11845,9 @@ class ControllerView(QWidget):
                 )
             )
         )
+        # T881 B: Set password is live only while a channel credential exists, and the
+        # channel state just changed -- an enable press or a proof can make it so.
+        self._grey_set_password()
 
     def _channel_is_off(self) -> bool:
         """True only when this install's files plainly do not switch the channel on (T423)."""
@@ -11783,6 +11961,15 @@ class ControllerView(QWidget):
         self._last_polled = status
         if not status.world:
             self._world_ready = False  # whatever runs next is a new run (T451)
+        if not stale:
+            # T881 C: the Networking tab read the name once, when it was built -- so a
+            # database that was down left "the database did not answer" for the rest of
+            # the run. A fresh poll that finds the world up after one that did not is
+            # the moment the database is reachable for the first time, and the name is
+            # read again exactly once per coming-up.
+            if status.world and not self._realm_name_world_up:
+                self.refresh_realm_name()
+            self._realm_name_world_up = status.world
         if self._badge_held is None:
             self.realm_badge.set_status(self._badge_word(status))
         if not stale and status.any_running:
@@ -16883,6 +17070,15 @@ class ControllerView(QWidget):
         # under them used to: at 1080p it left the list 192 px over 700 of
         # nothing.
         box.addLayout(columns, 1)
+        # T881 B: "A recent login as NAME used a wrong password." -- read from the
+        # authserver's own log on the list's worker, and blank when nothing hit.
+        self.account_login_notes = QLabel("", tab)
+        self.account_login_notes.setWordWrap(True)
+        self.account_login_notes.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.account_login_notes.setVisible(False)
+        box.addWidget(self.account_login_notes)
         box.addWidget(self.account_reasons)
         box.addWidget(self.account_report)
         self._add_panel_tab(tab, "accounts", "Accounts")
@@ -17550,11 +17746,46 @@ class ControllerView(QWidget):
     def _account_chosen(self, row: int) -> None:
         """Every change acts on the chosen account, so every one waits for one."""
         chosen = row >= 0 and self.account_list.item(row) is not None
-        for press in (self.set_password_button, self.set_gm_button, self.delete_account_button):
+        for press in (self.set_gm_button, self.delete_account_button):
             set_enabled_why(press, None if chosen else ACCOUNT_NEEDS_CHOICE)
+        self._grey_set_password()
         if chosen:
             item = self.account_list.item(row)
             self.selected_gm.setValue(int(item.data(Qt.ItemDataRole.UserRole + 1) or 0))
+
+    def _set_password_reason(self) -> str | None:
+        """Why a password cannot be changed yet, or None when a channel could carry it (T881 B).
+
+        Owner answer 7: no password row is written outside the channel, so a Set password
+        press on an install whose channel has no credential at all cannot do anything but
+        refuse. It is greyed with that refusal, which now names the press that fixes it,
+        rather than offered and then answered with a sentence the reader had to find.
+
+        `Verified` and `Refused` keep the button live: both mean a credential exists ON
+        disk and the press reaches the server, whose answer (a wrong password, a lost
+        account) is the one worth showing. `None` (no setup at all: a harness, or a tree
+        whose channel is the console) leaves whatever the seam decides.
+        """
+        setup = self.services.channel_setup
+        if setup is None:
+            return None
+        state = setup.setup_state()
+        if isinstance(state, channel_setup.Verified | channel_setup.Refused):
+            return None
+        return useraccounts.NO_CHANNEL
+
+    def _grey_set_password(self) -> None:
+        """Set password: greyed on the database's or the channel's refusal, else no choice.
+
+        T785's `db_refusal` outranks the channel and "choose an account": the database
+        password is unknown, and that is the reason the press would fail whatever the
+        channel says (T881 review round).
+        """
+        chosen = self.account_list.currentItem() is not None
+        reason = self.services.db_refusal or self._set_password_reason()
+        set_enabled_why(
+            self.set_password_button, reason or (None if chosen else ACCOUNT_NEEDS_CHOICE)
+        )
 
     def _chosen_account(self) -> str:
         item = self.account_list.currentItem()
@@ -17578,6 +17809,9 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _accounts_listed(self, listing: object) -> None:
+        wrong_password = str(getattr(listing, "wrong_password", "") or "")
+        self.account_login_notes.setText(wrong_password)
+        self.account_login_notes.setVisible(bool(wrong_password))
         chosen = self._chosen_account()
         self.account_list.clear()
         problem = getattr(listing, "problem", "")
@@ -17602,6 +17836,7 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _accounts_failed(self, exc: object) -> None:
+        self.account_login_notes.setVisible(False)
         self.account_report.setText(f"Could not read this server's accounts: {exc}")
 
     @Slot()
@@ -25986,7 +26221,21 @@ class ControllerView(QWidget):
         box.addWidget(self.network_text, 1)
         box.addWidget(self.network_details)
         self._add_panel_tab(tab, "networking", "Networking")
+        self._networking_page = self._tabs.widget(self._tabs.count() - 1)
         self._plan: NetworkPlan | None = None
+
+    @Slot(int)
+    def _sub_tab_changed(self, index: int) -> None:
+        """A sub-tab just became current: the Networking tab reads the realm name again (T881 C).
+
+        Read once when the tab was built, which is how the report's install kept saying
+        "the database did not answer" after the server start had long brought it up. A
+        read is a job, so a tab change is the only cost; nothing is read on the ticks of
+        a tab nobody is looking at.
+        """
+        page = self._tabs.widget(index)
+        if page is not None and page is self._networking_page:
+            self.refresh_realm_name()
 
     def network_mode(self) -> Mode:
         """Which mode the radios are asking for. `lan` is the answer to "none of them".

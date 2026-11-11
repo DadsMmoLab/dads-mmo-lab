@@ -3854,6 +3854,214 @@ def realmlist_address_query(entry: CatalogEntry) -> str:
     )
 
 
+@dataclass(frozen=True)
+class RealmRow:
+    """The address columns a realm row holds now, as `realmlist_columns()` names them (T881).
+
+    `address` is what the authserver hands every client after login. `local_address` is
+    what it hands a client it decides is on the realm's own subnet (AzerothCore's
+    `localAddress`, absent on a core whose `Realmlist.local_address_column` is None).
+    """
+
+    address: str = ""
+    local_address: str = ""
+
+    def values(self) -> tuple[str, ...]:
+        """The columns that hold something, whitespace stripped: the ones any rule is about."""
+        return tuple(value.strip() for value in (self.address, self.local_address) if value.strip())
+
+
+def realmlist_row(answer: str, columns: tuple[str, ...]) -> RealmRow | None:
+    """One realm row from `realmlist_address_query()`'s answer, or None if it is not one.
+
+    `DockerSql.query()` hands back `--skip-column-names` output, one row per line and
+    columns separated by tabs, and MySQL spells NULL `NULL`. Anything but exactly one
+    row is not one realm's row and answers None, the reading `realmlist_sql()`'s callers
+    already treat as "write, it is cheap" (T881 A reads it as "nothing to decide").
+    """
+    rows = [line for line in answer.splitlines() if line.strip()]
+    if len(rows) != 1:
+        return None
+    fields = [field.strip() for field in rows[0].split("\t")]
+    fields += [""] * (len(columns) - len(fields))
+    found: dict[str, str] = {}
+    for name, value in zip(columns, fields, strict=False):
+        found[name] = "" if value.upper() == "NULL" else value
+
+    def value_of(index: int) -> str:
+        return found.get(columns[index], "") if index < len(columns) else ""
+
+    return RealmRow(address=value_of(0), local_address=value_of(1))
+
+
+PRIVATE_NETWORKS = tuple(
+    ipaddress.IPv4Network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+"""The ranges a LAN address comes from: RFC 1918, and nothing wider (T881 A).
+
+`IPv4Address.is_private` is not this rule: on Python 3.12 it is True for
+203.0.113.0/24, the documentation range the existing internet-play tests use, so a
+public endpoint somebody chose would be read as a LAN address and moved. The three
+blocks above are what a router hands out, which is the claim a stale row makes.
+"""
+
+
+def private_ipv4(address: str) -> bool:
+    """Whether `address` is a plain IPv4 address inside a private LAN range (T881 A).
+
+    Only these are claims about THIS network: a public address is somebody's decision to
+    advertise it, a name is a resolver's, and the loopback is every machine's own. See
+    `PRIVATE_NETWORKS` for why this is not `is_private`, and why `::1`, `127.0.0.1`,
+    CGNAT `100.64/10` and a hostname never count as one.
+    """
+    try:
+        parsed = ipaddress.IPv4Address(address.strip())
+    except ValueError:
+        return False
+    return any(parsed in network for network in PRIVATE_NETWORKS)
+
+
+def row_still_reachable(row: RealmRow, holds: Callable[[str], bool | None]) -> bool:
+    """Whether every address the row holds is still one this computer advertises (T881 A).
+
+    `networking.advertisable()` is the first half, unchanged: a loopback or a name no
+    client can dial is not reachable. The second half is the ticket: a PRIVATE IPv4
+    address is a claim about this network, so it counts only when `holds()` did not say
+    False. `None` (the listing could not be read) counts as before, because a listing
+    that could not be read says nothing about the address.
+
+    A row of private addresses counts as lost only when EVERY one of them answered
+    False. That is the same rule `stale_realm_address()` rewrites by, and it is what
+    keeps a public `address` beside a stale private `localAddress` from being read as
+    a whole row to rewrite — the 2026-09-03 regression this function's caller exists
+    to prevent.
+    """
+    values = row.values()
+    if not values or not all(advertisable(value) for value in values):
+        return False
+    return not all(private_ipv4(value) and holds(value) is False for value in values)
+
+
+@dataclass(frozen=True)
+class RealmAddressVerdict:
+    """What Start is to do about the address a realm row advertises (T881 A).
+
+    `action` is one of three, and there is no fourth:
+
+    * `keep` — the row is right: nothing is written, nothing is said.
+    * `rewrite` — one UPDATE, setting `address` and `local_address` as given.
+    * `warn` — nothing is written; `warning` is the one line for the log.
+    """
+
+    action: Literal["keep", "rewrite", "warn"]
+    address: str | None = None
+    """The `address` column after the rewrite, in column order (`realmlist_columns()`)."""
+    local_address: str = ""
+    """The `localAddress` column after the rewrite; "" leaves it as it is."""
+    warning: str = ""
+    """The WARNING line for `warn`; "" otherwise."""
+    was: str = ""
+    """The row's `address` before the rewrite, for the INFO line."""
+
+
+def _a_held_address(
+    detect: Callable[[], str | None], holds: Callable[[str], bool | None]
+) -> str | None:
+    """The address `detect()` returns when it is one a realm may advertise and this PC
+    holds; else None. Every rewrite below needs a destination, and a detector that
+    answered an address this machine does not hold would move the row to another stale
+    one."""
+    detected = advertisable(detect())
+    if detected is None or holds(detected) is not True:
+        return None
+    return detected
+
+
+def stale_realm_address(
+    row: RealmRow,
+    intent: NetworkIntent | None,
+    holds: Callable[[str], bool | None],
+    detect: Callable[[], str | None],
+) -> RealmAddressVerdict:
+    """What Start should do with a realm row advertising an address nobody answers on (T881 A).
+
+    The player's realm row advertised the LAN address detected at install. The PC was
+    given another address since, so a client logging in through 127.0.0.1 is sent to an
+    address this computer no longer has. This decides, once, whether the row is
+    rewritten, and it is pure: `holds` is `holds_here()`, `detect` is
+    `detect_lan_ip()`, and every answer is a value a test can state.
+
+    The owner's recorded choice wins over every automatic rule (`read_network_intent()`):
+
+    * `loopback` — keep. §41: this is the mode an owner picks when nothing else is right.
+    * `lan` with an address the owner chose — never rewritten. When `holds()` says False
+      the verdict is a warning, because that address is the owner's decision and this app
+      does not overrule it in silence. `None` is not False: nothing is said.
+    * `internet` — `address` is kept, because it is a public endpoint somebody chose, and
+      only a private `localAddress` this computer no longer holds is moved to the address
+      it holds now.
+
+    With no intent, or a plain `lan` one, the automatic rule applies and it is deliberately
+    narrow: EVERY address column must be a private IPv4 that `holds()` answered False (False
+    and not None), and `detect()` must name a held, advertisable address. Then one
+    rewrite to it. Anything else — a public address, a name, the loopback, a `None` from
+    an unreadable listing — keeps the row, because the 2026-09-03 regression showed what
+    a confident rewrite of somebody else's decision costs.
+    """
+    values = row.values()
+    if not values:
+        return RealmAddressVerdict("keep")
+    if intent is not None and intent.mode == "loopback":
+        return RealmAddressVerdict("keep")
+    if intent is not None and intent.mode == "lan" and intent.address:
+        if holds(intent.address) is False:
+            return RealmAddressVerdict(
+                "warn",
+                warning=(
+                    f"The realm advertises {intent.address}, the address you chose, which is no "
+                    "longer one of this computer's addresses. It was left as it is: choose your "
+                    "address again on the Networking tab if it changed."
+                ),
+            )
+        return RealmAddressVerdict("keep")
+    if intent is not None and intent.mode == "internet":
+        local = row.local_address.strip()
+        if not private_ipv4(local) or holds(local) is not False:
+            return RealmAddressVerdict("keep")
+        detected = _a_held_address(detect, holds)
+        if detected is None:
+            return RealmAddressVerdict("keep")
+        return RealmAddressVerdict(
+            "rewrite",
+            address=row.address.strip() or detected,
+            local_address=detected,
+            was=row.address.strip(),
+        )
+    unreadable = False
+    for value in values:
+        if not private_ipv4(value):
+            return RealmAddressVerdict("keep")
+        held = holds(value)
+        if held is None:
+            unreadable = True
+        elif held:
+            return RealmAddressVerdict("keep")
+    if unreadable:
+        return RealmAddressVerdict(
+            "warn",
+            warning=(
+                f"The realm advertises {row.address.strip() or values[0]}, and this computer's "
+                "address list could not be read, so it was not checked and was left as it is."
+            ),
+        )
+    detected = _a_held_address(detect, holds)
+    if detected is None:
+        return RealmAddressVerdict("keep")
+    return RealmAddressVerdict(
+        "rewrite", address=detected, local_address=detected, was=row.address.strip()
+    )
+
+
 def _alf_notes(state: platform.AlfState) -> tuple[list[str], list[str]]:
     """(warnings, manual steps) for a macOS firewall state. Never a command to run.
 

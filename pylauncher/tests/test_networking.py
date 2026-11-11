@@ -7929,3 +7929,240 @@ def test_the_wsl_branch_of_lan_detection_passes_over_the_vpn_adapter_too() -> No
         return subprocess.CompletedProcess(argv, 0, "Wintun|10.2.0.2\n", "")
 
     assert platform._windows_lan_ip_from_wsl(run=run_vpn_only) == "10.2.0.2"
+
+
+# -- T881 A: a realm row that advertises an address this computer lost ---------
+
+LAN_LOST = "192.168.1.50"
+LAN_HELD = "172.20.5.10"
+
+
+def _start_services(
+    monkeypatch: pytest.MonkeyPatch,
+    server_dir: Path,
+    *,
+    row: str,
+    holds: Callable[[str], bool | None],
+    detect: Callable[[], str | None] = lambda: LAN_HELD,
+) -> tuple[object, list[tuple[str, str]]]:
+    """The WotLK tab's own Start step, over a recording SQL seam (T881 A).
+
+    `holds` and `detect` are the two questions the step asks the host, pinned so
+    the answer is about the rule and not about this test box's network.
+    """
+    from yulon import apply
+    from yulon.ui import controller_view
+
+    ran: list[tuple[str, str]] = []
+    monkeypatch.setattr(apply.DockerSql, "run_statement", lambda self, db, s: ran.append((db, s)))
+    monkeypatch.setattr(apply.DockerSql, "query", lambda self, db, s: row)
+    monkeypatch.setattr(docker, "start_database", lambda *a, **k: True)
+    monkeypatch.setattr(networking, "holds_here", lambda address, **kwargs: holds(address))
+    monkeypatch.setattr(platform, "detect_lan_ip", detect)
+    services = controller_view._for_wotlk(WOTLK, server_dir, None, None)
+    return services, ran
+
+
+def test_a_start_moves_a_realm_row_off_a_lan_address_this_computer_no_longer_holds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The defect T881 reports: the row says 192.168.1.50, this PC no longer has it.
+
+    Exactly one UPDATE, carrying the address the machine holds now, in both
+    columns -- and it says so at INFO with both addresses, because the installer's
+    log is where somebody looks after a player cannot reach the world.
+    """
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: addr == LAN_HELD
+    )
+    with caplog.at_level("INFO", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert ran == [
+        (
+            "auth",
+            networking.realmlist_sql(WOTLK, LAN_HELD, LAN_HELD),
+        )
+    ]
+    said = [r.getMessage() for r in caplog.records]
+    assert [line for line in said if f"the realm advertised {LAN_LOST}" in line], said
+    assert [line for line in said if f"it now advertises {LAN_HELD}" in line], said
+
+
+def test_a_start_leaves_a_held_address_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A row this computer still holds is exactly right: no statement at all."""
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: True
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == []
+
+
+def test_a_start_leaves_a_chosen_loopback_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """bug-checklist §41: the owner asked for the loopback, so no rule of ours moves it."""
+    networking.record_network_intent(tmp_path, "loopback")
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row="127.0.0.1\t127.0.0.1\n", holds=lambda addr: False
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == []
+
+
+def test_a_start_keeps_a_public_internet_address(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Internet play chose 203.0.113.9: a stale LAN `localAddress` is the only thing moved."""
+    networking.record_network_intent(tmp_path, "internet")
+    services, ran = _start_services(
+        monkeypatch,
+        tmp_path,
+        row=f"203.0.113.9\t{LAN_LOST}\n",
+        holds=lambda addr: addr != LAN_LOST,
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == [("auth", networking.realmlist_sql(WOTLK, "203.0.113.9", LAN_HELD))]
+
+
+def test_a_start_writes_nothing_when_the_address_list_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """None is not "no": an unreadable listing says nothing about the address, and the
+    step says ONE warning rather than guessing, and never blocks the start."""
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: None
+    )
+    with caplog.at_level("WARNING", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert ran == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert [line for line in warnings if "could not be read" in line], warnings
+
+
+def test_a_start_writes_nothing_when_the_network_choice_file_is_damaged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A file that exists and does not read is not "no file" (T881 review).
+
+    `read_network_intent()` answers None for a damaged record on purpose, so the
+    install and Apply roads take the reachable path. At Start that same None would
+    run the automatic rewrite -- over an owner's choice this build cannot read -- so
+    nothing is written, and the one warning says why.
+    """
+    (tmp_path / networking.INTENT_FILE).write_text("{not json", encoding="utf-8")
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+    with caplog.at_level("WARNING", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert ran == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == [
+        "the network choice file for this server could not be read, so the realm address "
+        "was not checked at Start"
+    ]
+
+
+def test_a_start_writes_nothing_when_the_network_choice_file_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stat that raises PermissionError must not read as "no file" (T881 C).
+
+    Python 3.12+ answers `exists()` False for a permission error, so the old
+    check fell through to the automatic rewrite -- over the owner's loopback
+    choice a file inside an unsearchable folder holds. `stat()` names the case:
+    nothing is written, one warning says so, and the Start goes ahead.
+    """
+    choice = tmp_path / networking.INTENT_FILE
+    real_stat = Path.stat
+
+    def stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if self == choice:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+    with caplog.at_level("WARNING", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert ran == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == [
+        "the network choice file for this server could not be read, so the realm address "
+        "was not checked at Start"
+    ]
+
+
+def test_a_start_continues_when_checking_the_network_choice_file_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Any other OSError from the check is the step's own failure: Start is not blocked.
+
+    The old `exists()` sat outside the step's `try`, so a raise here held the
+    Start up. The whole check is inside that handling now, and a state it cannot
+    name writes nothing.
+    """
+    choice = tmp_path / networking.INTENT_FILE
+    real_stat = Path.stat
+
+    def stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if self == choice:
+            raise OSError(5, "Input/output error", str(self))
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == []
+
+
+def test_a_start_reads_the_address_listing_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One reading answers every address question the rule asks (T881 review).
+
+    Under WSL each read of the Windows listing is a PowerShell round trip with an
+    8 s bound, and a row with both columns private asked `holds_here()` twice and
+    the detect check a third time. Each ask now gets the same reading.
+    """
+    reads: list[bool] = []
+    listing = object()
+
+    def local_ipv4_listing(*, wsl: bool) -> object:
+        reads.append(wsl)
+        return listing
+
+    seen: list[tuple[str, object]] = []
+
+    def holds(
+        address: str, *, under_wsl: bool | None = None, listing: object = None
+    ) -> bool | None:
+        seen.append((address, listing))
+        return address == LAN_HELD
+
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(platform, "local_ipv4_listing", local_ipv4_listing)
+    monkeypatch.setattr(networking, "holds_here", holds)
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert reads == [True]
+    assert seen and all(each is listing for _, each in seen), seen
+    assert ran == [("auth", networking.realmlist_sql(WOTLK, LAN_HELD, LAN_HELD))]
