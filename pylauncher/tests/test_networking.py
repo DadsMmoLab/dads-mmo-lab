@@ -8227,11 +8227,60 @@ def test_a_root_realmlist_keeps_no_other_realmlist_line(tmp_path: Path, old: byt
     assert f.read_bytes() == b"set realmlist 10.0.0.5\r\nset patchlist x\r\n"
 
 
-def test_a_utf16_root_realmlist_is_replaced_whole(tmp_path: Path) -> None:
-    """T882: UTF-16 (or any NUL byte) is not text to keep lines of: one line out."""
+@pytest.mark.parametrize(
+    "old",
+    [
+        b"set patchlist p\rset realmlist old\r",
+        b"set realmlist old\rset patchlist p\r",
+    ],
+    ids=["old-line-last", "old-line-first"],
+)
+def test_a_lone_cr_is_a_line_break(tmp_path: Path, old: bytes) -> None:
+    """T882 round 3: a lone CR splits lines too: one line of ours, `set patchlist p` kept."""
     f = tmp_path / "client" / "realmlist.wtf"
     f.parent.mkdir(parents=True)
-    f.write_bytes("set realmlist logon.example.com\nset patchlist x\n".encode("utf-16"))
+    f.write_bytes(old)
+
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
+
+    assert out == f
+    assert f.read_bytes() == b"set realmlist 10.0.0.5\rset patchlist p\r"
+
+
+def test_a_utf16_root_realmlist_keeps_its_other_lines(tmp_path: Path) -> None:
+    """T882 round 3: UTF-16 with a BOM decodes in that byte order and keeps other lines.
+
+    The result is plain UTF-8 with no BOM and no NUL: this build's ready-to-play
+    copy must stay readable as text, and the game reads the ASCII line either way.
+    """
+    le = tmp_path / "le" / "realmlist.wtf"
+    le.parent.mkdir(parents=True)
+    le.write_bytes(
+        b"\xff\xfe" + "set realmlist logon.example.com\r\nset patchlist x\r\n".encode("utf-16-le")
+    )
+    be = tmp_path / "be" / "realmlist.wtf"
+    be.parent.mkdir(parents=True)
+    be.write_bytes(
+        b"\xfe\xff" + "set realmlist logon.example.com\r\nset patchlist x\r\n".encode("utf-16-be")
+    )
+
+    out_le = networking.write_client_realmlist(tmp_path / "le", "10.0.0.5", auth_port=3724)
+    out_be = networking.write_client_realmlist(tmp_path / "be", "10.0.0.5", auth_port=3724)
+
+    assert out_le == le
+    assert out_be == be
+    for target in (le, be):
+        raw = target.read_bytes()
+        assert b"\x00" not in raw
+        assert raw == b"set realmlist 10.0.0.5\r\nset patchlist x\r\n"
+        raw.decode("utf-8")
+
+
+def test_a_root_realmlist_with_a_nul_and_no_bom_is_replaced_whole(tmp_path: Path) -> None:
+    """T882 round 3: a NUL byte with no UTF-16 BOM is our own copy gone binary: one line out."""
+    f = tmp_path / "client" / "realmlist.wtf"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"set realmlist logon.example.com\x00\nset patchlist x\n")
 
     out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
 
@@ -8256,7 +8305,10 @@ def test_a_crlf_root_realmlist_stays_crlf_and_keeps_other_lines(tmp_path: Path) 
 
 @needs_case_sensitive_disk
 def test_two_root_realmlists_in_different_case_are_both_written(tmp_path: Path) -> None:
-    """T882: on a disk that tells cases apart, both spellings are the client's file."""
+    """T882: on a disk that tells cases apart, both spellings are the client's file.
+
+    Round 3: the exact spelling leads, so the client's own read is written first.
+    """
     lower = tmp_path / "client" / "realmlist.wtf"
     upper = tmp_path / "client" / "REALMLIST.WTF"
     lower.parent.mkdir(parents=True)
@@ -8270,6 +8322,21 @@ def test_two_root_realmlists_in_different_case_are_both_written(tmp_path: Path) 
     assert sorted(written) == sorted([lower, upper])
     for f in (lower, upper):
         assert f.read_bytes() == b"set realmlist 127.0.0.1\n"
+    assert list(written) == [lower, upper]
+
+
+@needs_case_sensitive_disk
+def test_the_exact_spelling_comes_first(tmp_path: Path) -> None:
+    """T882 round 3: `realmlist_file` itself leads, other spellings follow sorted by name."""
+    Client = tmp_path / "client"
+    Client.mkdir(parents=True)
+    (Client / "REALMLIST.WTF").write_bytes(b"SET REALMLIST old.example.com\n")
+    (Client / "Realmlist.WTF").write_bytes(b"set realmlist old.example.com\n")
+    (Client / "realmlist.wtf").write_bytes(b"set realmlist old.example.com\n")
+
+    found = networking._root_realmlist_spellings(Client, "realmlist.wtf")
+
+    assert [p.name for p in found] == ["realmlist.wtf", "REALMLIST.WTF", "Realmlist.WTF"]
 
 
 # -- T883: the four older factories keep the realm-address keeper ------------
@@ -8335,7 +8402,12 @@ def test_a_t883_start_leaves_a_chosen_loopback_alone(
     factory: str,
     game: str,
 ) -> None:
-    """T883: the owner's loopback choice stops the older Start's rewrite too."""
+    """T883 round 3: only the loopback choice stops the rewrite of a lost LAN row.
+
+    The row is the LOST address and nothing is held, so without the choice the
+    automatic rule would act: the keeper must return before it even starts the
+    database (§41), let alone writes.
+    """
     entry = load_catalog().get(game)
     networking.record_network_intent(tmp_path, "loopback")
     services, ran = _start_services_for(
@@ -8343,7 +8415,85 @@ def test_a_t883_start_leaves_a_chosen_loopback_alone(
         factory,
         entry,
         tmp_path,
-        row="127.0.0.1\t127.0.0.1\n",
+        row=f"{LAN_LOST}\t{LAN_LOST}\n",
+        holds=lambda addr: False,
+    )
+    started: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(docker, "start_database", lambda *a, **k: started.append((a, k)) or True)
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == []
+    assert not [s for _, s in ran if "SET port" in s], ran
+    assert started == [], started
+
+
+@pytest.mark.parametrize(
+    "factory,game",
+    [
+        ("_for_tortoise", "wow-tortoise"),
+        ("_for_tbc", "wow-tbc"),
+        ("_for_vanilla", "wow-vanilla"),
+        ("_for_centurion", "wow-centurion"),
+    ],
+    ids=["tortoise", "tbc", "vanilla", "centurion"],
+)
+def test_a_t883_start_leaves_a_chosen_lan_address_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    factory: str,
+    game: str,
+) -> None:
+    """T883 round 3: the owner's chosen LAN address is never rewritten, even unheld.
+
+    `stale_realm_address()` answers `warn` for a chosen address nothing holds:
+    the keeper logs it and writes nothing, and never refuses the start.
+    """
+    entry = load_catalog().get(game)
+    networking.record_network_intent(tmp_path, "lan", LAN_LOST)
+    services, ran = _start_services_for(
+        monkeypatch,
+        factory,
+        entry,
+        tmp_path,
+        row=f"{LAN_LOST}\t{LAN_LOST}\n",
+        holds=lambda addr: False,
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == []
+    assert not [s for _, s in ran if "SET port" in s], ran
+
+
+@pytest.mark.parametrize(
+    "factory,game",
+    [
+        ("_for_tortoise", "wow-tortoise"),
+        ("_for_tbc", "wow-tbc"),
+        ("_for_vanilla", "wow-vanilla"),
+        ("_for_centurion", "wow-centurion"),
+    ],
+    ids=["tortoise", "tbc", "vanilla", "centurion"],
+)
+def test_a_t883_start_leaves_an_internet_choice_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    factory: str,
+    game: str,
+) -> None:
+    """T883 round 3: the internet choice keeps a lost LAN row when nothing is held.
+
+    `stale_realm_address()` only moves a stale private `localAddress`, and only
+    to an address this computer holds now: with nothing held there is nowhere
+    to move it, so the verdict is `keep` on every factory and nothing is written.
+    """
+    entry = load_catalog().get(game)
+    networking.record_network_intent(tmp_path, "internet")
+    services, ran = _start_services_for(
+        monkeypatch,
+        factory,
+        entry,
+        tmp_path,
+        row=f"{LAN_LOST}\t{LAN_LOST}\n",
         holds=lambda addr: False,
     )
 
