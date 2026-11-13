@@ -7963,6 +7963,42 @@ def _start_services(
     return services, ran
 
 
+def _start_services_for(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: str,
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    row: str,
+    holds: Callable[[str], bool | None],
+    detect: Callable[[], str | None] = lambda: LAN_HELD,
+) -> tuple[object, list[tuple[str, str]]]:
+    """The `factory` tab's own Start step, over a recording SQL seam (T883).
+
+    `_start_services` is the WotLK spelling; this is the same step asked of the
+    four older factories, so each game's Start moves the realm row the same way.
+    `holds` and `detect` pin the host's answers, as there.
+    """
+    from yulon import apply
+    from yulon.ui import controller_view
+
+    ran: list[tuple[str, str]] = []
+    monkeypatch.setattr(apply.DockerSql, "run_statement", lambda self, db, s: ran.append((db, s)))
+
+    def query(self: object, db: str, statement: str) -> str:
+        if "SELECT port FROM" in statement:
+            writes = [s for _, s in ran if s.startswith("UPDATE")]
+            return f"{entry.ports.world}\n" if writes else row
+        return row
+
+    monkeypatch.setattr(apply.DockerSql, "query", query)
+    monkeypatch.setattr(docker, "start_database", lambda *a, **k: True)
+    monkeypatch.setattr(networking, "holds_here", lambda address, **kwargs: holds(address))
+    monkeypatch.setattr(platform, "detect_lan_ip", detect)
+    services = getattr(controller_view, factory)(entry, server_dir, None, None)
+    return services, ran
+
+
 def test_a_start_moves_a_realm_row_off_a_lan_address_this_computer_no_longer_holds(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -8182,9 +8218,7 @@ def test_a_start_reads_the_address_listing_once(
     ],
     ids=["plain-crlf", "bom-crlf", "tab", "double-space", "quoted-caps"],
 )
-def test_a_root_realmlist_keeps_no_other_realmlist_line(
-    tmp_path: Path, old: bytes
-) -> None:
+def test_a_root_realmlist_keeps_no_other_realmlist_line(tmp_path: Path, old: bytes) -> None:
     """T882: every spelling of the old line goes; the other line stays byte for byte."""
     f = tmp_path / "client" / "realmlist.wtf"
     f.parent.mkdir(parents=True)
@@ -8239,3 +8273,119 @@ def test_two_root_realmlists_in_different_case_are_both_written(tmp_path: Path) 
     assert sorted(written) == sorted([lower, upper])
     for f in (lower, upper):
         assert f.read_bytes() == b"set realmlist 127.0.0.1\n"
+
+
+# -- T883: the four older factories keep the realm-address keeper ------------
+
+
+@pytest.mark.parametrize(
+    "factory,game",
+    [
+        ("_for_tortoise", "wow-tortoise"),
+        ("_for_tbc", "wow-tbc"),
+        ("_for_vanilla", "wow-vanilla"),
+        ("_for_centurion", "wow-centurion"),
+    ],
+    ids=["tortoise", "tbc", "vanilla", "centurion"],
+)
+def test_a_t883_start_moves_a_realm_row_off_a_lan_address_this_computer_no_longer_holds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    factory: str,
+    game: str,
+) -> None:
+    """T883: the older Start moves the row off 192.168.1.50, as WotLK's does.
+
+    Tortoise expects `UPDATE tw_logon.realmlist SET address='<held>' WHERE id=1;`.
+    """
+    entry = load_catalog().get(game)
+    services, ran = _start_services_for(
+        monkeypatch,
+        factory,
+        entry,
+        tmp_path,
+        row=f"{LAN_LOST}\t{LAN_LOST}\n",
+        holds=lambda addr: addr == LAN_HELD,
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    if game == "wow-tortoise":
+        # Pinned literally: this core has no LAN column, so the catalog must not gain one.
+        # The port keeper writes first (8090, unlike the WotLK seed), then the address keeper.
+        expected = [
+            ("auth", networking.realm_port_sql(entry)),
+            ("auth", f"UPDATE tw_logon.realmlist SET address='{LAN_HELD}' WHERE id=1;"),
+        ]
+    else:
+        expected = [("auth", networking.realmlist_sql(entry, LAN_HELD, LAN_HELD))]
+    assert ran == expected
+
+
+@pytest.mark.parametrize(
+    "factory,game",
+    [
+        ("_for_tortoise", "wow-tortoise"),
+        ("_for_tbc", "wow-tbc"),
+        ("_for_vanilla", "wow-vanilla"),
+        ("_for_centurion", "wow-centurion"),
+    ],
+    ids=["tortoise", "tbc", "vanilla", "centurion"],
+)
+def test_a_t883_start_leaves_a_chosen_loopback_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    factory: str,
+    game: str,
+) -> None:
+    """T883: the owner's loopback choice stops the older Start's rewrite too."""
+    entry = load_catalog().get(game)
+    networking.record_network_intent(tmp_path, "loopback")
+    services, ran = _start_services_for(
+        monkeypatch,
+        factory,
+        entry,
+        tmp_path,
+        row="127.0.0.1\t127.0.0.1\n",
+        holds=lambda addr: False,
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    if game == "wow-tortoise":
+        assert ran == [("auth", networking.realm_port_sql(entry))]
+    else:
+        assert ran == []
+
+
+@pytest.mark.parametrize(
+    "factory,game",
+    [
+        ("_for_tortoise", "wow-tortoise"),
+        ("_for_tbc", "wow-tbc"),
+        ("_for_vanilla", "wow-vanilla"),
+        ("_for_centurion", "wow-centurion"),
+    ],
+    ids=["tortoise", "tbc", "vanilla", "centurion"],
+)
+def test_a_t883_start_leaves_a_held_address_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    factory: str,
+    game: str,
+) -> None:
+    """T883: a row this computer still holds is left alone on the older Start too."""
+    entry = load_catalog().get(game)
+    services, ran = _start_services_for(
+        monkeypatch,
+        factory,
+        entry,
+        tmp_path,
+        row=f"{LAN_LOST}\t{LAN_LOST}\n",
+        holds=lambda addr: True,
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    if game == "wow-tortoise":
+        assert ran == [("auth", networking.realm_port_sql(entry))]
+    else:
+        assert ran == []

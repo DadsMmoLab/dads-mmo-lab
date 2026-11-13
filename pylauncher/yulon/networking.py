@@ -4927,9 +4927,7 @@ def _realmlist_candidates(client_dir: Path, realmlist_file: str) -> list[Path]:
     """
     locales = _data_subfolders(client_dir)
     found = [f for f in (client_names.find(loc, realmlist_file) for loc in locales) if f]
-    top = _root_realmlist_spellings(client_dir, realmlist_file) or [
-        client_dir / realmlist_file
-    ]
+    top = _root_realmlist_spellings(client_dir, realmlist_file) or [client_dir / realmlist_file]
     return [*found, *top]
 
 

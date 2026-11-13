@@ -16,8 +16,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 - WotLK: the Time Is Time module makes the day and night cycle run faster or slower, and keeps the calendar on the real date.
 
-### Fixed
-- WotLK, Unbound and Conquest of Azeroth: Start moves a realm off a network address this computer no longer has.
+- Tortoise, TBC, Vanilla and Centurion: Start moves the realm off a network address this computer no longer has, as WotLK does.
+- A realmlist.wtf whose old line has a hidden byte-order mark, a tab or a UTF-16 save no longer sends Play to another server.
 - The Accounts tab says when a recent login used a wrong password, and names the button Set password needs.
 - Networking: the realm name is read again once the server is up.
 - Support files now list this computer's addresses and the address each realm tells players.
