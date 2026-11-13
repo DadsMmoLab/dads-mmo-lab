@@ -4501,6 +4501,31 @@ def _realm_address_keeper(
     return keep
 
 
+def _keeping_the_realm_address(
+    controller: _C,
+    entry: CatalogEntry,
+    server_dir: Path,
+    sql: DockerSql,
+    *,
+    wsl_distro: str | None,
+) -> _C:
+    """`controller`, whose start step now also moves the realm off a lost address (T883).
+
+    The ADDRESS keeper only: the port keeper can refuse a Start, and running it
+    at every Tortoise start (world port 8090) would be new behaviour nobody
+    asked for. The keeper never refuses, so it chains after the controller's
+    existing step (`_before_the_servers` skips None entries): whatever was
+    there still runs first and its refusal still stands. `_keeping_the_realm_name()`
+    then wraps the whole chain with the saved-name step, which likewise never refuses.
+    """
+    spec = entry.container_spec()
+    controller.before_servers = _before_the_servers(
+        controller.before_servers,
+        _realm_address_keeper(entry, spec, server_dir, sql, wsl_distro=wsl_distro),
+    )
+    return controller
+
+
 def _keeping_the_realm_name(
     controller: _C,
     entry: CatalogEntry,
@@ -5211,7 +5236,13 @@ def _for_tbc(
         play=characters_admin,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=_keeping_the_realm_name(
-            tbc_controller.TbcController(server_dir, wsl_distro=wsl_distro, pre_stop=recorder),
+            _keeping_the_realm_address(
+                tbc_controller.TbcController(server_dir, wsl_distro=wsl_distro, pre_stop=recorder),
+                entry,
+                server_dir,
+                sql,
+                wsl_distro=wsl_distro,
+            ),
             entry,
             server_dir,
             sql,
@@ -5434,8 +5465,14 @@ def _for_vanilla(
         ),
         bots=_BotBrowser(entry, server_dir, sql),
         controller=_keeping_the_realm_name(
-            vanilla_controller.VanillaController(
-                server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+            _keeping_the_realm_address(
+                vanilla_controller.VanillaController(
+                    server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+                ),
+                entry,
+                server_dir,
+                sql,
+                wsl_distro=wsl_distro,
             ),
             entry,
             server_dir,
@@ -5626,8 +5663,17 @@ def _for_centurion(
             ),
         ),
         controller=_keeping_the_realm_name(
-            centurion_controller.CenturionController(
-                entry, server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+            _keeping_the_realm_address(
+                centurion_controller.CenturionController(
+                    entry,
+                    server_dir,
+                    wsl_distro=wsl_distro,
+                    pre_stop=recorder,
+                ),
+                entry,
+                server_dir,
+                sql,
+                wsl_distro=wsl_distro,
             ),
             entry,
             server_dir,
@@ -5855,7 +5901,15 @@ def _for_tortoise(
         hold_server=_server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
     )
     lifecycle = _keeping_the_realm_name(
-        tortoise_controller.controller_for(server_dir, wsl_distro=wsl_distro, pre_stop=recorder),
+        _keeping_the_realm_address(
+            tortoise_controller.controller_for(
+                server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+            ),
+            entry,
+            server_dir,
+            sql,
+            wsl_distro=wsl_distro,
+        ),
         entry,
         server_dir,
         sql,
