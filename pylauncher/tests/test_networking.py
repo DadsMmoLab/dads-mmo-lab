@@ -8166,3 +8166,76 @@ def test_a_start_reads_the_address_listing_once(
     assert reads == [True]
     assert seen and all(each is listing for _, each in seen), seen
     assert ran == [("auth", networking.realmlist_sql(WOTLK, LAN_HELD, LAN_HELD))]
+
+
+# -- T882: a realmlist.wtf whose old line hides (BOM, tab, case) --------------
+
+
+@pytest.mark.parametrize(
+    "old",
+    [
+        b"set realmlist logon.example.com\r\nset patchlist x\r\n",
+        b"\xef\xbb\xbfset realmlist logon.example.com\r\nset patchlist x\r\n",
+        b"\tset realmlist logon.example.com\r\nset patchlist x\r\n",
+        b"  set  realmlist   logon.example.com\r\nset patchlist x\r\n",
+        b'  SET realmList "x"\r\nset patchlist x\r\n',
+    ],
+    ids=["plain-crlf", "bom-crlf", "tab", "double-space", "quoted-caps"],
+)
+def test_a_root_realmlist_keeps_no_other_realmlist_line(
+    tmp_path: Path, old: bytes
+) -> None:
+    """T882: every spelling of the old line goes; the other line stays byte for byte."""
+    f = tmp_path / "client" / "realmlist.wtf"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(old)
+
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
+
+    assert out == f
+    assert f.read_bytes() == b"set realmlist 10.0.0.5\r\nset patchlist x\r\n"
+
+
+def test_a_utf16_root_realmlist_is_replaced_whole(tmp_path: Path) -> None:
+    """T882: UTF-16 (or any NUL byte) is not text to keep lines of: one line out."""
+    f = tmp_path / "client" / "realmlist.wtf"
+    f.parent.mkdir(parents=True)
+    f.write_bytes("set realmlist logon.example.com\nset patchlist x\n".encode("utf-16"))
+
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
+
+    assert out == f
+    assert f.read_bytes() == b"set realmlist 10.0.0.5\n"
+
+
+def test_a_crlf_root_realmlist_stays_crlf_and_keeps_other_lines(tmp_path: Path) -> None:
+    """T882: CRLF in, CRLF out; LF in, LF out."""
+    crlf = tmp_path / "crlf" / "realmlist.wtf"
+    crlf.parent.mkdir(parents=True)
+    crlf.write_bytes(b"set realmlist logon.example.com\r\nset patchlist x\r\n")
+    networking.write_client_realmlist(tmp_path / "crlf", "10.0.0.5", auth_port=3724)
+    assert crlf.read_bytes() == b"set realmlist 10.0.0.5\r\nset patchlist x\r\n"
+
+    lf = tmp_path / "lf" / "realmlist.wtf"
+    lf.parent.mkdir(parents=True)
+    lf.write_bytes(b"set realmlist logon.example.com\nset patchlist x\n")
+    networking.write_client_realmlist(tmp_path / "lf", "10.0.0.5", auth_port=3724)
+    assert lf.read_bytes() == b"set realmlist 10.0.0.5\nset patchlist x\n"
+
+
+@needs_case_sensitive_disk
+def test_two_root_realmlists_in_different_case_are_both_written(tmp_path: Path) -> None:
+    """T882: on a disk that tells cases apart, both spellings are the client's file."""
+    lower = tmp_path / "client" / "realmlist.wtf"
+    upper = tmp_path / "client" / "REALMLIST.WTF"
+    lower.parent.mkdir(parents=True)
+    lower.write_bytes(b"set realmlist old.example.com\n")
+    upper.write_bytes(b"SET REALMLIST old.example.com\n")
+
+    written = networking.write_ready_to_play_realmlists(
+        tmp_path / "client", "127.0.0.1", auth_port=3724
+    )
+
+    assert sorted(written) == sorted([lower, upper])
+    for f in (lower, upper):
+        assert f.read_bytes() == b"set realmlist 127.0.0.1\n"

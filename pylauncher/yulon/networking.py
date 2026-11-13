@@ -4893,18 +4893,44 @@ def _data_subfolders(client_dir: Path) -> list[Path]:
         return []
 
 
+def _root_realmlist_spellings(client_dir: Path, realmlist_file: str) -> list[Path]:
+    """Every top-level name that casefolds to `realmlist_file`, as the disk spells it (T882).
+
+    On a disk that tells cases apart, `realmlist.wtf` and `REALMLIST.WTF` are two
+    files, and the client reads its own spelling: leaving one alone leaves the
+    game pointed at another server. One folder listing answers the question, so
+    an unreadable folder offers nothing rather than raising. The spellings come
+    back sorted by name, so the write order is stable.
+    """
+    try:
+        names = os.listdir(client_dir)
+    except OSError as exc:
+        logger.warning(f"could not list {client_dir} for its realmlist files: {exc}")
+        return []
+    wanted = realmlist_file.casefold()
+    return sorted(
+        (client_dir / name for name in names if name.casefold() == wanted),
+        key=lambda path: path.name,
+    )
+
+
 def _realmlist_candidates(client_dir: Path, realmlist_file: str) -> list[Path]:
     """Where a client keeps its realmlist: `Data/<locale>/` (retail), then the top level.
 
     Every name as the disk spells it (T261): `data/enus/realmlist.wtf`, which
     `unzip -LL` leaves, is the client's file on a disk that tells cases apart,
     and writing `Data/enUS/realmlist.wtf` beside it made a second, empty `Data/`
-    tree the game never reads.
+    tree the game never reads. At the root EVERY spelling counts (T882):
+    `realmlist.wtf` and `REALMLIST.WTF` are two files there and the client reads
+    its own, so one left alone still names another server. When none is there,
+    the plain `client_dir / realmlist_file` is the one to make.
     """
     locales = _data_subfolders(client_dir)
     found = [f for f in (client_names.find(loc, realmlist_file) for loc in locales) if f]
-    top = client_names.find(client_dir, realmlist_file) or client_dir / realmlist_file
-    return [*found, top]
+    top = _root_realmlist_spellings(client_dir, realmlist_file) or [
+        client_dir / realmlist_file
+    ]
+    return [*found, *top]
 
 
 def _fresh_realmlist(client_dir: Path, realmlist_file: str) -> Path:
@@ -4936,22 +4962,39 @@ def _missing_locale_realmlists(client_dir: Path, realmlist_file: str) -> list[Pa
     ]
 
 
+_SET_REALMLIST_RE = re.compile(rb"^\s*set\s+realmlist\b", re.IGNORECASE)
+"""An old realmlist line, in any spacing or case (T882): a tab, two spaces, `SET realmList`."""
+
+
 def _set_realmlist(target: Path, address: str) -> None:
     """Put `set realmlist <address>` first in `target`, keeping its other lines.
 
     `address` is already `realmlist_value()`'s answer: a port is part of it.
+    Worked in bytes (T882): a UTF-16 save, or any NUL byte, is not lines to keep
+    but a file to replace whole, and a leading UTF-8 BOM is dropped with the old
+    line it marked. The first line's CRLF is kept when it has one, so a file the
+    game saved with carriage returns keeps them; a new file gets LF.
     """
-    lines = (
-        target.read_text(encoding="utf-8", errors="replace").splitlines()
-        if target.is_file()
-        else []
-    )
-    kept = [ln for ln in lines if not ln.strip().lower().startswith("set realmlist")]
-    target.write_text(
-        "\n".join([f"set realmlist {address}", *kept]).rstrip("\n") + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    raw = target.read_bytes() if target.is_file() else b""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")) or b"\x00" in raw:
+        kept: list[bytes] = []
+        ending = b"\n"
+    else:
+        raw = raw.removeprefix(b"\xef\xbb\xbf")
+        first, _, _ = raw.partition(b"\n")
+        ending = b"\r\n" if first.endswith(b"\r") else b"\n"
+        parts = raw.split(b"\n")
+        if parts and parts[-1] == b"":
+            parts.pop()
+        kept = []
+        for part in parts:
+            stripped = part[:-1] if part.endswith(b"\r") else part
+            if stripped and _SET_REALMLIST_RE.match(stripped):
+                continue
+            kept.append(stripped)
+        while kept and kept[-1] == b"":
+            kept.pop()
+    target.write_bytes(ending.join([f"set realmlist {address}".encode("ascii"), *kept]) + ending)
 
 
 def write_client_realmlist(
