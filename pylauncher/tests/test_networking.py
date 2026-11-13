@@ -7986,9 +7986,6 @@ def _start_services_for(
     monkeypatch.setattr(apply.DockerSql, "run_statement", lambda self, db, s: ran.append((db, s)))
 
     def query(self: object, db: str, statement: str) -> str:
-        if "SELECT port FROM" in statement:
-            writes = [s for _, s in ran if s.startswith("UPDATE")]
-            return f"{entry.ports.world}\n" if writes else row
         return row
 
     monkeypatch.setattr(apply.DockerSql, "query", query)
@@ -8296,7 +8293,8 @@ def test_a_t883_start_moves_a_realm_row_off_a_lan_address_this_computer_no_longe
 ) -> None:
     """T883: the older Start moves the row off 192.168.1.50, as WotLK's does.
 
-    Tortoise expects `UPDATE tw_logon.realmlist SET address='<held>' WHERE id=1;`.
+    Only the ADDRESS keeper runs: no statement may touch the port. Tortoise
+    expects `UPDATE tw_logon.realmlist SET address='<held>' WHERE id=1;`.
     """
     entry = load_catalog().get(game)
     services, ran = _start_services_for(
@@ -8312,14 +8310,13 @@ def test_a_t883_start_moves_a_realm_row_off_a_lan_address_this_computer_no_longe
 
     if game == "wow-tortoise":
         # Pinned literally: this core has no LAN column, so the catalog must not gain one.
-        # The port keeper writes first (8090, unlike the WotLK seed), then the address keeper.
         expected = [
-            ("auth", networking.realm_port_sql(entry)),
             ("auth", f"UPDATE tw_logon.realmlist SET address='{LAN_HELD}' WHERE id=1;"),
         ]
     else:
         expected = [("auth", networking.realmlist_sql(entry, LAN_HELD, LAN_HELD))]
     assert ran == expected
+    assert not [s for _, s in ran if "SET port" in s], ran
 
 
 @pytest.mark.parametrize(
@@ -8351,10 +8348,8 @@ def test_a_t883_start_leaves_a_chosen_loopback_alone(
     )
 
     assert services.controller.before_servers() is None  # type: ignore[attr-defined]
-    if game == "wow-tortoise":
-        assert ran == [("auth", networking.realm_port_sql(entry))]
-    else:
-        assert ran == []
+    assert ran == []
+    assert not [s for _, s in ran if "SET port" in s], ran
 
 
 @pytest.mark.parametrize(
@@ -8385,7 +8380,5 @@ def test_a_t883_start_leaves_a_held_address_alone(
     )
 
     assert services.controller.before_servers() is None  # type: ignore[attr-defined]
-    if game == "wow-tortoise":
-        assert ran == [("auth", networking.realm_port_sql(entry))]
-    else:
-        assert ran == []
+    assert ran == []
+    assert not [s for _, s in ran if "SET port" in s], ran
