@@ -8288,6 +8288,35 @@ def test_a_root_realmlist_with_a_nul_and_no_bom_is_replaced_whole(tmp_path: Path
     assert f.read_bytes() == b"set realmlist 10.0.0.5\n"
 
 
+def test_a_non_ascii_hostname_is_written_as_utf8(tmp_path: Path) -> None:
+    """T882 round 4: our line is UTF-8, so a non-ASCII hostname writes rather than raises."""
+    play = tmp_path / "play"
+    play.mkdir(parents=True)
+
+    written = networking.write_ready_to_play_realmlists(
+        play, "münchen.example", auth_port=3724
+    )
+
+    assert written[0].read_bytes() == "set realmlist münchen.example\n".encode()
+
+
+def test_an_odd_length_utf16_file_leaves_no_replacement_character(tmp_path: Path) -> None:
+    """T882 round 4: an odd byte count's trailing U+FFFD is dropped, not kept as a junk line."""
+    f = tmp_path / "client" / "realmlist.wtf"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(
+        b"\xff\xfe"
+        + "set realmlist logon.example.com\r\nset patchlist x\r\n".encode("utf-16-le")
+        + b"\x41"
+    )
+
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
+
+    assert out == f
+    assert b"\xef\xbf\xbd" not in f.read_bytes()
+    assert f.read_bytes() == b"set realmlist 10.0.0.5\r\nset patchlist x\r\n"
+
+
 def test_a_crlf_root_realmlist_stays_crlf_and_keeps_other_lines(tmp_path: Path) -> None:
     """T882: CRLF in, CRLF out; LF in, LF out."""
     crlf = tmp_path / "crlf" / "realmlist.wtf"
@@ -8440,13 +8469,16 @@ def test_a_t883_start_leaves_a_chosen_loopback_alone(
 def test_a_t883_start_leaves_a_chosen_lan_address_alone(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
     factory: str,
     game: str,
 ) -> None:
-    """T883 round 3: the owner's chosen LAN address is never rewritten, even unheld.
+    """T883 round 4: the test catches a dropped choice, not the automatic rule.
 
-    `stale_realm_address()` answers `warn` for a chosen address nothing holds:
-    the keeper logs it and writes nothing, and never refuses the start.
+    `LAN_HELD` is held, so without the recorded lan choice the automatic rule
+    would UPDATE the row to it: `ran == []` alone proves the choice stopped the
+    write. The keeper logs the owner's stale choice as a warning and the start
+    is not refused.
     """
     entry = load_catalog().get(game)
     networking.record_network_intent(tmp_path, "lan", LAN_LOST)
@@ -8456,12 +8488,21 @@ def test_a_t883_start_leaves_a_chosen_lan_address_alone(
         entry,
         tmp_path,
         row=f"{LAN_LOST}\t{LAN_LOST}\n",
-        holds=lambda addr: False,
+        holds=lambda addr: addr == LAN_HELD,
     )
 
-    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    with caplog.at_level("WARNING", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
     assert ran == []
     assert not [s for _, s in ran if "SET port" in s], ran
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    expected = (
+        f"The realm advertises {LAN_LOST}, the address you chose, which is no "
+        "longer one of this computer's addresses. It was left as it is: choose your "
+        "address again on the Networking tab if it changed."
+    )
+    assert expected in warnings, warnings
 
 
 @pytest.mark.parametrize(
@@ -8480,11 +8521,14 @@ def test_a_t883_start_leaves_an_internet_choice_alone(
     factory: str,
     game: str,
 ) -> None:
-    """T883 round 3: the internet choice keeps a lost LAN row when nothing is held.
+    """T883 round 4: the internet choice is obeyed while a held address waits.
 
-    `stale_realm_address()` only moves a stale private `localAddress`, and only
-    to an address this computer holds now: with nothing held there is nowhere
-    to move it, so the verdict is `keep` on every factory and nothing is written.
+    `LAN_HELD` is held, so a dropped choice would let the automatic rule UPDATE
+    the row to it: `ran == []` on the single-column cores proves the choice
+    stopped that write. `stale_realm_address()` answers `keep` for them, since
+    with no `localAddress` column there is no stale private local address to
+    move. Centurion has the column, so the keeper moves only the local address
+    to the held one and the public `address` stays exactly as the owner chose it.
     """
     entry = load_catalog().get(game)
     networking.record_network_intent(tmp_path, "internet")
@@ -8494,11 +8538,14 @@ def test_a_t883_start_leaves_an_internet_choice_alone(
         entry,
         tmp_path,
         row=f"{LAN_LOST}\t{LAN_LOST}\n",
-        holds=lambda addr: False,
+        holds=lambda addr: addr == LAN_HELD,
     )
 
     assert services.controller.before_servers() is None  # type: ignore[attr-defined]
-    assert ran == []
+    if game == "wow-centurion":
+        assert ran == [("auth", networking.realmlist_sql(entry, LAN_LOST, LAN_HELD))]
+    else:
+        assert ran == []
     assert not [s for _, s in ran if "SET port" in s], ran
 
 

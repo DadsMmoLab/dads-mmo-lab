@@ -4990,12 +4990,16 @@ def _first_ending_bytes(raw: bytes) -> bytes:
 
 
 def _kept_text_lines(text: str) -> list[str]:
-    """The lines of decoded `text` to keep: every line but an old realmlist line."""
-    parts = _TEXT_BREAK_RE.split(text)
+    """The lines of decoded `text` to keep: every line but an old realmlist line.
+
+    One trailing U+FFFD (an odd byte count's leftover half character) is dropped
+    with the decode noise, so no junk line is written (T882 round 4).
+    """
+    parts = _TEXT_BREAK_RE.split(text.removesuffix("\ufffd"))
     if parts and parts[-1] == "":
         parts.pop()
     kept = [part for part in parts if not (part and _SET_REALMLIST_TEXT_RE.match(part))]
-    while kept and kept[-1] == "":
+    while kept and kept[-1] in ("", "\ufffd"):
         kept.pop()
     return kept
 
@@ -5049,7 +5053,7 @@ def _set_realmlist(target: Path, address: str) -> None:
             kept.append(part)
         while kept and kept[-1] == b"":
             kept.pop()
-    target.write_bytes(ending.join([f"set realmlist {address}".encode("ascii"), *kept]) + ending)
+    target.write_bytes(ending.join([f"set realmlist {address}".encode(), *kept]) + ending)
 
 
 def write_client_realmlist(
