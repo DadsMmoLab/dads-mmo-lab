@@ -420,11 +420,15 @@ FOREVER_TITLE = "WoW Forever Offline"
 FOREVER_SCRIPTS = ("wowforever-launcher.sh", "wowforever-client.sh", "wowforever-stop.sh")
 
 
-def _forever(tmp_path: Path) -> tuple[gaming_mode.GamingMode, Path, Path, Path]:
+def _forever(
+    tmp_path: Path, *, played: bool = True
+) -> tuple[gaming_mode.GamingMode, Path, Path, Path]:
     home = tmp_path / "home"
     _profile(home)
     server = home / "yulon-wow-forever"
     server.mkdir()
+    if played:  # what desktop Play leaves: the game's own prefix
+        (server / "wowforever-offline-pfx-1" / "pfx" / "drive_c" / "windows").mkdir(parents=True)
     client = home / "Games" / "WoWForever-70888" / "World of Warcraft"
     (client / "_forever_").mkdir(parents=True)
     (client / "_forever_" / "Wow.exe").write_bytes(b"MZ")
@@ -442,7 +446,7 @@ def _forever(tmp_path: Path) -> tuple[gaming_mode.GamingMode, Path, Path, Path]:
 
 def test_wow_forever_gets_three_tiles_with_every_marker_filled(tmp_path: Path) -> None:
     mode, home, server, client = _forever(tmp_path)
-    report = mode.add(client, "mmodad")
+    report = mode.add(client, "")  # the tab has no account box: Play makes the account
     scripts = home / ".local/share/yulon/gaming-mode/wow-forever"
     assert report.scripts == tuple(scripts / name for name in FOREVER_SCRIPTS)
     texts = {path.name: path.read_text(encoding="utf-8") for path in report.scripts}
@@ -465,7 +469,7 @@ def test_wow_forever_gets_three_tiles_with_every_marker_filled(tmp_path: Path) -
 @pytest.mark.skipif(shutil.which("bash") is None or os.name == "nt", reason="needs POSIX bash")
 def test_every_rendered_wow_forever_script_is_valid_bash(tmp_path: Path) -> None:
     mode, _home, _server, client = _forever(tmp_path)
-    for script in mode.add(client, "mmodad").scripts:
+    for script in mode.add(client, "").scripts:
         result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
         assert result.returncode == 0, f"{script.name}: {result.stderr}"
 
@@ -487,3 +491,12 @@ def test_the_client_scripts_key_watch_compiles_and_matches_the_catalog_and_forev
     assert f"GROUP = KEYS[{login.region_group} - 1]" in body
     keys = [k.hex() for k in forever_keywatch.KNOWN_REGION_KEYS]
     assert re.findall(r'"([0-9a-f]{64})"', body) == keys  # the server key is upper case
+
+
+def test_wow_forever_before_its_first_play_says_press_play_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    mode, home, _server, client = _forever(tmp_path, played=False)
+    with pytest.raises(steam.SteamRefusal, match="Press Play on WoW Forever's tab once first"):
+        mode.add(client, "")
+    assert not (home / ".local/share/yulon/gaming-mode").exists()
