@@ -24,6 +24,7 @@ from yulon import docker, networking, platform, runner
 from yulon.apply import ApplyError
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.ui.controller_view import _format_network_report, _network_report_details
 
 WOTLK = load_catalog().get("wow-wotlk")
 TORTOISE = load_catalog().get("wow-tortoise")
@@ -7209,6 +7210,53 @@ def test_apply_remembers_the_chosen_address_only_once_the_realm_row_is_written(
     assert report.restart_required
     intent = networking.read_network_intent(tmp_path)
     assert intent is not None and (intent.mode, intent.address) == ("lan", VPN_ADDRESS)
+
+
+def test_a_failed_realmlist_update_says_the_choice_was_not_saved(tmp_path: Path) -> None:
+    """T885: a failed UPDATE says the choice was not saved, and records no intent."""
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.25",
+        firewall="none",
+        steamos=False,
+        wsl=False,
+    )
+    report = networking.apply(p, sql=_FailingSql(), server_dir=tmp_path)
+    shown = _format_network_report(report)
+    assert report.realm_unchanged, "the lost choice went unnamed"
+    assert "The realm address was not changed" in shown, shown
+    assert "Details says why" in shown, shown
+    assert "ERROR 1054" not in shown, shown
+    assert "ERROR 1054" in _network_report_details(report), _network_report_details(report)
+    assert any("realmlist not updated" in s for s in report.skipped)
+    assert networking.INTENT_FILE not in {p.name for p in tmp_path.iterdir()}
+    assert report.restart_required is False
+
+
+def test_a_realm_refusal_runs_the_firewall_and_records_nothing(tmp_path: Path) -> None:
+    """T885: a refused database start still opens the ports, sends no UPDATE, records nothing."""
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.25",
+        firewall="ufw",
+        steamos=False,
+        wsl=False,
+    )
+    sql = _RecordingSql()
+    report = networking.apply(
+        p,
+        sql=sql,
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+        server_dir=tmp_path,
+        realm_refusal="the database would not start",
+    )
+    assert report.done, "the firewall half stopped with the realm half"
+    assert sql.statements == [], "a refused start still sent the UPDATE"
+    assert report.realm_unchanged == "realmlist not updated: the database would not start"
+    assert any("realmlist not updated" in s for s in report.skipped)
+    assert networking.INTENT_FILE not in {p.name for p in tmp_path.iterdir()}
 
 
 IP_ADDR_OUT = (

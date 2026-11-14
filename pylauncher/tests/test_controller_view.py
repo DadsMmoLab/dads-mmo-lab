@@ -125,6 +125,7 @@ from yulon.ui.controller_view import (
     ControllerView,
     DatabaseAlone,
     UpdateChoice,
+    _format_network_report,
     ask_update_choice,
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
@@ -30596,6 +30597,164 @@ def test_a_plan_or_apply_that_fails_says_so_in_a_sentence(
     assert "APPLY FAILED" not in shown
     assert "netsh needs an administrator" in view.network_details.text()
     assert view.network_details.collapsed and not view.network_details.isHidden()
+
+
+def test_apply_on_a_stopped_server_says_next_start_not_restart(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885: Apply that started the database alone says the next Start picks the address up."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    plan = _netsh_plan("lan")
+    outcome = NetworkReport(
+        plan,
+        done=("realmlist → 192.168.1.25",),
+        restart_required=True,
+        applied_while_stopped=True,
+    )
+    services.network_apply = lambda p: outcome
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    view.apply_network_plan()
+    shown = view.network_text.toPlainText()
+    assert "The realm list now gives players 192.168.1.25." in shown, shown
+    assert "The server was stopped, so the new address is used from its next Start." in shown, shown
+    assert "Restart the server" not in shown, shown
+
+
+def test_a_plan_shown_during_an_apply_leaves_apply_disabled(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R3: "Show plan" during an Apply must not hand Apply back.
+
+    Mutation: `_plan_ready` enables Apply on a ready plan without checking
+    `_network_applying`, which is the press that overlapped the running one. Apply is
+    handed back when the job ends, which is what the second assertion pins.
+    """
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    during: list[bool] = []
+
+    def shows_the_plan_mid_apply(plan: NetworkPlan) -> NetworkReport:
+        view.show_network_plan()
+        during.append(view.apply_button.isEnabled())
+        return NetworkReport(plan, done=("realmlist → 192.168.1.25",), restart_required=True)
+
+    services.network_apply = shows_the_plan_mid_apply
+    view.show_network_plan()
+    assert view.apply_button.isEnabled()
+    view.apply_network_plan()
+    assert during == [False], during
+    assert view.apply_button.isEnabled(), "Apply was not handed back when the job ended"
+
+
+def test_an_apply_refused_by_the_database_lease_says_the_holders_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R4: a lease refusal read "Apply did not finish" and folded the one sentence.
+
+    Mutation: drop `MaintenanceLeaseTaken` from `_apply_failed`'s `isinstance`.
+    """
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+
+    view._apply_failed(docker.MaintenanceLeaseTaken("X"))
+
+    shown = view.network_text.toPlainText()
+    assert "X" in shown, shown
+    assert controller_view_module.APPLY_DID_NOT_FINISH not in shown, shown
+    assert view.apply_button.isEnabled(), "a ready plan was left unpressable"
+
+
+def test_an_apply_that_ends_over_a_not_ready_plan_leaves_apply_disabled(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R4: both endings handed Apply back whatever the plan now in hand said.
+
+    Mutation: `_rearm_apply`'s body replaced by `self.apply_button.setEnabled(True)`.
+    """
+    not_ready = replace(_netsh_plan("lan"), lan_ip=None)
+    assert not not_ready.ready
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    applied: list[str] = []
+
+    def ends_well(plan: NetworkPlan) -> NetworkReport:
+        applied.append("done")
+        view._plan_ready(not_ready)
+        return NetworkReport(plan, done=("realmlist → 192.168.1.25",), restart_required=True)
+
+    services.network_apply = ends_well
+    view.show_network_plan()
+    view.apply_network_plan()
+    assert applied == ["done"], applied
+    assert not view.apply_button.isEnabled(), "_apply_done left a not-ready plan's Apply live"
+    view.apply_network_plan()
+    assert applied == ["done"], "a plan that is not ready was applied anyway"
+
+    services2 = _services(ps, tmp_path, [])
+    services2.network_plan = _netsh_plan
+    view2 = ControllerView(WOTLK, services2, status_poll_ms=0)
+    broke: list[str] = []
+
+    def ends_badly(plan: NetworkPlan) -> NetworkReport:
+        broke.append("boom")
+        view2._plan_ready(not_ready)
+        raise RuntimeError("the UPDATE failed")
+
+    services2.network_apply = ends_badly
+    view2.show_network_plan()
+    view2.apply_network_plan()
+    assert broke == ["boom"], broke
+    assert not view2.apply_button.isEnabled(), "_apply_failed left a not-ready plan's Apply live"
+
+
+def test_apply_that_could_not_reach_the_database_says_the_choice_was_not_saved(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885: an unreached database says the choice was not saved, and offers the retry."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    plan = _netsh_plan("lan")
+    why = "realmlist not updated: the database would not start"
+    outcome = NetworkReport(plan, skipped=(why,), realm_unchanged=why)
+    services.network_apply = lambda p: outcome
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    view.apply_network_plan()
+    shown = view.network_text.toPlainText()
+    assert "The realm address was not changed" in shown, shown
+    assert "so this choice was not saved" in shown, shown
+    assert "Details says why" in shown, shown
+    assert "database would not start" not in shown, shown
+    assert "The realm list now gives players" not in shown, shown
+
+
+def test_a_realm_unchanged_keeps_dockers_words_off_the_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R2: a realm step that did not go through shows a fixed sentence, not the reason."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    plan = _netsh_plan("lan")
+    outcome = NetworkReport(plan, skipped=(RAW_DOCKERISH,), realm_unchanged=RAW_DOCKERISH)
+    services.network_apply = lambda p: outcome
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    view.apply_network_plan()
+    shown = view.network_text.toPlainText()
+    assert RAW_DOCKERISH not in shown, shown
+    assert (
+        "The realm address was not changed, so this choice was not saved. Details says why."
+        in shown
+    ), shown
+    assert RAW_DOCKERISH in view.network_details.text()
+    assert _format_network_report(outcome).count("The realm address was not changed") == 1
 
 
 def test_an_apply_that_breaks_in_docker_keeps_dockers_words_off_the_screen(

@@ -3566,6 +3566,83 @@ def _database_alone(
     )
 
 
+def _network_apply_with_the_database(
+    plan: NetworkPlan,
+    *,
+    sql: DockerSql,
+    server_dir: Path,
+    spec: docker.ContainerSpec,
+    wsl_distro: str | None,
+    alone: DatabaseAlone,
+) -> NetworkReport:
+    """Apply the network plan, starting the database alone when the realm step needs it (T885).
+
+    A plan with no `realmlist_sql` needs no database, so it applies as today.
+    Otherwise the apply runs inside `docker.hold_the_server(alone=...)` (a Start pressed in
+    between would have its database stopped under its world), the database is
+    started alone, and it is stopped again afterwards — the shape `_back_up_under_the_lease`
+    uses. `alone` also refuses a Backup pressed during Apply, which would otherwise have its
+    database stopped mid-dump. `DbPasswordUnknown` is not caught: Apply ends in "did not finish".
+
+    **One Apply of this server at a time** (`docker.maintenance_lease()`, T885 round 3),
+    taken before the hold above, as the Restore takes its own. The hold's `alone` key is the
+    press, so a SECOND Apply in the same tab passes it -- "Show plan" re-enabled Apply
+    (`_plan_ready`) while the first ran, and `ThreadedJobRunner` put the second on its own
+    thread. Both then took the hold, the first's `take_down` stopped the database under the
+    second's UPDATE, its exit released `alone` for a Backup to slip in, and the second's
+    release raised KeyError. Refused here, a second Apply (and anything else that wants the
+    lease) is told the first one's existing sentence and runs none of this.
+
+    Raises:
+        docker.MaintenanceLeaseTaken: another Backup, Restore or Apply of this server holds
+            the databases; its message is the holder's sentence.
+    """
+    if plan.realmlist_sql is None:
+        return networking.apply(plan, sql=sql, server_dir=server_dir)
+    with contextlib.ExitStack() as leased:
+        leased.enter_context(
+            docker.maintenance_lease(
+                server_dir,
+                forgetting.NETWORK_APPLY_HOLDS_THE_DATABASES,
+                press="Apply the network plan",
+                spec=spec,
+                wsl_distro=wsl_distro,
+            )
+        )
+        return _network_apply_under_the_lease(
+            plan, sql=sql, server_dir=server_dir, spec=spec, wsl_distro=wsl_distro, alone=alone
+        )
+
+
+def _network_apply_under_the_lease(
+    plan: NetworkPlan,
+    *,
+    sql: DockerSql,
+    server_dir: Path,
+    spec: docker.ContainerSpec,
+    wsl_distro: str | None,
+    alone: DatabaseAlone,
+) -> NetworkReport:
+    """`_network_apply_with_the_database()`'s work, once it holds the databases (worker thread)."""
+    with docker.hold_the_server(
+        server_dir,
+        forgetting.NETWORK_APPLY_HOLDS_THE_SERVER,
+        press="Apply the network plan",
+        spec=spec,
+        wsl_distro=wsl_distro,
+        alone=forgetting.NETWORK_APPLY_WRITES_ALONE,
+    ):
+        try:
+            started = alone.bring_up("the realm address was not changed")
+        except docker.DockerCommandError as exc:
+            return networking.apply(plan, sql=sql, server_dir=server_dir, realm_refusal=str(exc))
+        if not started:
+            return networking.apply(plan, sql=sql, server_dir=server_dir)
+        put = _put_back_after(lambda: networking.apply(plan, sql=sql, server_dir=server_dir), alone)
+        result = cast(NetworkReport, put.result)
+        return replace(result, applied_while_stopped=True, database_note=put.stop_note or "")
+
+
 def _move_services(
     entry: CatalogEntry,
     server_dir: Path,
@@ -3862,6 +3939,9 @@ def _assemble(
             docker.save_through_channel(spec.world, server_dir, live_channel)
     # T864: hoisted for the Docker space seam below, which frees the kept build.
     kept_build = install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro)
+    # T885 round 2: one `_database_alone(...)` for this server, shared by the
+    # network Apply above and `database_alone` below (the services Backup uses).
+    alone = _database_alone(spec, server_dir, wsl_distro=wsl_distro)
     return ControllerServices(
         client_dir=client_dir,
         steam=_steam_seam(entry, server_dir, client_dir),
@@ -3874,10 +3954,18 @@ def _assemble(
             entry, mode, bindings=_safe_bindings(wsl_distro=wsl_distro)
         ),
         # T622: the realmlist row and the applied mode's file are written under the server's hold.
+        # T885: on a stopped server the database is started alone for the UPDATE, then stopped.
         network_apply=_under_the_hold(
             _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
             "Apply the network plan",
-            lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
+            lambda plan: _network_apply_with_the_database(
+                plan,
+                sql=sql,
+                server_dir=server_dir,
+                spec=spec,
+                wsl_distro=wsl_distro,
+                alone=alone,
+            ),
         ),
         # T808: the realm name; the write goes under the same hold as the network apply.
         # None on a realm-type entry (CoA): there the realm type's switch writes the name.
@@ -3912,7 +4000,7 @@ def _assemble(
         # a stopped server" true by construction rather than by remembering it
         # four times. Four copies is how `_for_tortoise` came to be the one
         # factory that never bound `play`.
-        database_alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
+        database_alone=alone,
         move=(
             _move_services(
                 entry,
@@ -26385,7 +26473,15 @@ class ControllerView(QWidget):
         self._plan = result
         self.network_text.setPlainText(_format_plan(result))
         self.network_details.set_text(_plan_details(result))
-        set_enabled_why(self.apply_button, None if result.ready else NETWORK_PLAN_NOT_READY)
+        # T885 round 3: a plan shown while an Apply is running must not hand Apply back:
+        # a second press passed the hold, the first one's take_down then stopped the
+        # database under its UPDATE. `_apply_done`/`_apply_failed` re-enable it.
+        if not result.ready:
+            set_enabled_why(self.apply_button, NETWORK_PLAN_NOT_READY)
+        elif self._network_applying:
+            set_enabled_why(self.apply_button, wait_for("Apply"))
+        else:
+            set_enabled_why(self.apply_button, None)
 
     @Slot(object)
     def _plan_failed(self, exc: object) -> None:
@@ -26397,11 +26493,25 @@ class ControllerView(QWidget):
     @Slot()
     def apply_network_plan(self) -> None:
         plan = self._plan
-        if plan is None:
+        # T885 round 4: a plan that is not ready has Apply greyed with its reason; a press by
+        # another road must not run it either.
+        if plan is None or not plan.ready:
             return
         set_enabled_why(self.apply_button, wait_for("Apply"))
         self._network_applying = True  # T95: `forget_refusal()` reads it
         self._run(lambda: self.services.network_apply(plan), self._apply_done, self._apply_failed)
+
+    def _rearm_apply(self) -> None:
+        """Give Apply back after a job, with `_plan_ready`'s reason if the plan says so (T885 R4).
+
+        A plan shown while an Apply ran re-enabled Apply whatever the view was doing; here
+        the plan's `ready` decides, so a plan that arrived without an address leaves Apply
+        grey with its reason instead of live over a plan that cannot run.
+        """
+        set_enabled_why(
+            self.apply_button,
+            None if self._plan is not None and self._plan.ready else NETWORK_PLAN_NOT_READY,
+        )
 
     @Slot(object)
     def _apply_done(self, result: object) -> None:
@@ -26411,24 +26521,25 @@ class ControllerView(QWidget):
             # The plan's commands, then what became of each one (fix round 1, M3).
             held = [_plan_details(result.plan), _network_report_details(result)]
             self.network_details.set_text("\n\n".join(part for part in held if part))
-        self.apply_button.setEnabled(True)
+        self._rearm_apply()
 
     @Slot(object)
     def _apply_failed(self, exc: object) -> None:
         """Said in words; what broke goes in Details, folded, and to the app log (T194 F7)."""
         self._network_applying = False
-        if isinstance(exc, docker.ServerHeldError):
-            # Another Yu'lon is working on this server (T622): its own sentence, nothing applied.
+        if isinstance(exc, (docker.ServerHeldError, docker.MaintenanceLeaseTaken)):
+            # Another Yu'lon is working on this server (T622), or a job of this one holds the
+            # databases (T885 R4): its own sentence, nothing applied.
             self.network_text.appendPlainText("\n" + str(exc))
             self.action_failed.emit(str(exc))
-            self.apply_button.setEnabled(True)
+            self._rearm_apply()
             return
         self.network_text.appendPlainText("\n" + APPLY_DID_NOT_FINISH)
         plan = self._plan
         held = [_plan_details(plan) if plan is not None else "", f"What went wrong: {exc}"]
         self.network_details.set_text("\n\n".join(part for part in held if part))
         self.action_failed.emit(str(exc))
-        self.apply_button.setEnabled(True)
+        self._rearm_apply()
 
     # -------------------------------------------------------- context menus
 
@@ -26919,6 +27030,10 @@ def _format_network_report(report: NetworkReport) -> str:
 
     Fix round 1, M3: `done` is the commands that ran and `skipped` is the ones
     that did not (and the realmlist SQL), each spelled as the command itself.
+    T885: a realm step that did not go through says the choice was not saved;
+    one Apply started the database alone for says the next Start picks it up.
+    T885 round 2: the screen carries a FIXED sentence, never the reason text
+    (SQL, ApplyError, DockerCommandError); the reason is Details' own.
     """
     total = len(report.done) + len(report.skipped)
     if total == 0:
@@ -26930,9 +27045,18 @@ def _format_network_report(report: NetworkReport) -> str:
             f"{len(report.skipped)} could not be done; Details lists them, with what to run "
             "by hand."
         )
+    if report.realm_unchanged:
+        lines.append(
+            "The realm address was not changed, so this choice was not saved. Details says why."
+        )
     if report.restart_required:
         lines.append(f"The realm list now gives players {report.plan.client_realmlist}.")
-        lines.append("⚠ Restart the server so it hands out the new address.")
+        if report.applied_while_stopped:
+            lines.append("The server was stopped, so the new address is used from its next Start.")
+        else:
+            lines.append("⚠ Restart the server so it hands out the new address.")
+    if report.database_note:
+        lines.append(report.database_note)
     return "\n".join(lines)
 
 
@@ -26945,4 +27069,7 @@ def _network_report_details(report: NetworkReport) -> str:
     if report.skipped:
         lines.append("Could not do (run by hand):")
         lines += [f"  – {s}" for s in report.skipped]
+    if report.realm_unchanged:
+        lines.append("Why the realm address was not changed:")
+        lines.append(f"  {report.realm_unchanged}")
     return "\n".join(lines)
