@@ -19,6 +19,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Play** on the FFXI tab opens xiloader, where you log in or make your account; the first Play asks Windows once.
 - Install a WoW Forever Classic server with Karrz's bots in beta from **Other games**, using your own copy of the game.
 - **Play** on the WoW Forever tab sets up the login once, makes your account and starts the game.
+- WoW Forever plays on a Steam Deck too: **Play** gets GE-Proton once and runs the game in its own Proton prefix.
 
 ### Fixed
 

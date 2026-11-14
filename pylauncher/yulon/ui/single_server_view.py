@@ -331,6 +331,11 @@ class SingleServerView(QWidget):
                 "Start runs the server for this account, and makes it the first time a new "
                 "name is used; the server also reads its game data from this client."
             )
+        elif self.entry.play.forever is not None and self._os_name() == "linux":
+            made = (
+                "The first Play downloads GE-Proton once and makes the game's own Proton "
+                "prefix, then makes your account and shows its password."
+            )
         elif self.entry.play.forever is not None:
             made = (
                 "The first Play asks once for administrator rights so this computer trusts the "

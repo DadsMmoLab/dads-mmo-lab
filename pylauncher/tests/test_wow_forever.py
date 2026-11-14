@@ -64,7 +64,7 @@ def test_wow_forever_is_a_forevercore_stack_with_its_tdb_its_client_extract_and_
     assert LOGIN is not None and LOGIN.region_group == 8 and LOGIN.ca == "certs/ca.pem"
     assert FOREVER.play is not None and FOREVER.play.args == ("-config", LOGIN.config)
     assert FOREVER.play.account is False
-    assert FOREVER.host_ports() == (1119, 8081, 8085)
+    assert FOREVER.host_ports() == (1119, 8082, 8085)
 
 
 def test_forever_runs_the_two_extra_stages_and_ffxi_does_not() -> None:
@@ -624,8 +624,8 @@ def test_play_refuses_a_stopped_server_another_os_and_another_client(tmp_path: P
         forever_play.play(
             FOREVER, tmp_path, client, os_name="windows", seams=_play_seams(calls, world="exited")
         )
-    with pytest.raises(PlayRefusal, match="Windows only"):
-        forever_play.play(FOREVER, tmp_path, client, os_name="linux", seams=_play_seams(calls))
+    with pytest.raises(PlayRefusal, match="on Windows and on Linux"):
+        forever_play.play(FOREVER, tmp_path, client, os_name="macos", seams=_play_seams(calls))
     newer = _client(tmp_path / "newer", build="1.60.1.70999")
     with pytest.raises(PlayRefusal, match="names none of the builds"):
         forever_play.play(FOREVER, tmp_path, newer, os_name="windows", seams=_play_seams(calls))

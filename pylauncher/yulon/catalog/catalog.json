@@ -4454,13 +4454,13 @@
       "id": "wow-forever",
       "name": "WoW Forever",
       "status": "beta",
-      "description": "WoW Forever (Classic 1.60.1) on ForeverCore with Karrz's bots: party, dungeon, raid and battleground bots, roaming world bots and an auction house bot. Install asks for your WoW Forever client (build 70707) and makes the server's maps from it; Play trusts this server's login certificate once (one administrator prompt), makes your account and starts the game.",
+      "description": "WoW Forever (Classic 1.60.1) on ForeverCore with Karrz's bots: party, dungeon, raid and battleground bots, roaming world bots and an auction house bot. Install asks for your WoW Forever client (build 70707, or a Battle.net copy up to 70938) and makes the server's maps from it; Play trusts this server's login certificate, makes your account and starts the game, on Windows or under GE-Proton on a Steam Deck.",
       "notes": [
         "Server: Karrz's release 0.1.36 (Karrz1/TrinityCore branch forever @ 5c8b18a, the source of wow-forever-source-0.1.36.zip: advocaite's Forever core with Karrz's PlayerbotV2 bots, GPL-2), built into one image with Yu'lon's realm scripts; MySQL 8.0 beside it. 0.1.36 adds The Drowned City and Krol'dok Stronghold with their bosses.",
         "The world database is Karrz's release TDB_full_forever_2026_10_14 (147 MB), fetched from GitHub and checked by sha256; the first start imports it, about 15 minutes.",
-        "Map data is never downloaded: Install makes the maps, vmaps and the bots' pathfinding meshes from your own client, read-only, in about 15 to 40 minutes. Battle.net must never manage that folder: it would update it past 70707, which this server refuses.",
-        "Login is Battle.net style: your computer trusts this install's own CA (limited to actual.battle.net) and the hosts file maps trinity.actual.battle.net to 127.0.0.1. Play sets both once, behind one administrator prompt.",
-        "The client keeps the login keys it accepts in memory, so Play writes this server's public key there while the game runs (after Karrz's Play-WoWForever.ps1). The first login after the game starts usually fails: press Login again without closing the game.",
+        "Map data is never downloaded: Install makes the maps, vmaps and the bots' pathfinding meshes from your own client, read-only, in about 15 to 40 minutes. Battle.net must never manage that folder: it would update it past the builds this server accepts (70707 to 70938).",
+        "Login is Battle.net style: the game trusts this install's own CA (limited to actual.battle.net) and the hosts file maps trinity.actual.battle.net to 127.0.0.1. On Windows Play sets both once, behind one administrator prompt. On Linux the CA goes into the game's own Proton prefix only, and the hosts line needs root once: Play adds it with sudo when it can, else names the one command to run.",
+        "The client keeps the login keys it accepts in memory and makes them when Login is pressed, so Play writes this server's public key there while the game runs (after Karrz's Play-WoWForever.ps1; from Linux beside the game on a Steam Deck). If a login fails, press Login again without closing the game.",
         "Play like official Forever: mob health and kill XP follow the curves Karrz fit to sniffed official Forever data (Classic.ForeverCreatureHealth, Classic.ForeverKillXp)."
       ],
       "emulator": {
@@ -4477,6 +4477,7 @@
       "install": {
         "default_server_dir": "yulon-wow-forever",
         "platforms": [
+          "linux",
           "windows"
         ],
         "stack": {
@@ -4582,7 +4583,7 @@
         },
         {
           "role": "login",
-          "port": 8081,
+          "port": 8082,
           "label": "Login web service (TLS)"
         },
         {
