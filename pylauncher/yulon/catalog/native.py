@@ -5256,6 +5256,13 @@ class InstallState:
     game_id: str
     install_id: str
     family: str = ""
+    engine: str = ""
+    """Which engine installed this server: `"docker"` (the default) or `"podman"` (T887).
+
+    Empty in every record written before T887, which reads as `"docker"`: all
+    of those installs were made with Docker. Written from `engine.resolve()` at
+    install time. Additive, for `source_revs`' reason.
+    """
     completed: tuple[str, ...] = ()
     last_error: str = ""
     error_run: str = ""
@@ -5490,6 +5497,7 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
     # is safe because every state file written before 7.1 was written by the
     # only family that existed then.
     family = parsed.get("family")
+    engine = parsed.get("engine")
     error = parsed.get("last_error")
     run = parsed.get("error_run")
     updated = parsed.get("updated_unix")
@@ -5498,6 +5506,7 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
         game_id=game_id,
         install_id=install_id,
         family=family if isinstance(family, str) else "",
+        engine=engine if isinstance(engine, str) and engine in ("docker", "podman") else "",
         completed=stages,
         last_error=error if isinstance(error, str) else "",
         error_run=run if isinstance(run, str) and isinstance(error, str) and error else "",
@@ -5608,6 +5617,7 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         "version": state.version,
         "game_id": state.game_id,
         "family": state.family,
+        "engine": state.engine or "docker",
         "install_id": state.install_id,
         # Both halves. `completed` alone is what used to make a downgrade lossy:
         # the unknown names were read, dropped, and then written out of existence.
@@ -15635,10 +15645,13 @@ class StagedInstaller:
         # A fresh record says how this install's password comes to exist (T748), so a reader
         # never has to guess it from a file that may have gone missing.
         generated = self.entry.install.password.mode == "generated"
+        from yulon import engine as engine_seam
+
         return InstallState(
             game_id=self.entry.id,
             install_id=install_id,
             family=self.family,
+            engine=engine_seam.resolve(),
             db_password=RECORD_GENERATED if generated else "",
         )
 
