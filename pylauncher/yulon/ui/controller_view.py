@@ -3578,10 +3578,11 @@ def _network_apply_with_the_database(
     """Apply the network plan, starting the database alone when the realm step needs it (T885).
 
     A plan with no `realmlist_sql` needs no database, so it applies as today.
-    Otherwise the apply runs inside `docker.hold_the_server` (a Start pressed in
+    Otherwise the apply runs inside `docker.hold_the_server(alone=...)` (a Start pressed in
     between would have its database stopped under its world), the database is
     started alone, and it is stopped again afterwards — the shape `_back_up_under_the_lease`
-    uses. `DbPasswordUnknown` is not caught: Apply ends in "did not finish".
+    uses. `alone` also refuses a Backup pressed during Apply, which would otherwise have its
+    database stopped mid-dump. `DbPasswordUnknown` is not caught: Apply ends in "did not finish".
     """
     if plan.realmlist_sql is None:
         return networking.apply(plan, sql=sql, server_dir=server_dir)
@@ -3591,6 +3592,7 @@ def _network_apply_with_the_database(
         press="Apply the network plan",
         spec=spec,
         wsl_distro=wsl_distro,
+        alone=forgetting.NETWORK_APPLY_WRITES_ALONE,
     ):
         try:
             started = alone.bring_up("the realm address was not changed")
@@ -3899,6 +3901,9 @@ def _assemble(
             docker.save_through_channel(spec.world, server_dir, live_channel)
     # T864: hoisted for the Docker space seam below, which frees the kept build.
     kept_build = install_wiring.kept_build_for_app(entry, server_dir, wsl_distro=wsl_distro)
+    # T885 round 2: one `_database_alone(...)` for this server, shared by the
+    # network Apply above and `database_alone` below (the services Backup uses).
+    alone = _database_alone(spec, server_dir, wsl_distro=wsl_distro)
     return ControllerServices(
         client_dir=client_dir,
         steam=_steam_seam(entry, server_dir, client_dir),
@@ -3921,7 +3926,7 @@ def _assemble(
                 server_dir=server_dir,
                 spec=spec,
                 wsl_distro=wsl_distro,
-                alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
+                alone=alone,
             ),
         ),
         # T808: the realm name; the write goes under the same hold as the network apply.
@@ -3957,7 +3962,7 @@ def _assemble(
         # a stopped server" true by construction rather than by remembering it
         # four times. Four copies is how `_for_tortoise` came to be the one
         # factory that never bound `play`.
-        database_alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
+        database_alone=alone,
         move=(
             _move_services(
                 entry,
@@ -26966,6 +26971,8 @@ def _format_network_report(report: NetworkReport) -> str:
     that did not (and the realmlist SQL), each spelled as the command itself.
     T885: a realm step that did not go through says the choice was not saved;
     one Apply started the database alone for says the next Start picks it up.
+    T885 round 2: the screen carries a FIXED sentence, never the reason text
+    (SQL, ApplyError, DockerCommandError); the reason is Details' own.
     """
     total = len(report.done) + len(report.skipped)
     if total == 0:
@@ -26979,8 +26986,7 @@ def _format_network_report(report: NetworkReport) -> str:
         )
     if report.realm_unchanged:
         lines.append(
-            "The realm address was not changed, so this choice was not saved: "
-            f"{report.realm_unchanged} Apply it again once the server can start."
+            "The realm address was not changed, so this choice was not saved. Details says why."
         )
     if report.restart_required:
         lines.append(f"The realm list now gives players {report.plan.client_realmlist}.")
@@ -27002,4 +27008,7 @@ def _network_report_details(report: NetworkReport) -> str:
     if report.skipped:
         lines.append("Could not do (run by hand):")
         lines += [f"  – {s}" for s in report.skipped]
+    if report.realm_unchanged:
+        lines.append("Why the realm address was not changed:")
+        lines.append(f"  {report.realm_unchanged}")
     return "\n".join(lines)

@@ -96,6 +96,16 @@ NETWORK_APPLY_HOLDS_THE_SERVER = (
     "Yu'lon started this server's database to change who can connect, and stops "
     "it again in a moment."
 )
+# T885 round 2: what every other press of this Yu'lon is told while Apply holds the
+# database alone (`docker.hold_the_server(alone=...)`): a Modules job's SQL, an
+# account, a Backup's maintenance lease. Nothing it would have written was written.
+NETWORK_APPLY_WRITES_ALONE = (
+    "A network change is being applied on this server's Networking tab, and "
+    "nothing else may write to its databases until it has finished. Wait for the "
+    "apply to finish, then try again. Nothing was changed."
+)
+
+
 # What a Backup or Restore refused by `docker.maintenance_lease()` is told: the running job's
 # own sentence, to which the refused one adds what it did not do (T216 review round 3).
 BACKUP_HOLDS_THE_DATABASES = (

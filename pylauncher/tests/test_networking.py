@@ -24,6 +24,7 @@ from yulon import docker, networking, platform, runner
 from yulon.apply import ApplyError
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.ui.controller_view import _format_network_report, _network_report_details
 
 WOTLK = load_catalog().get("wow-wotlk")
 TORTOISE = load_catalog().get("wow-tortoise")
@@ -7222,7 +7223,12 @@ def test_a_failed_realmlist_update_says_the_choice_was_not_saved(tmp_path: Path)
         wsl=False,
     )
     report = networking.apply(p, sql=_FailingSql(), server_dir=tmp_path)
+    shown = _format_network_report(report)
     assert report.realm_unchanged, "the lost choice went unnamed"
+    assert "The realm address was not changed" in shown, shown
+    assert "Details says why" in shown, shown
+    assert "ERROR 1054" not in shown, shown
+    assert "ERROR 1054" in _network_report_details(report), _network_report_details(report)
     assert any("realmlist not updated" in s for s in report.skipped)
     assert networking.INTENT_FILE not in {p.name for p in tmp_path.iterdir()}
     assert report.restart_required is False

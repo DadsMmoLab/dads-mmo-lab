@@ -125,6 +125,7 @@ from yulon.ui.controller_view import (
     ControllerView,
     DatabaseAlone,
     UpdateChoice,
+    _format_network_report,
     ask_update_choice,
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
@@ -30635,9 +30636,33 @@ def test_apply_that_could_not_reach_the_database_says_the_choice_was_not_saved(
     view.show_network_plan()
     view.apply_network_plan()
     shown = view.network_text.toPlainText()
-    assert "The realm address was not changed, so this choice was not saved:" in shown, shown
-    assert "Apply it again once the server can start." in shown, shown
+    assert "The realm address was not changed" in shown, shown
+    assert "so this choice was not saved" in shown, shown
+    assert "Details says why" in shown, shown
+    assert "database would not start" not in shown, shown
     assert "The realm list now gives players" not in shown, shown
+
+
+def test_a_realm_unchanged_keeps_dockers_words_off_the_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R2: a realm step that did not go through shows a fixed sentence, not the reason."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    plan = _netsh_plan("lan")
+    outcome = NetworkReport(plan, skipped=(RAW_DOCKERISH,), realm_unchanged=RAW_DOCKERISH)
+    services.network_apply = lambda p: outcome
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    view.apply_network_plan()
+    shown = view.network_text.toPlainText()
+    assert RAW_DOCKERISH not in shown, shown
+    assert (
+        "The realm address was not changed, so this choice was not saved. Details says why."
+        in shown
+    ), shown
+    assert RAW_DOCKERISH in view.network_details.text()
+    assert _format_network_report(outcome).count("The realm address was not changed") == 1
 
 
 def test_an_apply_that_breaks_in_docker_keeps_dockers_words_off_the_screen(
