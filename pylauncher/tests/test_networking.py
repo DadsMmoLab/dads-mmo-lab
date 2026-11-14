@@ -8293,7 +8293,7 @@ def test_a_non_ascii_hostname_is_written_as_utf8(tmp_path: Path) -> None:
     play = tmp_path / "play"
     play.mkdir(parents=True)
 
-    written = networking.write_ready_to_play_realmlists(play, "münchen.example", auth_port=3724)
+    networking.write_ready_to_play_realmlists(play, "münchen.example", auth_port=3724)
 
 
 def test_an_odd_length_utf16_file_leaves_no_replacement_character(tmp_path: Path) -> None:
