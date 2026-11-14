@@ -38,9 +38,7 @@ def _switch_says_podman(environ: dict[str, str] | None = None) -> bool:
     return env.get(ENGINE_ENV_VAR) == PODMAN_SWITCH_VALUE
 
 
-def _on_supported_platform(
-    sys_platform: str | None = None, *, wsl: bool | None = None
-) -> bool:
+def _on_supported_platform(sys_platform: str | None = None, *, wsl: bool | None = None) -> bool:
     """Whether Podman may be chosen on this machine: real Linux, not WSL."""
     from yulon import platform
 

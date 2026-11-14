@@ -222,9 +222,7 @@ def test_composegen_renders_root_user_under_podman(
     """Podman renders the Windows branch's shape: `user: "0:0"`."""
     _podman(monkeypatch, tmp_path)
     try:
-        assert (
-            composegen.container_user(platform_id=lambda: "linux") == 'user: "0:0"'
-        )
+        assert composegen.container_user(platform_id=lambda: "linux") == 'user: "0:0"'
     finally:
         engine._reset_for_tests()
 
@@ -280,14 +278,10 @@ def test_containerd_root_is_none_under_podman(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """T884's check must not fire under Podman: no containerd store to measure."""
-    from yulon.catalog import preflight as preflight_module
-
     _podman(monkeypatch, tmp_path)
     try:
         (tmp_path / "containerd").mkdir()
-        monkeypatch.setattr(
-            platform, "_CONTAINERD_ROOT", tmp_path / "containerd"
-        )
+        monkeypatch.setattr(platform, "_CONTAINERD_ROOT", tmp_path / "containerd")
         monkeypatch.setattr(platform, "docker_info", _canned(_CONTAINERD_INFO))
         assert platform.docker_containerd_root() is None
     finally:
@@ -326,9 +320,7 @@ def test_preflight_skips_containerd_under_podman(
             port_conflicts=lambda: [],
             port_holders=lambda _ports: docker.PortHolders(),
             bind_port=lambda host, port: platform_module.PortBind(host, port, "free", ""),
-            probe_port=lambda host, port: platform_module.PortProbe(
-                host, port, "unknown", ""
-            ),
+            probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
         )
         assert (got.containerd_root, got.containerd_free) == (None, None)
         assert calls == [], "fake records the call; it must stay uncalled"
@@ -354,10 +346,13 @@ def test_port_refusal_reads_the_rootlessport_text() -> None:
 
 def test_port_refusal_still_reads_docker_wording() -> None:
     """Today's three patterns keep working beside the new one."""
-    assert "3724" in (docker._port_refusal(
-        "Error response from daemon: Bind for 0.0.0.0:3724 failed: "
-        "port is already allocated\n"
-    ) or "")
+    assert "3724" in (
+        docker._port_refusal(
+            "Error response from daemon: Bind for 0.0.0.0:3724 failed: "
+            "port is already allocated\n"
+        )
+        or ""
+    )
 
 
 # -- docker.daemon_identity ----------------------------------------------------

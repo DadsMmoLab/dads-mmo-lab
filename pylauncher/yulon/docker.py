@@ -508,9 +508,7 @@ _PORT_REFUSALS = (
     re.compile(r"Bind for \S*?:(\d+) failed: (?P<why>port is already allocated)"),
     # Rootless Podman through the Docker CLI (T887, spike Q6): the compat API
     # reports a taken port in rootlessport/pasta words, not Docker's.
-    re.compile(
-        r"rootlessport listen tcp \S*?:(\d+): bind: (?P<why>address already in use)"
-    ),
+    re.compile(r"rootlessport listen tcp \S*?:(\d+): bind: (?P<why>address already in use)"),
 )
 
 
