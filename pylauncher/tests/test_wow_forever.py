@@ -233,6 +233,33 @@ def test_an_install_fetches_the_tdb_and_extracts_from_the_client_read_only(
         text = (server_dir / name).read_text(encoding="utf-8")
         assert "{{" not in text
     assert "wowforever-world" in (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8")
+    base = (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8")
+    assert (server_dir / "sql" / HOTFIX_UPDATE).read_bytes() == SHIPPED_UPDATE.read_bytes()
+    assert f"./sql/{HOTFIX_UPDATE}:/opt/forever/src/sql/custom/hotfixes/{HOTFIX_UPDATE}:ro" in base
+
+
+HOTFIX_UPDATE = "2026_11_14_00_hotfixes_yulon_spell_x_spell_visual.sql"
+SHIPPED_UPDATE = (
+    Path(__file__).parent.parent / "catalog/installers/wow-forever/stack/files/sql" / HOTFIX_UPDATE
+)
+
+
+def test_the_shipped_hotfixes_update_gives_holy_strike_its_visual_rows_under_our_push() -> None:
+    """The 18 SpellXSpellVisual rows the 70888 client cannot read, Holy Strike's 8 among them."""
+    text = SHIPPED_UPDATE.read_text(encoding="utf-8")
+    assert chr(13) not in text
+    rows = [
+        line for line in text.splitlines() if line.startswith("REPLACE INTO `spell_x_spell_visual`")
+    ]
+    data = [line for line in text.splitlines() if line.startswith("REPLACE INTO `hotfix_data`")]
+    assert len(rows) == len(data) == 18
+    assert all(
+        line.startswith("REPLACE INTO `hotfix_data` VALUES (3100001,3100001,666345498,")
+        for line in data
+    )
+    holy = {int(r.split(",")[12]) for r in rows if ",190305," in r}
+    assert holy == {678, 679, 680, 1866, 2495, 5569, 10332, 10333}
+    assert all(line.startswith(("--", "REPLACE INTO ")) for line in text.splitlines() if line)
 
 
 def test_an_install_without_the_client_writes_nothing(tmp_path: Path) -> None:

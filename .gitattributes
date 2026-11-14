@@ -77,3 +77,5 @@ pylauncher/tests/data/azerothcore-wotlk-8a4e76ea/**           -text
 # mod-unbound's data/sql at the catalog pin, vendored byte for byte: `test_unbound_world_sql.py`
 # checks each file against the module's own MANIFEST.sha256, so no checkout may rewrite a byte.
 pylauncher/tests/fixtures/mod-unbound/**                      -text
+# Stack files are copied as they are into an install and mounted into Linux containers (stack_install._place_stack_files)
+pylauncher/catalog/installers/*/stack/files/**  text eol=lf

@@ -2342,6 +2342,13 @@ def _listing_sites(root: Path) -> set[tuple[str, str]]:
 
 
 _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("catalog/stack_install.py", "_place_stack_files"): (
+        "Stack installs (WoW Forever's hotfixes update). Lists the entry's own `stack/files/` "
+        "folder in the app's bundled installers -- never the player's -- to copy each file to "
+        "the same path in the install folder this install owns, rewriting only a file whose "
+        "content differs. A short listing leaves a file out, which the compose file's mount then "
+        "names as missing when the server starts; no other folder is written"
+    ),
     ("forever_keywatch.py", "_find_game"): (
         "WoW Forever on Linux. Lists `/proc` to find the player's own Wine process whose argv[0] "
         "is `...\\_forever_\\Wow.exe`, so the key watch can open its memory. It writes nothing on "

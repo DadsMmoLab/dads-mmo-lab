@@ -107,6 +107,9 @@ STACK_TEMPLATES: tuple[tuple[str, str], ...] = (
 )
 """The two compose files a stack renders, and their templates. No build overlay: none is built."""
 
+STACK_FILES = "files"
+"""Beside the templates: files copied as they are to the same paths in the install folder."""
+
 
 def stack_of(entry: SingleEntry) -> SingleStack:
     """The entry's `stack` block; refuses an entry of another runtime.
@@ -668,7 +671,29 @@ class StackInstaller:
                 continue
             target.write_text(text, encoding="utf-8", newline="\n")
             yield f"Wrote {target.name}"
+        yield from self._place_stack_files(template_dir / STACK_FILES, server_dir)
         yield "The compose files are in place."
+
+    def _place_stack_files(self, source: Path, server_dir: Path) -> Iterator[str]:
+        """Copy the entry's own files (`stack/files/...`) to the same paths in the install folder.
+
+        What the compose files mount beside the images: WoW Forever's hotfixes update, which
+        the world server's updater applies once from its custom folder. Rewritten only when
+        the content differs, so a later Yu'lon with a corrected file replaces the old one.
+        """
+        if not source.is_dir():
+            return
+        for path in sorted(p for p in source.rglob("*") if p.is_file()):
+            target = server_dir / path.relative_to(source)
+            data = path.read_bytes()
+            if target.is_file() and target.read_bytes() == data:
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            except OSError as exc:
+                raise InstallerError(f"{target} could not be written: {exc}") from exc
+            yield f"Wrote {target.relative_to(server_dir).as_posix()}"
 
     def _pull_images(
         self, server_dir: Path, state: native.InstallState, cancel: threading.Event | None

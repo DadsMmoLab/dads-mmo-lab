@@ -41,6 +41,8 @@ x-server: &server
     - ./downloads:/srv/downloads:ro
     - data:/srv/data
     - tdb:/srv/tdb
+    # Yu'lon's own hotfixes update (stack/files): the world server's DBUpdater applies it once
+    - ./sql/2026_11_14_00_hotfixes_yulon_spell_x_spell_visual.sql:/opt/forever/src/sql/custom/hotfixes/2026_11_14_00_hotfixes_yulon_spell_x_spell_visual.sql:ro
 
 x-after-prepare: &after-prepare
   database:
