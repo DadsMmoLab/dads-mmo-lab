@@ -402,7 +402,12 @@ def test_a_sql_writer_while_network_apply_holds_the_database_alone_is_refused(
 def test_a_backup_while_network_apply_holds_the_database_alone_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T885 R2: a Backup pressed during Apply's hold is refused before it stops the database."""
+    """T885 R2/R3: a Backup pressed during Apply is refused, with the Apply's own sentence.
+
+    R3: the refusal is the lease's (`MaintenanceLeaseTaken`), taken before the hold and before
+    the Backup touches the database -- mutation: drop the lease, and this is the hold's
+    `ServerHeldError` from the alone key instead.
+    """
     from yulon.ui import controller_view as view
 
     entered = threading.Event()
@@ -472,7 +477,7 @@ def test_a_backup_while_network_apply_holds_the_database_alone_is_refused(
         release.set()
         worker.join(timeout=30)
     assert not worker.is_alive() and not other.is_alive(), "a thread hung"
-    assert len(errors) == 1 and isinstance(errors[0], docker.ServerHeldError), errors
+    assert len(errors) == 1 and isinstance(errors[0], docker.MaintenanceLeaseTaken), errors
     assert str(errors[0]) == forgetting.NETWORK_APPLY_WRITES_ALONE, str(errors[0])
     assert "backup-ran" not in stops, stops
     assert "take_down" in stops, stops
@@ -641,6 +646,76 @@ def test_an_apply_while_another_press_holds_the_server_is_refused_before_it_star
             )
     assert "Create an account" in str(refused.value), str(refused.value)
     assert order == [] and applied == [], (order, applied)
+
+
+def test_two_applies_on_a_stopped_server_run_one_sequence_and_the_second_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885 R3: a second Apply in the same tab is refused while the first holds the databases.
+
+    Mutation: drop `docker.maintenance_lease()` from `_network_apply_with_the_database`.
+    Then both threads pass the hold's `alone` (which is keyed on the press), the second
+    `bring_up` runs beside the first, the first's `take_down` stops the database under the
+    second's UPDATE and its release deletes `_ALONE` under the second's (`KeyError`).
+    """
+    from yulon.ui import controller_view as view
+
+    started = threading.Event()
+    release = threading.Event()
+    sequence: list[str] = []
+
+    def bring_up(because: str) -> bool:
+        sequence.append("bring_up")
+        assert because == "the realm address was not changed", because
+        started.set()
+        assert release.wait(timeout=30), "the first Apply never finished its start"
+        return True
+
+    alone = view.DatabaseAlone(bring_up=bring_up, take_down=lambda: sequence.append("take_down"))
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    spec = CATALOG_WOTLK.container_spec()
+    refused: list[BaseException] = []
+
+    def run(collect: list[BaseException] | None) -> None:
+        try:
+            view._network_apply_with_the_database(
+                _LAN_PLAN,
+                sql=_Nothing(),  # type: ignore[arg-type]
+                server_dir=server_dir,
+                spec=spec,
+                wsl_distro=None,
+                alone=alone,
+            )
+        except BaseException as exc:  # noqa: BLE001 - the refusal is the assertion
+            if collect is not None:
+                collect.append(exc)
+            else:
+                raise
+
+    first = threading.Thread(target=run, args=(None,))
+    second = threading.Thread(target=run, args=(refused,))
+    first.start()
+    try:
+        assert started.wait(timeout=30), "the first Apply never reached its start"
+        second.start()
+        second.join(timeout=30)
+    finally:
+        release.set()
+        first.join(timeout=30)
+    assert not first.is_alive() and not second.is_alive(), "a thread hung"
+
+    assert len(refused) == 1, refused
+    assert isinstance(refused[0], docker.MaintenanceLeaseTaken), refused
+    assert not isinstance(refused[0], KeyError), refused
+    assert str(refused[0]) == forgetting.NETWORK_APPLY_WRITES_ALONE, str(refused[0])
+    assert sequence == ["bring_up", "take_down"], sequence
+    assert applied == [(_LAN_PLAN.realmlist_sql or "", None)], applied
+    key = docker._server_key(server_dir)
+    assert key not in docker._ALONE, docker._ALONE
+    assert key not in docker._LEASED, docker._LEASED
 
 
 def test_network_apply_whose_database_will_not_stop_keeps_the_applied_row(

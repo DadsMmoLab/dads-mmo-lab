@@ -30622,6 +30622,34 @@ def test_apply_on_a_stopped_server_says_next_start_not_restart(
     assert "Restart the server" not in shown, shown
 
 
+def test_a_plan_shown_during_an_apply_leaves_apply_disabled(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R3: "Show plan" during an Apply must not hand Apply back.
+
+    Mutation: `_plan_ready` enables Apply on a ready plan without checking
+    `_network_applying`, which is the press that overlapped the running one. Apply is
+    handed back when the job ends, which is what the second assertion pins.
+    """
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    during: list[bool] = []
+
+    def shows_the_plan_mid_apply(plan: NetworkPlan) -> NetworkReport:
+        view.show_network_plan()
+        during.append(view.apply_button.isEnabled())
+        return NetworkReport(plan, done=("realmlist → 192.168.1.25",), restart_required=True)
+
+    services.network_apply = shows_the_plan_mid_apply
+    view.show_network_plan()
+    assert view.apply_button.isEnabled()
+    view.apply_network_plan()
+    assert during == [False], during
+    assert view.apply_button.isEnabled(), "Apply was not handed back when the job ended"
+
+
 def test_apply_that_could_not_reach_the_database_says_the_choice_was_not_saved(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

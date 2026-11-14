@@ -3583,9 +3583,47 @@ def _network_apply_with_the_database(
     started alone, and it is stopped again afterwards — the shape `_back_up_under_the_lease`
     uses. `alone` also refuses a Backup pressed during Apply, which would otherwise have its
     database stopped mid-dump. `DbPasswordUnknown` is not caught: Apply ends in "did not finish".
+
+    **One Apply of this server at a time** (`docker.maintenance_lease()`, T885 round 3),
+    taken before the hold above, as the Restore takes its own. The hold's `alone` key is the
+    press, so a SECOND Apply in the same tab passes it -- "Show plan" re-enabled Apply
+    (`_plan_ready`) while the first ran, and `ThreadedJobRunner` put the second on its own
+    thread. Both then took the hold, the first's `take_down` stopped the database under the
+    second's UPDATE, its exit released `alone` for a Backup to slip in, and the second's
+    release raised KeyError. Refused here, a second Apply (and anything else that wants the
+    lease) is told the first one's existing sentence and runs none of this.
+
+    Raises:
+        docker.MaintenanceLeaseTaken: another Backup, Restore or Apply of this server holds
+            the databases; its message is the holder's sentence.
     """
     if plan.realmlist_sql is None:
         return networking.apply(plan, sql=sql, server_dir=server_dir)
+    with contextlib.ExitStack() as leased:
+        leased.enter_context(
+            docker.maintenance_lease(
+                server_dir,
+                forgetting.NETWORK_APPLY_WRITES_ALONE,
+                press="Apply the network plan",
+                spec=spec,
+                wsl_distro=wsl_distro,
+            )
+        )
+        return _network_apply_under_the_lease(
+            plan, sql=sql, server_dir=server_dir, spec=spec, wsl_distro=wsl_distro, alone=alone
+        )
+
+
+def _network_apply_under_the_lease(
+    plan: NetworkPlan,
+    *,
+    sql: DockerSql,
+    server_dir: Path,
+    spec: docker.ContainerSpec,
+    wsl_distro: str | None,
+    alone: DatabaseAlone,
+) -> NetworkReport:
+    """`_network_apply_with_the_database()`'s work, once it holds the databases (worker thread)."""
     with docker.hold_the_server(
         server_dir,
         forgetting.NETWORK_APPLY_HOLDS_THE_SERVER,
@@ -26435,7 +26473,15 @@ class ControllerView(QWidget):
         self._plan = result
         self.network_text.setPlainText(_format_plan(result))
         self.network_details.set_text(_plan_details(result))
-        set_enabled_why(self.apply_button, None if result.ready else NETWORK_PLAN_NOT_READY)
+        # T885 round 3: a plan shown while an Apply is running must not hand Apply back:
+        # a second press passed the hold, the first one's take_down then stopped the
+        # database under its UPDATE. `_apply_done`/`_apply_failed` re-enable it.
+        if not result.ready:
+            set_enabled_why(self.apply_button, NETWORK_PLAN_NOT_READY)
+        elif self._network_applying:
+            set_enabled_why(self.apply_button, wait_for("Apply"))
+        else:
+            set_enabled_why(self.apply_button, None)
 
     @Slot(object)
     def _plan_failed(self, exc: object) -> None:
