@@ -92,6 +92,10 @@ BACKUP_HOLDS_THE_SERVER = (
     "on its own for it, and the database is stopped again when the backup ends. Wait for "
     "the backup to finish, then try again. Nothing was started or stopped."
 )
+NETWORK_APPLY_HOLDS_THE_SERVER = (
+    "Yu'lon started this server's database to change who can connect, and stops "
+    "it again in a moment."
+)
 # What a Backup or Restore refused by `docker.maintenance_lease()` is told: the running job's
 # own sentence, to which the refused one adds what it did not do (T216 review round 3).
 BACKUP_HOLDS_THE_DATABASES = (

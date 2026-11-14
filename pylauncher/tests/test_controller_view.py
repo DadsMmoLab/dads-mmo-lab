@@ -30598,6 +30598,48 @@ def test_a_plan_or_apply_that_fails_says_so_in_a_sentence(
     assert view.network_details.collapsed and not view.network_details.isHidden()
 
 
+def test_apply_on_a_stopped_server_says_next_start_not_restart(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885: Apply that started the database alone says the next Start picks the address up."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    plan = _netsh_plan("lan")
+    outcome = NetworkReport(
+        plan,
+        done=("realmlist → 192.168.1.25",),
+        restart_required=True,
+        applied_while_stopped=True,
+    )
+    services.network_apply = lambda p: outcome
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    view.apply_network_plan()
+    shown = view.network_text.toPlainText()
+    assert "The realm list now gives players 192.168.1.25." in shown, shown
+    assert "The server was stopped, so the new address is used from its next Start." in shown, shown
+    assert "Restart the server" not in shown, shown
+
+
+def test_apply_that_could_not_reach_the_database_says_the_choice_was_not_saved(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885: an unreached database says the choice was not saved, and offers the retry."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    plan = _netsh_plan("lan")
+    why = "realmlist not updated: the database would not start"
+    outcome = NetworkReport(plan, skipped=(why,), realm_unchanged=why)
+    services.network_apply = lambda p: outcome
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    view.apply_network_plan()
+    shown = view.network_text.toPlainText()
+    assert "The realm address was not changed, so this choice was not saved:" in shown, shown
+    assert "Apply it again once the server can start." in shown, shown
+    assert "The realm list now gives players" not in shown, shown
+
+
 def test_an_apply_that_breaks_in_docker_keeps_dockers_words_off_the_screen(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

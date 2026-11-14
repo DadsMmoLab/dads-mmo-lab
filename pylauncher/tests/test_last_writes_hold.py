@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +23,19 @@ from tests.support_fake_docker import end_fake_containers, lay_fake_docker
 from tests.test_controller_view import _Ps
 from tests.test_more_writes_hold import CATALOG_WOTLK, HELD, _Hold, _Nothing
 from yulon import bot_population as botpop
-from yulon import docker, networking, platform, purge, reset_defaults, server_time_zone
+from yulon import docker, forgetting, networking, platform, purge, reset_defaults, server_time_zone
 from yulon.catalog.catalog import load_catalog
 from yulon.ui import controller_view as controller_view_module
+
+_LAN_PLAN = networking.plan(
+    CATALOG_WOTLK,
+    "lan",
+    lan_ip="192.168.1.25",
+    firewall="none",
+    steamos=False,
+    wsl=False,
+)
+"""A plan WITH a realm step, so Apply takes the database path (T885)."""
 
 
 @pytest.fixture
@@ -96,7 +107,7 @@ def test_networking_apply_while_another_yulon_holds_the_server_applies_nothing(
     theirs = _held_by_another_yulon(fake_docker, server)
     try:
         with pytest.raises(docker.ServerReserved) as refused:
-            services.network_apply(object())  # type: ignore[arg-type]
+            services.network_apply(replace(_LAN_PLAN, realmlist_sql=None))  # type: ignore[arg-type]
         assert HOLDER_PRESS in str(refused.value)
         assert "Apply the network plan" in str(refused.value)
     finally:
@@ -109,9 +120,245 @@ def test_networking_apply_runs_when_nobody_holds_the_server(
 ) -> None:
     applied: list[object] = []
     monkeypatch.setattr(networking, "apply", lambda plan, **_kw: applied.append(plan) or "report")
-    plan = object()
+    plan = replace(_LAN_PLAN, realmlist_sql=None)
     assert _assembled(server).network_apply(plan) == "report"  # type: ignore[arg-type]
     assert applied == [plan]
+
+
+class _Alone:
+    """A DatabaseAlone double that records bring_up/take_down (T885)."""
+
+    def __init__(self, *, start: bool | BaseException = True) -> None:
+        self.order: list[str] = []
+        self._start = start
+
+    def bring_up(self, because: str) -> bool:
+        self.order.append("bring_up")
+        assert because == "the realm address was not changed", because
+        if isinstance(self._start, BaseException):
+            raise self._start
+        assert isinstance(self._start, bool)
+        return self._start
+
+    def take_down(self) -> None:
+        self.order.append("take_down")
+
+
+def _held_calls(order: list[str], *args: object, **kwargs: object) -> object:
+    """The `hold_the_server` seam, recording its take (T885)."""
+
+    class _Hold:
+        def __enter__(self) -> None:
+            order.append("hold")
+            return None
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    order.append("hold-taken")
+    reason = kwargs.get("reason", args[1] if len(args) > 1 else None)
+    assert kwargs.get("press") == "Apply the network plan", kwargs
+    assert reason == forgetting.NETWORK_APPLY_HOLDS_THE_SERVER, (args, kwargs)
+    return _Hold()
+
+
+def _recording_apply(
+    monkeypatch: pytest.MonkeyPatch, applied: list[tuple[str, str | None]]
+) -> None:
+    """`networking.apply` recording its realm_refusal and answering applied (T885)."""
+    from yulon.networking import NetworkPlan, NetworkReport
+
+    def recording(plan: NetworkPlan, **kw: object) -> NetworkReport:
+        refusal = kw.get("realm_refusal")
+        assert isinstance(refusal, str | None)
+        applied.append((plan.realmlist_sql or "", refusal))
+        if refusal is not None:
+            skipped = f"realmlist not updated: {refusal}"
+            return NetworkReport(plan, skipped=(skipped,), realm_unchanged=skipped)
+        return NetworkReport(plan, done=("realmlist \u2192 1.2.3.4",), restart_required=True)
+
+    monkeypatch.setattr(networking, "apply", recording)
+
+
+def test_network_apply_on_a_stopped_server_starts_the_database_alone_and_stops_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: stopped server — bring_up, apply, take_down; flagged on the report."""
+    from yulon.ui import controller_view as view
+
+    alone = _Alone(start=True)
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=alone.take_down)
+    event_order: list[str] = []
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+    monkeypatch.setattr(
+        view.docker, "hold_the_server", lambda *a, **k: _held_calls(event_order, *a, **k)
+    )
+    server_dir = tmp_path / "server"
+
+    report = view._network_apply_with_the_database(
+        _LAN_PLAN,
+        sql=_Nothing(),  # type: ignore[arg-type]
+        server_dir=server_dir,
+        spec=CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+        alone=doubles,
+    )
+    assert event_order[:2] == ["hold-taken", "hold"], event_order
+    assert alone.order == ["bring_up", "take_down"], alone.order
+    assert applied == [(_LAN_PLAN.realmlist_sql or "", None)], applied
+    assert report.applied_while_stopped is True
+    assert report.database_note == ""
+    assert report.restart_required is True
+
+
+def test_network_apply_on_a_running_database_stops_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: bring_up False — take_down never called, no stopped flag."""
+    from yulon.ui import controller_view as view
+
+    alone = _Alone(start=False)
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=alone.take_down)
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+
+    report = view._network_apply_with_the_database(
+        _LAN_PLAN,
+        sql=_Nothing(),  # type: ignore[arg-type]
+        server_dir=tmp_path / "server",
+        spec=CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+        alone=doubles,
+    )
+    assert alone.order == ["bring_up"], alone.order
+    assert applied == [(_LAN_PLAN.realmlist_sql or "", None)], applied
+    assert report.applied_while_stopped is False
+
+
+def test_network_apply_whose_database_will_not_start_records_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: bring_up raises — apply gets realm_refusal, no intent file."""
+    from yulon.ui import controller_view as view
+
+    boom = docker.DockerCommandError("the database would not start")
+    alone = _Alone(start=boom)
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=alone.take_down)
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+
+    report = view._network_apply_with_the_database(
+        _LAN_PLAN,
+        sql=_Nothing(),  # type: ignore[arg-type]
+        server_dir=server_dir,
+        spec=CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+        alone=doubles,
+    )
+    assert alone.order == ["bring_up"], alone.order
+    assert applied == [(_LAN_PLAN.realmlist_sql or "", "the database would not start")], applied
+    assert report.realm_unchanged == "realmlist not updated: the database would not start"
+    assert not list(server_dir.iterdir()), "a refused start recorded an intent"
+    assert report.applied_while_stopped is False
+
+
+def test_network_apply_during_a_start_in_motion_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: a Start in flight — ServerHeldError; bring_up not called."""
+    from yulon.ui import controller_view as view
+
+    alone = _Alone(start=True)
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=alone.take_down)
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    key = docker._server_key(server_dir)
+    docker._IN_FLIGHT[key] = docker._IN_FLIGHT.get(key, 0) + 1
+    try:
+        with pytest.raises(docker.ServerHeldError):
+            view._network_apply_with_the_database(
+                _LAN_PLAN,
+                sql=_Nothing(),  # type: ignore[arg-type]
+                server_dir=server_dir,
+                spec=CATALOG_WOTLK.container_spec(),
+                wsl_distro=None,
+                alone=doubles,
+            )
+    finally:
+        left = docker._IN_FLIGHT[key] - 1
+        if left:
+            docker._IN_FLIGHT[key] = left
+        else:
+            del docker._IN_FLIGHT[key]
+    assert alone.order == [], alone.order
+    assert applied == [], applied
+
+
+def test_network_apply_without_a_realm_row_starts_no_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: realmlist_sql None — bring_up not called, plain apply."""
+    from yulon.ui import controller_view as view
+
+    alone = _Alone(start=True)
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=alone.take_down)
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+    no_realm = replace(_LAN_PLAN, realmlist_sql=None)
+    monkeypatch.setattr(
+        networking,
+        "apply",
+        lambda plan, **_kw: applied.append(("realm" if plan.realmlist_sql else "none", None))
+        or networking.NetworkReport(plan),
+    )
+
+    report = view._network_apply_with_the_database(
+        no_realm,
+        sql=None,  # type: ignore[arg-type]
+        server_dir=tmp_path / "server",
+        spec=CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+        alone=doubles,
+    )
+    assert alone.order == [], alone.order
+    assert applied == [("none", None)], applied
+    assert report.applied_while_stopped is False
+
+
+def test_network_apply_whose_database_will_not_stop_keeps_the_applied_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: take_down raises — the realm step stands, database_note set."""
+    from yulon.ui import controller_view as view
+
+    alone = _Alone(start=True)
+
+    def failing_take_down() -> None:
+        alone.order.append("take_down")
+        raise docker.DockerCommandError("cannot stop ac-database")
+
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=failing_take_down)
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+
+    report = view._network_apply_with_the_database(
+        _LAN_PLAN,
+        sql=_Nothing(),  # type: ignore[arg-type]
+        server_dir=tmp_path / "server",
+        spec=CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+        alone=doubles,
+    )
+    assert alone.order == ["bring_up", "take_down"], alone.order
+    assert applied == [(_LAN_PLAN.realmlist_sql or "", None)], applied
+    assert "realmlist → 1.2.3.4" in report.done, report
+    assert report.applied_while_stopped is True
+    assert "could not be stopped again" in report.database_note, report.database_note
 
 
 def test_the_time_zone_write_while_another_yulon_holds_the_server_writes_nothing(

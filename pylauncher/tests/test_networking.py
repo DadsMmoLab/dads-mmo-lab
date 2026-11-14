@@ -7211,6 +7211,48 @@ def test_apply_remembers_the_chosen_address_only_once_the_realm_row_is_written(
     assert intent is not None and (intent.mode, intent.address) == ("lan", VPN_ADDRESS)
 
 
+def test_a_failed_realmlist_update_says_the_choice_was_not_saved(tmp_path: Path) -> None:
+    """T885: a failed UPDATE says the choice was not saved, and records no intent."""
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.25",
+        firewall="none",
+        steamos=False,
+        wsl=False,
+    )
+    report = networking.apply(p, sql=_FailingSql(), server_dir=tmp_path)
+    assert report.realm_unchanged, "the lost choice went unnamed"
+    assert any("realmlist not updated" in s for s in report.skipped)
+    assert networking.INTENT_FILE not in {p.name for p in tmp_path.iterdir()}
+    assert report.restart_required is False
+
+
+def test_a_realm_refusal_runs_the_firewall_and_records_nothing(tmp_path: Path) -> None:
+    """T885: a refused database start still opens the ports, sends no UPDATE, records nothing."""
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.25",
+        firewall="ufw",
+        steamos=False,
+        wsl=False,
+    )
+    sql = _RecordingSql()
+    report = networking.apply(
+        p,
+        sql=sql,
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+        server_dir=tmp_path,
+        realm_refusal="the database would not start",
+    )
+    assert report.done, "the firewall half stopped with the realm half"
+    assert sql.statements == [], "a refused start still sent the UPDATE"
+    assert report.realm_unchanged == "realmlist not updated: the database would not start"
+    assert any("realmlist not updated" in s for s in report.skipped)
+    assert networking.INTENT_FILE not in {p.name for p in tmp_path.iterdir()}
+
+
 IP_ADDR_OUT = (
     "1: lo    inet 127.0.0.1/8 scope host lo\n"
     "2: enp0s31f6    inet 192.168.1.5/24 brd 192.168.1.255 scope global dynamic enp0s31f6\n"

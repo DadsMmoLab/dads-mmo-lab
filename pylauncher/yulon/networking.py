@@ -3413,6 +3413,17 @@ class NetworkReport:
     wants the refusals apart from the failures, and `skipped` is for the caller
     that only ever reads one list.
     """
+    realm_unchanged: str = ""
+    """Why the realm step did not go through, when it did not (T885).
+
+    Set when `realmlist_sql` exists but the UPDATE was not sent or failed: a
+    refusal, no DB access, or an `ApplyError`. Empty when the realm step went
+    through, or when the plan had no realm step at all.
+    """
+    applied_while_stopped: bool = False
+    """Whether Apply started the database alone for the realm step (T885)."""
+    database_note: str = ""
+    """The stop note for a database Apply started alone and could not stop (T885)."""
 
     @property
     def manual_steps(self) -> tuple[str, ...]:
@@ -4652,6 +4663,7 @@ def apply(
     run: Runner | None = None,
     elevate: bool = True,
     server_dir: Path | None = None,
+    realm_refusal: str | None = None,
 ) -> NetworkReport:
     """Execute the automatable part of `network_plan`; report the rest by name.
 
@@ -4680,6 +4692,10 @@ def apply(
     Defaulted to None, which records nothing, because every caller that only
     wants the firewall half of a plan (and every test that predates §41) passes
     no directory.
+
+    `realm_refusal` (T885) says why the realm step was not attempted: the
+    database could not be started alone, so the UPDATE is not sent and the
+    intent is not recorded. The firewall half still runs.
     """
     do = run if run is not None else (lambda argv: runner.run(argv))
     done: list[str] = []
@@ -4782,9 +4798,14 @@ def apply(
             )
 
     restart = False
+    realm_unchanged = ""
     if network_plan.realmlist_sql is not None:
         if sql is None:
-            skipped.append(f"realmlist not updated (no DB access): {network_plan.realmlist_sql}")
+            realm_unchanged = f"realmlist not updated (no DB access): {network_plan.realmlist_sql}"
+            skipped.append(realm_unchanged)
+        elif realm_refusal is not None:
+            realm_unchanged = f"realmlist not updated: {realm_refusal}"
+            skipped.append(realm_unchanged)
         else:
             try:
                 sql.run_statement("auth", network_plan.realmlist_sql)
@@ -4795,7 +4816,8 @@ def apply(
                 # the rules that HAD been applied — so a user whose realmlist
                 # update failed was also not told which ports were now open, nor
                 # which command to retry by hand (Discord report, 2026-08-26).
-                skipped.append(f"realmlist not updated: {exc}")
+                realm_unchanged = f"realmlist not updated: {exc}"
+                skipped.append(realm_unchanged)
             else:
                 done.append(f"realmlist → {network_plan.client_realmlist}")
                 restart = True
@@ -4822,6 +4844,7 @@ def apply(
         skipped=tuple(skipped),
         restart_required=restart,
         refusals=tuple(refusals),
+        realm_unchanged=realm_unchanged,
     )
 
 

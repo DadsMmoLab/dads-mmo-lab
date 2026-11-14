@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - The Accounts tab says when a recent login used a wrong password, and names the button Set password needs.
 - Networking: the realm name is read again once the server is up.
 - Support files now list this computer's addresses and the address each realm tells players.
+- Networking: **Apply** on a stopped server starts only the database to change who can connect, then stops it again.
 
 ### Changed
 

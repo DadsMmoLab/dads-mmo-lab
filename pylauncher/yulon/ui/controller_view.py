@@ -3566,6 +3566,43 @@ def _database_alone(
     )
 
 
+def _network_apply_with_the_database(
+    plan: NetworkPlan,
+    *,
+    sql: DockerSql,
+    server_dir: Path,
+    spec: docker.ContainerSpec,
+    wsl_distro: str | None,
+    alone: DatabaseAlone,
+) -> NetworkReport:
+    """Apply the network plan, starting the database alone when the realm step needs it (T885).
+
+    A plan with no `realmlist_sql` needs no database, so it applies as today.
+    Otherwise the apply runs inside `docker.hold_the_server` (a Start pressed in
+    between would have its database stopped under its world), the database is
+    started alone, and it is stopped again afterwards — the shape `_back_up_under_the_lease`
+    uses. `DbPasswordUnknown` is not caught: Apply ends in "did not finish".
+    """
+    if plan.realmlist_sql is None:
+        return networking.apply(plan, sql=sql, server_dir=server_dir)
+    with docker.hold_the_server(
+        server_dir,
+        forgetting.NETWORK_APPLY_HOLDS_THE_SERVER,
+        press="Apply the network plan",
+        spec=spec,
+        wsl_distro=wsl_distro,
+    ):
+        try:
+            started = alone.bring_up("the realm address was not changed")
+        except docker.DockerCommandError as exc:
+            return networking.apply(plan, sql=sql, server_dir=server_dir, realm_refusal=str(exc))
+        if not started:
+            return networking.apply(plan, sql=sql, server_dir=server_dir)
+        put = _put_back_after(lambda: networking.apply(plan, sql=sql, server_dir=server_dir), alone)
+        result = cast(NetworkReport, put.result)
+        return replace(result, applied_while_stopped=True, database_note=put.stop_note or "")
+
+
 def _move_services(
     entry: CatalogEntry,
     server_dir: Path,
@@ -3874,10 +3911,18 @@ def _assemble(
             entry, mode, bindings=_safe_bindings(wsl_distro=wsl_distro)
         ),
         # T622: the realmlist row and the applied mode's file are written under the server's hold.
+        # T885: on a stopped server the database is started alone for the UPDATE, then stopped.
         network_apply=_under_the_hold(
             _server_hold_for(entry, server_dir, spec, wsl_distro=wsl_distro),
             "Apply the network plan",
-            lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
+            lambda plan: _network_apply_with_the_database(
+                plan,
+                sql=sql,
+                server_dir=server_dir,
+                spec=spec,
+                wsl_distro=wsl_distro,
+                alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
+            ),
         ),
         # T808: the realm name; the write goes under the same hold as the network apply.
         # None on a realm-type entry (CoA): there the realm type's switch writes the name.
@@ -26919,6 +26964,8 @@ def _format_network_report(report: NetworkReport) -> str:
 
     Fix round 1, M3: `done` is the commands that ran and `skipped` is the ones
     that did not (and the realmlist SQL), each spelled as the command itself.
+    T885: a realm step that did not go through says the choice was not saved;
+    one Apply started the database alone for says the next Start picks it up.
     """
     total = len(report.done) + len(report.skipped)
     if total == 0:
@@ -26930,9 +26977,19 @@ def _format_network_report(report: NetworkReport) -> str:
             f"{len(report.skipped)} could not be done; Details lists them, with what to run "
             "by hand."
         )
+    if report.realm_unchanged:
+        lines.append(
+            "The realm address was not changed, so this choice was not saved: "
+            f"{report.realm_unchanged} Apply it again once the server can start."
+        )
     if report.restart_required:
         lines.append(f"The realm list now gives players {report.plan.client_realmlist}.")
-        lines.append("⚠ Restart the server so it hands out the new address.")
+        if report.applied_while_stopped:
+            lines.append("The server was stopped, so the new address is used from its next Start.")
+        else:
+            lines.append("⚠ Restart the server so it hands out the new address.")
+    if report.database_note:
+        lines.append(report.database_note)
     return "\n".join(lines)
 
 
