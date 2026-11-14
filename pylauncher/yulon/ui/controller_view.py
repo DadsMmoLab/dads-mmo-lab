@@ -3603,7 +3603,7 @@ def _network_apply_with_the_database(
         leased.enter_context(
             docker.maintenance_lease(
                 server_dir,
-                forgetting.NETWORK_APPLY_WRITES_ALONE,
+                forgetting.NETWORK_APPLY_HOLDS_THE_DATABASES,
                 press="Apply the network plan",
                 spec=spec,
                 wsl_distro=wsl_distro,
@@ -26493,11 +26493,25 @@ class ControllerView(QWidget):
     @Slot()
     def apply_network_plan(self) -> None:
         plan = self._plan
-        if plan is None:
+        # T885 round 4: a plan that is not ready has Apply greyed with its reason; a press by
+        # another road must not run it either.
+        if plan is None or not plan.ready:
             return
         set_enabled_why(self.apply_button, wait_for("Apply"))
         self._network_applying = True  # T95: `forget_refusal()` reads it
         self._run(lambda: self.services.network_apply(plan), self._apply_done, self._apply_failed)
+
+    def _rearm_apply(self) -> None:
+        """Give Apply back after a job, with `_plan_ready`'s reason if the plan says so (T885 R4).
+
+        A plan shown while an Apply ran re-enabled Apply whatever the view was doing; here
+        the plan's `ready` decides, so a plan that arrived without an address leaves Apply
+        grey with its reason instead of live over a plan that cannot run.
+        """
+        set_enabled_why(
+            self.apply_button,
+            None if self._plan is not None and self._plan.ready else NETWORK_PLAN_NOT_READY,
+        )
 
     @Slot(object)
     def _apply_done(self, result: object) -> None:
@@ -26507,24 +26521,25 @@ class ControllerView(QWidget):
             # The plan's commands, then what became of each one (fix round 1, M3).
             held = [_plan_details(result.plan), _network_report_details(result)]
             self.network_details.set_text("\n\n".join(part for part in held if part))
-        self.apply_button.setEnabled(True)
+        self._rearm_apply()
 
     @Slot(object)
     def _apply_failed(self, exc: object) -> None:
         """Said in words; what broke goes in Details, folded, and to the app log (T194 F7)."""
         self._network_applying = False
-        if isinstance(exc, docker.ServerHeldError):
-            # Another Yu'lon is working on this server (T622): its own sentence, nothing applied.
+        if isinstance(exc, (docker.ServerHeldError, docker.MaintenanceLeaseTaken)):
+            # Another Yu'lon is working on this server (T622), or a job of this one holds the
+            # databases (T885 R4): its own sentence, nothing applied.
             self.network_text.appendPlainText("\n" + str(exc))
             self.action_failed.emit(str(exc))
-            self.apply_button.setEnabled(True)
+            self._rearm_apply()
             return
         self.network_text.appendPlainText("\n" + APPLY_DID_NOT_FINISH)
         plan = self._plan
         held = [_plan_details(plan) if plan is not None else "", f"What went wrong: {exc}"]
         self.network_details.set_text("\n\n".join(part for part in held if part))
         self.action_failed.emit(str(exc))
-        self.apply_button.setEnabled(True)
+        self._rearm_apply()
 
     # -------------------------------------------------------- context menus
 

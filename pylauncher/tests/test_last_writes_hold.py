@@ -478,7 +478,7 @@ def test_a_backup_while_network_apply_holds_the_database_alone_is_refused(
         worker.join(timeout=30)
     assert not worker.is_alive() and not other.is_alive(), "a thread hung"
     assert len(errors) == 1 and isinstance(errors[0], docker.MaintenanceLeaseTaken), errors
-    assert str(errors[0]) == forgetting.NETWORK_APPLY_WRITES_ALONE, str(errors[0])
+    assert str(errors[0]) == forgetting.NETWORK_APPLY_HOLDS_THE_DATABASES, str(errors[0])
     assert "backup-ran" not in stops, stops
     assert "take_down" in stops, stops
     assert dict(docker._LEASED) == before, "the refused Backup left the lease taken"
@@ -710,7 +710,7 @@ def test_two_applies_on_a_stopped_server_run_one_sequence_and_the_second_is_refu
     assert len(refused) == 1, refused
     assert isinstance(refused[0], docker.MaintenanceLeaseTaken), refused
     assert not isinstance(refused[0], KeyError), refused
-    assert str(refused[0]) == forgetting.NETWORK_APPLY_WRITES_ALONE, str(refused[0])
+    assert str(refused[0]) == forgetting.NETWORK_APPLY_HOLDS_THE_DATABASES, str(refused[0])
     assert sequence == ["bring_up", "take_down"], sequence
     assert applied == [(_LAN_PLAN.realmlist_sql or "", None)], applied
     key = docker._server_key(server_dir)

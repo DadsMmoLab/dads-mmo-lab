@@ -98,7 +98,7 @@ NETWORK_APPLY_HOLDS_THE_SERVER = (
 )
 # T885 round 2: what every other press of this Yu'lon is told while Apply holds the
 # database alone (`docker.hold_the_server(alone=...)`): a Modules job's SQL, an
-# account, a Backup's maintenance lease. Nothing it would have written was written.
+# account. Nothing it would have written was written.
 NETWORK_APPLY_WRITES_ALONE = (
     "A network change is being applied on this server's Networking tab, and "
     "nothing else may write to its databases until it has finished. Wait for the "
@@ -106,8 +106,8 @@ NETWORK_APPLY_WRITES_ALONE = (
 )
 
 
-# What a Backup or Restore refused by `docker.maintenance_lease()` is told: the running job's
-# own sentence, to which the refused one adds what it did not do (T216 review round 3).
+# What a Backup, Restore or Apply refused by `docker.maintenance_lease()` is told: the running
+# job's own sentence, to which the refused one adds what it did not do (T216 review round 3).
 BACKUP_HOLDS_THE_DATABASES = (
     f"A backup of this server is running on its {MAINTENANCE_TAB} tab. Wait for it to "
     "finish, then try again."
@@ -115,6 +115,10 @@ BACKUP_HOLDS_THE_DATABASES = (
 RESTORE_HOLDS_THE_DATABASES = (
     f"A restore is writing into this server's databases on its {MAINTENANCE_TAB} tab. Wait "
     "for it to finish, then try again."
+)
+NETWORK_APPLY_HOLDS_THE_DATABASES = (
+    f"A network change is being applied on this server's {MAINTENANCE_TAB} tab. Wait for it "
+    "to finish, then try again."
 )
 # T681: what every other press of this Yu'lon that would write to the server is told while a
 # Restore loads (`docker.hold_the_server(alone=...)`): a Modules job's SQL, an account, a network

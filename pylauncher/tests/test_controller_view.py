@@ -30650,6 +30650,70 @@ def test_a_plan_shown_during_an_apply_leaves_apply_disabled(
     assert view.apply_button.isEnabled(), "Apply was not handed back when the job ended"
 
 
+def test_an_apply_refused_by_the_database_lease_says_the_holders_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R4: a lease refusal read "Apply did not finish" and folded the one sentence.
+
+    Mutation: drop `MaintenanceLeaseTaken` from `_apply_failed`'s `isinstance`.
+    """
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+
+    view._apply_failed(docker.MaintenanceLeaseTaken("X"))
+
+    shown = view.network_text.toPlainText()
+    assert "X" in shown, shown
+    assert controller_view_module.APPLY_DID_NOT_FINISH not in shown, shown
+    assert view.apply_button.isEnabled(), "a ready plan was left unpressable"
+
+
+def test_an_apply_that_ends_over_a_not_ready_plan_leaves_apply_disabled(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R4: both endings handed Apply back whatever the plan now in hand said.
+
+    Mutation: `_rearm_apply`'s body replaced by `self.apply_button.setEnabled(True)`.
+    """
+    not_ready = replace(_netsh_plan("lan"), lan_ip=None)
+    assert not not_ready.ready
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    applied: list[str] = []
+
+    def ends_well(plan: NetworkPlan) -> NetworkReport:
+        applied.append("done")
+        view._plan_ready(not_ready)
+        return NetworkReport(plan, done=("realmlist → 192.168.1.25",), restart_required=True)
+
+    services.network_apply = ends_well
+    view.show_network_plan()
+    view.apply_network_plan()
+    assert applied == ["done"], applied
+    assert not view.apply_button.isEnabled(), "_apply_done left a not-ready plan's Apply live"
+    view.apply_network_plan()
+    assert applied == ["done"], "a plan that is not ready was applied anyway"
+
+    services2 = _services(ps, tmp_path, [])
+    services2.network_plan = _netsh_plan
+    view2 = ControllerView(WOTLK, services2, status_poll_ms=0)
+    broke: list[str] = []
+
+    def ends_badly(plan: NetworkPlan) -> NetworkReport:
+        broke.append("boom")
+        view2._plan_ready(not_ready)
+        raise RuntimeError("the UPDATE failed")
+
+    services2.network_apply = ends_badly
+    view2.show_network_plan()
+    view2.apply_network_plan()
+    assert broke == ["boom"], broke
+    assert not view2.apply_button.isEnabled(), "_apply_failed left a not-ready plan's Apply live"
+
+
 def test_apply_that_could_not_reach_the_database_says_the_choice_was_not_saved(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
