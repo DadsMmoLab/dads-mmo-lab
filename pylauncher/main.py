@@ -2924,6 +2924,9 @@ def main() -> int:
 
         print(__version__)
         return 0
+    from yulon import engine as engine_seam
+
+    engine_seam.apply_docker_host()
     configure(config_dir=platform.config_dir())
     _regain_docker_group()
     if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):

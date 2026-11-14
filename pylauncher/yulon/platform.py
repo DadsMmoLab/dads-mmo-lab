@@ -1643,13 +1643,24 @@ def docker_programs() -> tuple[str, ...]:
     Both cost microseconds next to the process spawn they precede.
 
     Nothing is cached. The value is meant to change underneath us — that is the
-    entire point — so `_wait_docker_ready()`'s poll re-asks every few seconds
-    and picks up the PATH entry the installer writes mid-wait.
+    entire point — so `_wait_docker_ready()`'s poll re-asks every few seconds and
+    picks up the PATH entry the installer writes mid-wait.
+
+    Under Podman (T887, developer switch only) the downloaded client in
+    `engine.client_dir()` comes first when it is there, because a Podman host
+    has no system `docker` and the CLI Yu'lon fetched is the one that must be
+    found. PATH's own `docker` stays behind it as the fallback.
     """
     here = detect()
     if here == "macos":
         return ("docker", *_macos_docker_programs())
     if here != "windows":
+        from yulon import engine as engine_seam
+
+        if engine_seam.is_podman():
+            client = engine_seam.client_dir() / "docker"
+            if client.is_file():
+                return (str(client), "docker")
         return ("docker",)
     return ("docker", *_windows_docker_programs())
 
@@ -3325,7 +3336,15 @@ def container_user_args(*, platform_id: Callable[[], PlatformId] = detect) -> li
     Note for callers: `platform_id`'s default is bound at import, so a test that
     replaces `platform.detect` is NOT seen here. Pass the seam through
     explicitly if you need one — `git.ContainerGit._user_args()` does.
+
+    Under Podman (T887, developer switch only) this is `[]`: the image runs as
+    root there and `--user uid:gid` would map the bind writer into a subuid the
+    player cannot delete, the same trap `composegen.container_user()` avoids.
     """
+    from yulon import engine as engine_seam
+
+    if engine_seam.is_podman():
+        return []
     if platform_id() != "linux":
         return []
     getuid = getattr(os, "getuid", None)
@@ -6027,7 +6046,14 @@ def docker_containerd_root(run: RunCmd | None = None) -> Path | None:
     directory — every one of those keeps today's answer, which is the data
     root's free space. It never falls back to `DockerRootDir` with a *number*
     for containerd: a path that cannot be read is not a zero.
+
+    Under Podman (T887, developer switch only) this is None: Podman has no
+    containerd store, so T884's check must not fire.
     """
+    from yulon import engine as engine_seam
+
+    if engine_seam.is_podman():
+        return None
     info = docker_info(run)
     if info is None:
         return None
