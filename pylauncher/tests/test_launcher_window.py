@@ -956,7 +956,7 @@ def test_the_addons_in_the_client_are_listed_and_their_folder_opens(
 def test_an_address_other_than_the_one_the_realm_announces_is_hinted_and_play_stays(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    answer = ServerReading(accounts=(), online=UP, announced="192.168.1.20")
+    answer = ServerReading(accounts=(), online=UP, announced="192.168.1.20", announced_held=True)
     window, view, _ = _launcher(ps, tmp_path, answer=answer)
     assert window.realm_mismatch_label.isHidden(), "hinted before the realm row was read"
 
@@ -968,6 +968,71 @@ def test_an_address_other_than_the_one_the_realm_announces_is_hinted_and_play_st
 
     _type_address(window, "192.168.1.20")
     assert window.realm_mismatch_label.isHidden()
+
+
+def test_the_mismatch_line_says_play_cannot_reach_an_address_this_computer_does_not_hold(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T881 A: "PLAY still works" is false when the realm row names a lost address.
+
+    The row advertised the install's LAN address; the PC was given another one, so
+    the client is sent somewhere nobody answers. The hint has to say that, and name
+    the two presses that fix it -- a reassuring line here is what sent the player in
+    this ticket looking at their client while the server was online all along.
+    """
+    answer = ServerReading(accounts=(), online=UP, announced="192.168.1.50", announced_held=False)
+    window, view, _ = _launcher(ps, tmp_path, answer=answer)
+    _online(view)
+
+    hint = window.realm_mismatch_label.text()
+    assert not window.realm_mismatch_label.isHidden()
+    assert "PLAY still works" not in hint
+    assert "PLAY will not reach the world" in hint
+    assert "Networking tab" in hint and "Show plan" in hint and "Apply" in hint
+
+
+def test_the_mismatch_line_leaves_a_public_internet_address_alone(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T881 review: a public endpoint or a DDNS name is not a claim about this network.
+
+    `holds_here()` on EVERY announced address told an Internet owner at 203.0.113.9 that
+    PLAY would not reach the world, and a hostname cost a DNS lookup on every read. Only
+    a private IPv4 is asked about; a public address leaves `announced_held` None.
+    """
+    from types import SimpleNamespace
+
+    class _Sql:
+        def query(self, db: object, statement: str) -> str:
+            return ""
+
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original)
+    view.services.accounts = SimpleNamespace(sql=_Sql(), app_account="YULON_ABC12345")
+    monkeypatch.setattr(
+        launcher_window.dbreads, "resolve_marker", lambda *a, **k: SimpleNamespace(marker=None)
+    )
+    monkeypatch.setattr(
+        launcher_window.launcher_reads, "announced_address", lambda sql, entry: "203.0.113.9"
+    )
+
+    def never(address: str) -> bool | None:
+        raise AssertionError("holds_here was asked about a public address")
+
+    monkeypatch.setattr(launcher_window.networking, "holds_here", never)
+
+    reading = ViewReads(view).server()
+
+    assert reading.announced == "203.0.113.9"
+    assert reading.announced_held is None
+    window = LauncherWindow(
+        view,
+        reads=_Reads(view, reading),
+        job_runner=run_inline,
+        open_folder=lambda path: True,
+    )
+    _online(view)
+    assert "will not reach" not in window.realm_mismatch_label.text()
 
 
 def test_no_hint_when_the_realm_row_could_not_be_read(

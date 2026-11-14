@@ -3413,6 +3413,17 @@ class NetworkReport:
     wants the refusals apart from the failures, and `skipped` is for the caller
     that only ever reads one list.
     """
+    realm_unchanged: str = ""
+    """Why the realm step did not go through, when it did not (T885).
+
+    Set when `realmlist_sql` exists but the UPDATE was not sent or failed: a
+    refusal, no DB access, or an `ApplyError`. Empty when the realm step went
+    through, or when the plan had no realm step at all.
+    """
+    applied_while_stopped: bool = False
+    """Whether Apply started the database alone for the realm step (T885)."""
+    database_note: str = ""
+    """The stop note for a database Apply started alone and could not stop (T885)."""
 
     @property
     def manual_steps(self) -> tuple[str, ...]:
@@ -3851,6 +3862,214 @@ def realmlist_address_query(entry: CatalogEntry) -> str:
     return (
         f"SELECT {', '.join(realmlist_columns(entry))} "
         f"FROM {entry.databases.auth}.{rl.table} WHERE id={rl.realm_id};"
+    )
+
+
+@dataclass(frozen=True)
+class RealmRow:
+    """The address columns a realm row holds now, as `realmlist_columns()` names them (T881).
+
+    `address` is what the authserver hands every client after login. `local_address` is
+    what it hands a client it decides is on the realm's own subnet (AzerothCore's
+    `localAddress`, absent on a core whose `Realmlist.local_address_column` is None).
+    """
+
+    address: str = ""
+    local_address: str = ""
+
+    def values(self) -> tuple[str, ...]:
+        """The columns that hold something, whitespace stripped: the ones any rule is about."""
+        return tuple(value.strip() for value in (self.address, self.local_address) if value.strip())
+
+
+def realmlist_row(answer: str, columns: tuple[str, ...]) -> RealmRow | None:
+    """One realm row from `realmlist_address_query()`'s answer, or None if it is not one.
+
+    `DockerSql.query()` hands back `--skip-column-names` output, one row per line and
+    columns separated by tabs, and MySQL spells NULL `NULL`. Anything but exactly one
+    row is not one realm's row and answers None, the reading `realmlist_sql()`'s callers
+    already treat as "write, it is cheap" (T881 A reads it as "nothing to decide").
+    """
+    rows = [line for line in answer.splitlines() if line.strip()]
+    if len(rows) != 1:
+        return None
+    fields = [field.strip() for field in rows[0].split("\t")]
+    fields += [""] * (len(columns) - len(fields))
+    found: dict[str, str] = {}
+    for name, value in zip(columns, fields, strict=False):
+        found[name] = "" if value.upper() == "NULL" else value
+
+    def value_of(index: int) -> str:
+        return found.get(columns[index], "") if index < len(columns) else ""
+
+    return RealmRow(address=value_of(0), local_address=value_of(1))
+
+
+PRIVATE_NETWORKS = tuple(
+    ipaddress.IPv4Network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+"""The ranges a LAN address comes from: RFC 1918, and nothing wider (T881 A).
+
+`IPv4Address.is_private` is not this rule: on Python 3.12 it is True for
+203.0.113.0/24, the documentation range the existing internet-play tests use, so a
+public endpoint somebody chose would be read as a LAN address and moved. The three
+blocks above are what a router hands out, which is the claim a stale row makes.
+"""
+
+
+def private_ipv4(address: str) -> bool:
+    """Whether `address` is a plain IPv4 address inside a private LAN range (T881 A).
+
+    Only these are claims about THIS network: a public address is somebody's decision to
+    advertise it, a name is a resolver's, and the loopback is every machine's own. See
+    `PRIVATE_NETWORKS` for why this is not `is_private`, and why `::1`, `127.0.0.1`,
+    CGNAT `100.64/10` and a hostname never count as one.
+    """
+    try:
+        parsed = ipaddress.IPv4Address(address.strip())
+    except ValueError:
+        return False
+    return any(parsed in network for network in PRIVATE_NETWORKS)
+
+
+def row_still_reachable(row: RealmRow, holds: Callable[[str], bool | None]) -> bool:
+    """Whether every address the row holds is still one this computer advertises (T881 A).
+
+    `networking.advertisable()` is the first half, unchanged: a loopback or a name no
+    client can dial is not reachable. The second half is the ticket: a PRIVATE IPv4
+    address is a claim about this network, so it counts only when `holds()` did not say
+    False. `None` (the listing could not be read) counts as before, because a listing
+    that could not be read says nothing about the address.
+
+    A row of private addresses counts as lost only when EVERY one of them answered
+    False. That is the same rule `stale_realm_address()` rewrites by, and it is what
+    keeps a public `address` beside a stale private `localAddress` from being read as
+    a whole row to rewrite — the 2026-09-03 regression this function's caller exists
+    to prevent.
+    """
+    values = row.values()
+    if not values or not all(advertisable(value) for value in values):
+        return False
+    return not all(private_ipv4(value) and holds(value) is False for value in values)
+
+
+@dataclass(frozen=True)
+class RealmAddressVerdict:
+    """What Start is to do about the address a realm row advertises (T881 A).
+
+    `action` is one of three, and there is no fourth:
+
+    * `keep` — the row is right: nothing is written, nothing is said.
+    * `rewrite` — one UPDATE, setting `address` and `local_address` as given.
+    * `warn` — nothing is written; `warning` is the one line for the log.
+    """
+
+    action: Literal["keep", "rewrite", "warn"]
+    address: str | None = None
+    """The `address` column after the rewrite, in column order (`realmlist_columns()`)."""
+    local_address: str = ""
+    """The `localAddress` column after the rewrite; "" leaves it as it is."""
+    warning: str = ""
+    """The WARNING line for `warn`; "" otherwise."""
+    was: str = ""
+    """The row's `address` before the rewrite, for the INFO line."""
+
+
+def _a_held_address(
+    detect: Callable[[], str | None], holds: Callable[[str], bool | None]
+) -> str | None:
+    """The address `detect()` returns when it is one a realm may advertise and this PC
+    holds; else None. Every rewrite below needs a destination, and a detector that
+    answered an address this machine does not hold would move the row to another stale
+    one."""
+    detected = advertisable(detect())
+    if detected is None or holds(detected) is not True:
+        return None
+    return detected
+
+
+def stale_realm_address(
+    row: RealmRow,
+    intent: NetworkIntent | None,
+    holds: Callable[[str], bool | None],
+    detect: Callable[[], str | None],
+) -> RealmAddressVerdict:
+    """What Start should do with a realm row advertising an address nobody answers on (T881 A).
+
+    The player's realm row advertised the LAN address detected at install. The PC was
+    given another address since, so a client logging in through 127.0.0.1 is sent to an
+    address this computer no longer has. This decides, once, whether the row is
+    rewritten, and it is pure: `holds` is `holds_here()`, `detect` is
+    `detect_lan_ip()`, and every answer is a value a test can state.
+
+    The owner's recorded choice wins over every automatic rule (`read_network_intent()`):
+
+    * `loopback` — keep. §41: this is the mode an owner picks when nothing else is right.
+    * `lan` with an address the owner chose — never rewritten. When `holds()` says False
+      the verdict is a warning, because that address is the owner's decision and this app
+      does not overrule it in silence. `None` is not False: nothing is said.
+    * `internet` — `address` is kept, because it is a public endpoint somebody chose, and
+      only a private `localAddress` this computer no longer holds is moved to the address
+      it holds now.
+
+    With no intent, or a plain `lan` one, the automatic rule applies and it is deliberately
+    narrow: EVERY address column must be a private IPv4 that `holds()` answered False (False
+    and not None), and `detect()` must name a held, advertisable address. Then one
+    rewrite to it. Anything else — a public address, a name, the loopback, a `None` from
+    an unreadable listing — keeps the row, because the 2026-09-03 regression showed what
+    a confident rewrite of somebody else's decision costs.
+    """
+    values = row.values()
+    if not values:
+        return RealmAddressVerdict("keep")
+    if intent is not None and intent.mode == "loopback":
+        return RealmAddressVerdict("keep")
+    if intent is not None and intent.mode == "lan" and intent.address:
+        if holds(intent.address) is False:
+            return RealmAddressVerdict(
+                "warn",
+                warning=(
+                    f"The realm advertises {intent.address}, the address you chose, which is no "
+                    "longer one of this computer's addresses. It was left as it is: choose your "
+                    "address again on the Networking tab if it changed."
+                ),
+            )
+        return RealmAddressVerdict("keep")
+    if intent is not None and intent.mode == "internet":
+        local = row.local_address.strip()
+        if not private_ipv4(local) or holds(local) is not False:
+            return RealmAddressVerdict("keep")
+        detected = _a_held_address(detect, holds)
+        if detected is None:
+            return RealmAddressVerdict("keep")
+        return RealmAddressVerdict(
+            "rewrite",
+            address=row.address.strip() or detected,
+            local_address=detected,
+            was=row.address.strip(),
+        )
+    unreadable = False
+    for value in values:
+        if not private_ipv4(value):
+            return RealmAddressVerdict("keep")
+        held = holds(value)
+        if held is None:
+            unreadable = True
+        elif held:
+            return RealmAddressVerdict("keep")
+    if unreadable:
+        return RealmAddressVerdict(
+            "warn",
+            warning=(
+                f"The realm advertises {row.address.strip() or values[0]}, and this computer's "
+                "address list could not be read, so it was not checked and was left as it is."
+            ),
+        )
+    detected = _a_held_address(detect, holds)
+    if detected is None:
+        return RealmAddressVerdict("keep")
+    return RealmAddressVerdict(
+        "rewrite", address=detected, local_address=detected, was=row.address.strip()
     )
 
 
@@ -4444,6 +4663,7 @@ def apply(
     run: Runner | None = None,
     elevate: bool = True,
     server_dir: Path | None = None,
+    realm_refusal: str | None = None,
 ) -> NetworkReport:
     """Execute the automatable part of `network_plan`; report the rest by name.
 
@@ -4472,6 +4692,10 @@ def apply(
     Defaulted to None, which records nothing, because every caller that only
     wants the firewall half of a plan (and every test that predates §41) passes
     no directory.
+
+    `realm_refusal` (T885) says why the realm step was not attempted: the
+    database could not be started alone, so the UPDATE is not sent and the
+    intent is not recorded. The firewall half still runs.
     """
     do = run if run is not None else (lambda argv: runner.run(argv))
     done: list[str] = []
@@ -4574,9 +4798,14 @@ def apply(
             )
 
     restart = False
+    realm_unchanged = ""
     if network_plan.realmlist_sql is not None:
         if sql is None:
-            skipped.append(f"realmlist not updated (no DB access): {network_plan.realmlist_sql}")
+            realm_unchanged = f"realmlist not updated (no DB access): {network_plan.realmlist_sql}"
+            skipped.append(realm_unchanged)
+        elif realm_refusal is not None:
+            realm_unchanged = f"realmlist not updated: {realm_refusal}"
+            skipped.append(realm_unchanged)
         else:
             try:
                 sql.run_statement("auth", network_plan.realmlist_sql)
@@ -4587,7 +4816,8 @@ def apply(
                 # the rules that HAD been applied — so a user whose realmlist
                 # update failed was also not told which ports were now open, nor
                 # which command to retry by hand (Discord report, 2026-08-26).
-                skipped.append(f"realmlist not updated: {exc}")
+                realm_unchanged = f"realmlist not updated: {exc}"
+                skipped.append(realm_unchanged)
             else:
                 done.append(f"realmlist → {network_plan.client_realmlist}")
                 restart = True
@@ -4614,6 +4844,7 @@ def apply(
         skipped=tuple(skipped),
         restart_required=restart,
         refusals=tuple(refusals),
+        realm_unchanged=realm_unchanged,
     )
 
 
@@ -4685,18 +4916,46 @@ def _data_subfolders(client_dir: Path) -> list[Path]:
         return []
 
 
+def _root_realmlist_spellings(client_dir: Path, realmlist_file: str) -> list[Path]:
+    """Every top-level name that casefolds to `realmlist_file`, as the disk spells it (T882).
+
+    On a disk that tells cases apart, `realmlist.wtf` and `REALMLIST.WTF` are two
+    files, and the client reads its own spelling: leaving one alone leaves the
+    game pointed at another server. One folder listing answers the question, so
+    an unreadable folder offers nothing rather than raising. The exact spelling
+    `realmlist_file` comes first when it is there (round 3: the client's own
+    read is written first), then the other spellings sorted by name, so the
+    write order is stable.
+    """
+    try:
+        names = os.listdir(client_dir)
+    except OSError as exc:
+        logger.warning(f"could not list {client_dir} for its realmlist files: {exc}")
+        return []
+    wanted = realmlist_file.casefold()
+    paths = sorted(
+        (client_dir / name for name in names if name.casefold() == wanted),
+        key=lambda path: path.name,
+    )
+    # Stable: the exact spelling leads, the rest keep their sorted order.
+    return sorted(paths, key=lambda path: path.name != realmlist_file)
+
+
 def _realmlist_candidates(client_dir: Path, realmlist_file: str) -> list[Path]:
     """Where a client keeps its realmlist: `Data/<locale>/` (retail), then the top level.
 
     Every name as the disk spells it (T261): `data/enus/realmlist.wtf`, which
     `unzip -LL` leaves, is the client's file on a disk that tells cases apart,
     and writing `Data/enUS/realmlist.wtf` beside it made a second, empty `Data/`
-    tree the game never reads.
+    tree the game never reads. At the root EVERY spelling counts (T882):
+    `realmlist.wtf` and `REALMLIST.WTF` are two files there and the client reads
+    its own, so one left alone still names another server. When none is there,
+    the plain `client_dir / realmlist_file` is the one to make.
     """
     locales = _data_subfolders(client_dir)
     found = [f for f in (client_names.find(loc, realmlist_file) for loc in locales) if f]
-    top = client_names.find(client_dir, realmlist_file) or client_dir / realmlist_file
-    return [*found, top]
+    top = _root_realmlist_spellings(client_dir, realmlist_file) or [client_dir / realmlist_file]
+    return [*found, *top]
 
 
 def _fresh_realmlist(client_dir: Path, realmlist_file: str) -> Path:
@@ -4728,22 +4987,96 @@ def _missing_locale_realmlists(client_dir: Path, realmlist_file: str) -> list[Pa
     ]
 
 
+_SET_REALMLIST_RE = re.compile(rb"^\s*set\s+realmlist\b", re.IGNORECASE)
+"""An old realmlist line, in any spacing or case (T882): a tab, two spaces, `SET realmList`."""
+
+_SET_REALMLIST_TEXT_RE = re.compile(r"^\s*set\s+realmlist\b", re.IGNORECASE)
+"""`_SET_REALMLIST_RE` over decoded text: the UTF-16 BOM path (T882 round 3)."""
+
+_LINE_BREAK_RE = re.compile(rb"\r\n|\r|\n")
+"""Every line break `_set_realmlist()` splits on: CRLF, a lone CR, LF (T882 round 3)."""
+
+_TEXT_BREAK_RE = re.compile(r"\r\n|\r|\n")
+"""`_LINE_BREAK_RE` over decoded text: the UTF-16 BOM path."""
+
+
+def _first_ending_bytes(raw: bytes) -> bytes:
+    """The ending `_set_realmlist()` writes: the file's first break, else LF (T882 round 3).
+
+    CRLF stays CRLF and a lone CR stays CR; anything else (LF first, or no line
+    break at all) is LF.
+    """
+    found = _LINE_BREAK_RE.search(raw)
+    if found is None:
+        return b"\n"
+    return b"\r\n" if found.group() == b"\r\n" else b"\r" if found.group() == b"\r" else b"\n"
+
+
+def _kept_text_lines(text: str) -> list[str]:
+    """The lines of decoded `text` to keep: every line but an old realmlist line.
+
+    One trailing U+FFFD (an odd byte count's leftover half character) is dropped
+    with the decode noise, so no junk line is written (T882 round 4).
+    """
+    parts = _TEXT_BREAK_RE.split(text.removesuffix("\ufffd"))
+    if parts and parts[-1] == "":
+        parts.pop()
+    kept = [part for part in parts if not (part and _SET_REALMLIST_TEXT_RE.match(part))]
+    while kept and kept[-1] in ("", "\ufffd"):
+        kept.pop()
+    return kept
+
+
 def _set_realmlist(target: Path, address: str) -> None:
     """Put `set realmlist <address>` first in `target`, keeping its other lines.
 
     `address` is already `realmlist_value()`'s answer: a port is part of it.
+    Worked in bytes (T882), decoded only for a UTF-16 BOM (round 3). A file
+    that starts with FF FE (LE) or FE FF (BE) decodes in that byte order with
+    `errors="replace"`; the same line rules apply and the file is written back
+    as plain UTF-8 WITHOUT a BOM. A NUL byte with NO UTF-16 BOM is not lines
+    to keep but a file to replace whole (round 3: our own ready-to-play copy
+    gone binary, and refusing Play over it would block the player). A leading
+    UTF-8 BOM is always dropped.
+
+    Every `\r\n`, lone `\r` and `\n` is a line break; the ending is the file's
+    own FIRST line break (CRLF stays CRLF, a lone CR stays CR, else LF) so a
+    file the game saved with carriage returns keeps them; a new file gets LF.
     """
-    lines = (
-        target.read_text(encoding="utf-8", errors="replace").splitlines()
-        if target.is_file()
-        else []
-    )
-    kept = [ln for ln in lines if not ln.strip().lower().startswith("set realmlist")]
-    target.write_text(
-        "\n".join([f"set realmlist {address}", *kept]).rstrip("\n") + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    raw = target.read_bytes() if target.is_file() else b""
+    decoded: str | None = None
+    if raw.startswith(b"\xff\xfe"):
+        decoded = raw[2:].decode("utf-16-le", errors="replace")
+    elif raw.startswith(b"\xfe\xff"):
+        decoded = raw[2:].decode("utf-16-be", errors="replace")
+    if decoded is not None:
+        ending = _first_ending_bytes(decoded.encode())
+        kept_text = _kept_text_lines(decoded)
+        target.write_bytes(
+            ending.join(
+                [f"set realmlist {address}".encode()] + [line.encode() for line in kept_text]
+            )
+            + ending
+        )
+        return
+    kept: list[bytes]
+    if b"\x00" in raw:
+        kept = []
+        ending = b"\n"
+    else:
+        raw = raw.removeprefix(b"\xef\xbb\xbf")
+        ending = _first_ending_bytes(raw)
+        parts = _LINE_BREAK_RE.split(raw)
+        if parts and parts[-1] == b"":
+            parts.pop()
+        kept = []
+        for part in parts:
+            if part and _SET_REALMLIST_RE.match(part):
+                continue
+            kept.append(part)
+        while kept and kept[-1] == b"":
+            kept.pop()
+    target.write_bytes(ending.join([f"set realmlist {address}".encode(), *kept]) + ending)
 
 
 def write_client_realmlist(

@@ -2853,6 +2853,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "names already on disk, and each write is to a named file. A `Data/` that cannot "
         "be listed offers none"
     ),
+    ("networking.py", "_root_realmlist_spellings"): (
+        "T882. Lists the ready-to-play client's root for the names that casefold to "
+        "`realmlist.wtf`, so every spelling the client may read is rewritten and none "
+        "is left pointing at another server. It decides no write into a folder the "
+        "app does not own -- the writes go to the named realmlist files -- so it is "
+        "not `native._listing()`. An unreadable folder answers none"
+    ),
     ("logsnap.py", "_prune"): (
         "lists this install's own snapshots in the app's logs directory to keep the newest "
         "ten. It decides a DELETE rather than a write, and the file it has just written is "
@@ -3842,7 +3849,12 @@ def test_a_row_that_is_already_reachable_is_left_alone_whatever_it_says(
       single-column fixture would survive a version that checked only the first.
     """
     same = Recorder(realm_row="10.1.2.3\t10.1.2.3\n")
-    said = _advertising(same, tmp_path / "wow", lan_ip=lambda: "10.1.2.3")
+    said = _advertising(
+        same,
+        tmp_path / "wow",
+        lan_ip=lambda: "10.1.2.3",
+        holds=lambda addr: addr == "10.1.2.3",
+    )
     assert _statements(same) == [], "a row that was already correct was written again"
     assert [line for line in said if "already advertises 10.1.2.3" in line], said
 
@@ -3858,6 +3870,34 @@ def test_a_row_that_is_already_reachable_is_left_alone_whatever_it_says(
     assert _statements(half) == [
         networking.realmlist_sql(ENTRY, "10.1.2.3", "10.1.2.3")
     ], "a localAddress still on the loopback was read as nothing to change"
+
+
+def test_a_resume_rewrites_an_advertisable_row_this_computer_no_longer_holds(
+    tmp_path: Path,
+) -> None:
+    """T881 A: "reachable" is not "advertisable" -- a private address this PC lost is stale.
+
+    The realm row advertised the LAN address detected at install (192.168.1.50). The
+    PC was given another address since, so a client logging in through 127.0.0.1 is
+    sent to an address nobody answers on. Every column is a private IPv4 that
+    `holds()` answers False for and the detector names the address this computer
+    holds now, so the resume rewrites the row to it -- and only that row.
+
+    Mutation this catches: keeping the pre-T881 test (`advertisable()` alone), which
+    calls 192.168.1.50 reachable on every machine that is not on that network.
+    """
+    rec = Recorder(realm_row="192.168.1.50\t192.168.1.50\n")
+    said = _advertising(
+        rec,
+        tmp_path / "wow",
+        lan_ip=lambda: "172.20.5.10",
+        holds=lambda addr: addr == "172.20.5.10",
+    )
+
+    assert _statements(rec) == [
+        networking.realmlist_sql(ENTRY, "172.20.5.10", "172.20.5.10")
+    ], "a row this computer no longer holds was left as it was"
+    assert [line for line in said if "now advertises 172.20.5.10" in line], said
 
 
 def test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why(
