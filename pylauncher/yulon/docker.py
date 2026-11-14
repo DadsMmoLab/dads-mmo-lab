@@ -506,6 +506,11 @@ _PORT_REFUSALS = (
     re.compile(r"failed to bind host port \S*?:(\d+)/tcp: (?P<why>[^\r\n]*)"),
     # ... or another container publishes it.
     re.compile(r"Bind for \S*?:(\d+) failed: (?P<why>port is already allocated)"),
+    # Rootless Podman through the Docker CLI (T887, spike Q6): the compat API
+    # reports a taken port in rootlessport/pasta words, not Docker's.
+    re.compile(
+        r"rootlessport listen tcp \S*?:(\d+): bind: (?P<why>address already in use)"
+    ),
 )
 
 
@@ -529,7 +534,9 @@ def _port_refusal(stderr: str) -> str | None:
 
     Docker Desktop says `ports are not available`; Linux Docker Engine says `failed to
     bind host port` (a program) or `Bind for ... failed: port is already allocated` (a
-    container). All three are read.
+    container); rootless Podman says `rootlessport listen tcp ...: bind: address
+    already in use`. All four are read, with the same player sentence Docker's
+    wording gives today.
 
     The preflight bind check covers a port blocked when the install starts; this
     covers one that became blocked afterwards (a range Windows reserved at the
@@ -5868,7 +5875,15 @@ def daemon_identity(*, wsl_distro: str | None = None) -> str:
     `Created` is the daemon's start time; `docker info`'s `ID` does not change.
     `""` when it cannot be read (no daemon, no `bridge` network as with Windows
     containers): the caller must then not assume either way.
+
+    Under Podman (T887, developer switch only) this is always `""` ("cannot
+    tell"): Podman has no daemon and no changing bridge Id. Callers treat `""`
+    as no evidence either way (dashboard's loop watcher keeps its last answer).
     """
+    from yulon import engine as engine_seam
+
+    if engine_seam.is_podman():
+        return ""
     proc = _docker(["network", "inspect", "bridge", "--format", "{{.Id}}"], wsl_distro=wsl_distro)
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
