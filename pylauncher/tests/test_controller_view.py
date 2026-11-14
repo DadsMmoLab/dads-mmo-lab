@@ -4331,11 +4331,14 @@ def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
         and n.func.attr == "apply"
         and ast.unparse(n.func.value) == "networking"
     ]
-    assert len(lines) == 1, f"expected exactly one networking.apply call, found {lines}"
+    # T885: Apply on a stopped server calls it on each of its paths (running, refused,
+    # held, put back), so every such call must stay exempt, not just one.
+    assert lines, "no networking.apply call found"
 
     accepts, missing = _scan_for_seams_without_a_distro(view.parent.parent, view)
     assert "apply" in accepts, "the scan no longer knows `apply` can take a distro"
-    assert f"apply() at controller_view.py:{lines[0]}" not in missing, missing
+    for line in lines:
+        assert f"apply() at controller_view.py:{line}" not in missing, missing
 
 
 def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
