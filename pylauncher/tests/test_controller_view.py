@@ -32929,7 +32929,9 @@ def test_the_start_step_wired_for_a_game_applies_a_saved_name(
     reason = services.controller.before_servers()
 
     assert reason is None
-    assert started == ["database"]
+    # T883: the address keeper and the saved-name step each start the database alone
+    # (WotLK's chain already did the same); `start_database()` is idempotent.
+    assert started == ["database", "database"]
     assert written == [realm_name.name_sql(entry, "Saved Realm")]
 
 

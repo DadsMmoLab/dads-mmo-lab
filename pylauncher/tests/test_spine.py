@@ -2853,6 +2853,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "names already on disk, and each write is to a named file. A `Data/` that cannot "
         "be listed offers none"
     ),
+    ("networking.py", "_root_realmlist_spellings"): (
+        "T882. Lists the ready-to-play client's root for the names that casefold to "
+        "`realmlist.wtf`, so every spelling the client may read is rewritten and none "
+        "is left pointing at another server. It decides no write into a folder the "
+        "app does not own -- the writes go to the named realmlist files -- so it is "
+        "not `native._listing()`. An unreadable folder answers none"
+    ),
     ("logsnap.py", "_prune"): (
         "lists this install's own snapshots in the app's logs directory to keep the newest "
         "ten. It decides a DELETE rather than a write, and the file it has just written is "
