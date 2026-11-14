@@ -4600,6 +4600,13 @@
         ],
         "client": "your WoW Forever 1.60.1 client (build 70707, or a copy of your Battle.net one at 70888 or 70938): the folder that holds _forever_",
         "account": false,
+        "gaming_mode": {
+          "title": "WoW Forever Offline",
+          "templates": "wow-forever/gaming-mode",
+          "launcher": "wowforever-launcher",
+          "client": "wowforever-client",
+          "stop": "wowforever-stop"
+        },
         "forever": {
           "config": "ForeverLauncher.wtf",
           "portal": "trinity.actual.battle.net",

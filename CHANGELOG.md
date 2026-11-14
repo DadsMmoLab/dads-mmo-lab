@@ -20,6 +20,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Install a WoW Forever Classic server with Karrz's bots in beta from **Other games**, using your own copy of the game.
 - **Play** on the WoW Forever tab sets up the login once, makes your account and starts the game.
 - WoW Forever plays on a Steam Deck too: **Play** gets GE-Proton once and runs the game in its own Proton prefix.
+- **Add to Steam Deck (Gaming Mode)…** on WoW Forever's tab adds its Server, game and Server Stop tiles to Steam.
 
 ### Fixed
 - WoW Forever: Holy Strike, Blessing of Light, Salvation, Mutilate and Revoke play their animations again.
