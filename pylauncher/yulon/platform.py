@@ -567,14 +567,51 @@ def elevated_batch(
         return None
     if (windows_is_admin() if is_admin is None else is_admin) or detect() != "windows":
         return None
-    handle, name = tempfile.mkstemp(prefix="yulon-netsh-", suffix=".json")
+    return _elevated_script(commands, "yulon-netsh-")
+
+
+ADMIN_BATCH_PROGRAMS: tuple[str, ...] = ("icacls", "cmd", "certutil")
+"""The programs `elevated_admin_batch()` will run behind its one prompt, and no others.
+
+`icacls` grants a folder to the player; `cmd` is there for `cmd /c mkdir`, which makes
+a folder under Program Files the grant then applies to, and for WoW Forever's hosts line;
+`certutil -addstore Root` trusts a WoW Forever install's own name-constrained CA
+(`forever_trust.py`). A short list on purpose: an elevated batch is a place where a
+wrong argv does the most harm.
+"""
+
+
+def elevated_admin_batch(
+    cmds: Iterable[Iterable[str]], *, is_admin: bool | None = None
+) -> tuple[list[str], Path] | None:
+    """`elevated_batch()` for commands other than netsh: one UAC prompt, every verdict read back.
+
+    The same script and the same `read_batch_results()` contract, for the folder
+    grant a client under Program Files needs (`single_client.grant_commands()`). None
+    when nothing needs wrapping (not Windows, already admin, or no commands), and
+    refused (`ValueError`) for a program outside `ADMIN_BATCH_PROGRAMS`.
+    """
+    commands = [list(c) for c in cmds]
+    for cmd in commands:
+        if cmd[:1] not in ([p] for p in ADMIN_BATCH_PROGRAMS):
+            raise ValueError(f"an elevated batch runs only {ADMIN_BATCH_PROGRAMS}, got {cmd[:1]}")
+    if not commands:
+        return None
+    if (windows_is_admin() if is_admin is None else is_admin) or detect() != "windows":
+        return None
+    return _elevated_script(commands, "yulon-admin-")
+
+
+def _elevated_script(commands: list[list[str]], prefix: str) -> tuple[list[str], Path]:
+    """The PowerShell argv and results path of `elevated_batch()` and `elevated_admin_batch()`."""
+    handle, name = tempfile.mkstemp(prefix=prefix, suffix=".json")
     os.close(handle)
     results = Path(name)
     lines = ["$ErrorActionPreference = 'Continue'", "$r = @()"]
     for cmd in commands:
         args = ",".join(_ps_quote(a) for a in cmd[1:])
         lines += [
-            f"$o = (& netsh @({args}) 2>&1 | Out-String).Trim()",
+            f"$o = (& {cmd[0]} @({args}) 2>&1 | Out-String).Trim()",
             "$r += [pscustomobject]@{ rc = $LASTEXITCODE; out = $o }",
         ]
     lines.append(

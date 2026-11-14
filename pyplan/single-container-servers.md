@@ -112,6 +112,35 @@ READY in 91 s; the inner PVF matches upstream's baseline (c3801215); the AppImag
 and a child whose working folder is inside the AppImage's mount keeps that mount busy.
 Not yet measured: this code end to end on a Deck (install, Start, Play, Stop, the button).
 
+## The third runtime: a stack of published images (FFXI, 2026-10-17)
+
+LandSandBoat's FFXI server is five programs (connect, search, profile, world, map) beside a
+MariaDB, and its project publishes an image of every build (`ghcr.io/landsandboat/server`,
+labelled with the commit it is). So nothing is cloned or built: `install.stack`
+(`SingleStack`) pins every image by digest, names each compose service and its container,
+and the engine pulls, renders and starts them. Same list, same tile, same tab.
+
+| Concern | Reused as is | Added for the stack runtime |
+|---|---|---|
+| Catalog | `SingleEntry`, `ServerPort`, `HelpPlace`, the path rules, `Catalog`'s name and port checks (now over `SingleEntry.containers()`) | `SingleStack`, `PinnedImage` (digest only), `StackService` (ready lines, or `once` for the one-shot `dbtool.py update`), `VolumeSeed`; for Play, `PlayLoader`, `VerifiedFile`, `ClientRegistry`, `ClientVersion` and `SinglePlay.writable` |
+| Install | the state file and `single_install._read_record()`, `composegen` (install id, project, `fill`, `is_ours`, `dotenv_value`), Docker provisioning, `platform.download_verified()`, `verified_download.sha256_of()`, `native.pump_lines()` | `catalog/stack_install.py`: seven recorded, resumable stages (fetch the loader, write the secrets, compose, pull, seed the volumes, up, ready); `docker.compose_pull()`, `compose_run_once()`, `compose_up_all()` |
+| Lifecycle | `docker.container_state/current_run_log/container_project/port_conflicts`, the four statuses | `stack_controller.py`: status over every listener, `compose up -d` / `compose stop` of the project (`compose_stop_all()`), the console following every listener at once (`compose_follow_logs()`) |
+| Play | `play_launch.LaunchSpec`, `platform.read_batch_results()` and the single-UAC batch (generalised: `elevated_admin_batch()` runs `icacls` and `cmd` only) | `single_client.py`: the client found through HKLM's 32-bit view, its version from its patch list, the write probe, the one-time grant; `single_play.loader_spec()`/`start_loader()`; `play_launch.launch_console()` (xiloader needs a console of its own) |
+| UI | the whole tab | for a `loader`: no folder picker and no account box (xiloader asks at its own prompt), the client line from the registry; "this computer only" in the stack's words |
+
+Facts that shaped it, measured on Windows 11 + Docker Desktop on 2026-10-16/17: the server
+image's `org.opencontainers.image.revision` is 1858bbf, and its `settings/default/login.lua`
+says `CLIENT_VER = '30261006_0'`, `VER_LOCK = 2` (that version or newer) and
+`ACCOUNT_CREATION = true`; each server prints `The <name>-server is ready to work`; an
+install through the harness into `C:\Yulon FFXI` took 73 s with the images already pulled
+(the meshes copy about 770 MB), Stop 6 s, Start 11 s and every server ready 27 s after it.
+With the same images by hand: an account made through the auth port exactly as xiloader
+makes one (TLS on 54231, JSON `command` 0x20), a character made in the real client and a
+zone-in to Port San d'Oria all worked. The real client under Program Files stopped with
+FFXI-3117 "Failed to carry out user file operations" until `USER`, `SYS` and `TEMP` were
+writable, which is what the first Play's grant is for. A fullscreen FFXI could only be
+photographed with Windows Game Bar (GDI, `PrintWindow` and DXGI duplication all saw nothing).
+
 ## Not done yet
 
 Rebuild and update to latest, backup and restore, "Find in WSL…" and "Bring from another
@@ -119,4 +148,7 @@ computer…" on the tile, the tray's server list, and a Windows support file sec
 WoW version of those reads the WoW shape; each would be its own change. For DFO: playing
 from another computer (upstream's server is loopback only today), moving the pin, and
 bringing a save from the Deck's own `~/dfo115` install (its `dfolan.sqlite3` with `-wal`
-and `-shm`, copied with both servers stopped).
+and `-shm`, copied with both servers stopped). For FFXI: Play on Linux and a Steam Deck
+(xiloader and the client in a Proton prefix) with its Gaming Mode tiles, playing from
+another computer (the map server hands out the zone address the database holds,
+127.0.0.1), and moving the image pins.

@@ -47,12 +47,14 @@ from yulon import platform, runner, steam
 
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_NEW_CONSOLE = 0x00000010
 """Win32 process-creation flags, spelled as numbers so this module type-checks off Windows.
 
 `DETACHED_PROCESS` is right for `Wow.exe` and was wrong for the self-update
 helper (`selfupdate.swap.windows_creation_flags`): that one is `powershell.exe`,
 a console program that exits at once with no console at all. WoW is a GUI
 program and has no use for the console it would otherwise inherit.
+`CREATE_NEW_CONSOLE` is `launch_console()`'s: a loader the player types into.
 """
 
 
@@ -267,6 +269,30 @@ _spawn: Popen = subprocess.Popen
 """The real spawn behind `launch()`, looked up per call so the suite can refuse it
 (`tests/conftest.py`): a default bound in the signature would be `Popen` itself,
 and a test that forgot `popen=` would start a real game on the box running it."""
+
+
+def launch_console(spec: LaunchSpec, *, popen: Popen | None = None) -> None:
+    """`launch()` for a console program the player types into, in a console window of its own.
+
+    FFXI's xiloader asks for the account and password at its own prompt (and makes
+    the account there the first time), so it needs a console, where `launch()`'s
+    `DETACHED_PROCESS` and DEVNULL stdio would leave it none to read from. Windows:
+    `CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP` with the console's own stdio.
+    Elsewhere it is `launch()`: a Windows loader there runs under Proton or Wine,
+    which make their own console.
+    """
+    if platform.detect() != "windows":
+        launch(spec, popen=popen)
+        return
+    start = popen if popen is not None else _spawn
+    env = dict(runner.child_env() or os.environ)
+    env.update(spec.env)
+    start(
+        list(spec.argv),
+        cwd=str(spec.cwd),
+        env=env,
+        creationflags=CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP,
+    )
 
 
 def launch(spec: LaunchSpec, *, popen: Popen | None = None) -> None:

@@ -14,6 +14,11 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- Install a Final Fantasy XI (FFXI) server in beta from **Other games**; play with your own updated client.
+- An FFXI server's tab has Start, Stop and the live log of all its servers, and finds your installed FFXI client.
+- **Play** on the FFXI tab opens xiloader, where you log in or make your account; the first Play asks Windows once.
+- Install a WoW Forever Classic server with Karrz's bots in beta from **Other games**, using your own copy of the game.
+- **Play** on the WoW Forever tab sets up the login once, makes your account and starts the game.
 
 ### Fixed
 

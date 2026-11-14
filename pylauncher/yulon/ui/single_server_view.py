@@ -35,7 +35,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import gaming_mode, platform, single_launcher, single_network, single_play, teardown
+from yulon import (
+    forever_play,
+    gaming_mode,
+    platform,
+    single_client,
+    single_launcher,
+    single_network,
+    single_play,
+    teardown,
+)
 from yulon.catalog.catalog import SingleEntry
 from yulon.log import get_logger
 from yulon.play_launch import LaunchSpec
@@ -68,6 +77,13 @@ THIS_COMPUTER_ONLY = (
 )
 """What "Who can connect" says for a server with no address to advertise (DFO)."""
 
+STACK_THIS_COMPUTER_ONLY = (
+    "This server takes players on this computer only: its ports are published on 127.0.0.1, "
+    "and the map server hands every client that address. Playing from another computer is "
+    "not ready yet."
+)
+"""What "Who can connect" says for a stack server (FFXI), which publishes on loopback only."""
+
 ANOTHER_ADDRESS = "Another address…"
 """The last choice under "Who can connect": an address the player types (a VPN's, say)."""
 
@@ -75,6 +91,9 @@ DirPicker = Callable[[QWidget | None, str, Path | None], Path | None]
 StartClient = Callable[[LaunchSpec], bool]
 OpenFirewall = Callable[[SingleEntry, str], FirewallReport]
 PointLauncher = Callable[[SingleEntry, Path | None, str], single_launcher.LauncherWrite]
+StartLoader = Callable[[SingleEntry, LaunchSpec, Path], bool]
+SignIn = Callable[[SingleEntry, str, str], Path]
+PlayForever = Callable[..., forever_play.Played]
 
 
 class SingleServerView(QWidget):
@@ -110,11 +129,16 @@ class SingleServerView(QWidget):
         open_firewall: OpenFirewall = single_network.open_firewall,
         point_launcher: PointLauncher = single_launcher.point_launcher,
         gaming_mode_seam: gaming_mode.GamingModeSeam | None = None,
+        start_loader: StartLoader = single_play.start_loader,
+        describe_client: Callable[[SingleEntry], str] = single_client.describe,
+        sign_in: SignIn = single_play.sign_in,
+        play_forever: PlayForever = forever_play.play,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.entry = entry
         self.controller = controller
+        self._play_forever_seam = play_forever
         self.client_dir = client_dir
         self._remember_client_dir = remember_client_dir
         self._remember_account = remember_account
@@ -123,6 +147,10 @@ class SingleServerView(QWidget):
         self._start_client = start_client
         self._open_firewall = open_firewall
         self._point_launcher = point_launcher
+        self._start_loader = start_loader
+        self._describe_client = describe_client
+        self._sign_in = sign_in
+        self.account_edit: QLineEdit | None = None
         # Steam Deck Gaming Mode (Linux only): `main.py` hands no seam elsewhere, and
         # no seam draws no button (`gaming_mode.seam_for()`).
         self._gaming_mode = gaming_mode_seam
@@ -150,6 +178,8 @@ class SingleServerView(QWidget):
         self._reaches = reaches
         if entry.advertise is not None:
             layout.addLayout(self._build_network(single_network.reaches(lambda: None)))
+        elif entry.install.stack is not None:
+            layout.addWidget(self._meta(STACK_THIS_COMPUTER_ONLY))
         else:
             layout.addWidget(self._meta(THIS_COMPUTER_ONLY))
         if entry.play is not None:
@@ -270,6 +300,8 @@ class SingleServerView(QWidget):
 
     def _build_play(self, account: str) -> QVBoxLayout:
         assert self.entry.play is not None
+        if self.entry.play.loader is not None:
+            return self._build_loader_play(account)
         self.client_label = self._meta(self._client_text())
         choose = QPushButton("Choose client folder…", self)
         choose.clicked.connect(self.choose_client_dir)
@@ -277,26 +309,37 @@ class SingleServerView(QWidget):
         client_row = QHBoxLayout()
         client_row.addWidget(self.client_label, 1)
         client_row.addWidget(choose)
-        self.account_edit = QLineEdit(account, self)
-        self.account_edit.setPlaceholderText("account name")
-        self.account_edit.setMaxLength(20)
         self.play_button = QPushButton("Play", self)
         self.play_button.setObjectName(f"play-{self.entry.id}")
         self.play_button.setProperty("primary", True)
         self.play_button.clicked.connect(self.play)
         play_row = QHBoxLayout()
-        play_row.addWidget(QLabel("Account:", self))
-        play_row.addWidget(self.account_edit, 1)
+        if self.entry.play.account:
+            self.account_edit = QLineEdit(account, self)
+            self.account_edit.setPlaceholderText("account name")
+            self.account_edit.setMaxLength(20)
+            play_row.addWidget(QLabel("Account:", self))
+            play_row.addWidget(self.account_edit, 1)
+        else:
+            play_row.addStretch(1)
         play_row.addWidget(self.play_button)
         box = QVBoxLayout()
         box.addLayout(client_row)
         box.addLayout(play_row)
-        made = (
-            "Start runs the server for this account, and makes it the first time a new name "
-            "is used; the server also reads its game data from this client."
-            if self.entry.install.process is not None
-            else "Your account is made the first time you log in with a new name."
-        )
+        if self.entry.install.process is not None:
+            made = (
+                "Start runs the server for this account, and makes it the first time a new "
+                "name is used; the server also reads its game data from this client."
+            )
+        elif self.entry.play.forever is not None:
+            made = (
+                "The first Play asks once for administrator rights so this computer trusts the "
+                "server's login certificate, makes your account and shows its password."
+            )
+        elif not self.entry.play.account:
+            made = "Log in at the client's own login screen with an account on this realm."
+        else:
+            made = "Your account is made the first time you log in with a new name."
         box.addWidget(
             self._meta(f"{made} Yu'lon never downloads a client: choose the one you already have.")
         )
@@ -330,6 +373,78 @@ class SingleServerView(QWidget):
             gaming_row.addWidget(self.gaming_mode_button)
             box.addLayout(gaming_row)
         return box
+
+    def _build_loader_play(self, account: str) -> QVBoxLayout:
+        """Play for a client a loader starts (FFXI): the client the registry names, and Play.
+
+        No folder picker, because the loader reads the client's folder from the registry
+        itself. The account box is the whole sign-in when the catalog says how to make
+        an account (`LoaderLogin`): Play makes it the first time and the loader asks
+        nothing. Left empty, the loader asks at its own prompt.
+        """
+        play = self.entry.play
+        assert play is not None and play.loader is not None
+        login = play.loader.login
+        self.client_label = self._meta("Client: looking for it…")
+        self.play_button = QPushButton("Play", self)
+        self.play_button.setObjectName(f"play-{self.entry.id}")
+        self.play_button.setProperty("primary", True)
+        self.play_button.clicked.connect(self.play)
+        play_row = QHBoxLayout()
+        if login is None:
+            self.account_edit = None
+            play_row.addWidget(self.client_label, 1)
+        else:
+            self.account_edit = QLineEdit(account, self)
+            self.account_edit.setObjectName(f"account-{self.entry.id}")
+            self.account_edit.setPlaceholderText("account name")
+            self.account_edit.setMaxLength(login.name_max)
+            self.account_edit.returnPressed.connect(self.play)
+            play_row.addWidget(QLabel("Account:", self))
+            play_row.addWidget(self.account_edit, 1)
+        play_row.addWidget(self.play_button)
+        box = QVBoxLayout()
+        if login is not None:
+            box.addWidget(self.client_label)
+        box.addLayout(play_row)
+        signs_in = (
+            f"Play opens {play.loader.name} in a window of its own: log in there, or make "
+            "your account there the first time."
+            if login is None
+            else (
+                "Name your account and press Play: the first time, Yu'lon makes it on this "
+                "server with a password it keeps for you, then signs you in; "
+                f"{play.loader.name}'s window hides once the game starts. Left empty, "
+                f"{play.loader.name} asks for an account at its own prompt."
+            )
+        )
+        box.addWidget(
+            self._meta(
+                f"{signs_in} The first Play asks Windows once to let you write the game's "
+                f"settings folders ({', '.join(play.writable)}). Yu'lon never downloads a "
+                "client: install it with Square Enix's installer and update it once in "
+                "PlayOnline."
+            )
+        )
+        QTimer.singleShot(0, self.read_client)
+        return box
+
+    @Slot()
+    def read_client(self) -> None:
+        """Say which client Play will start, read off the GUI thread (`single_client.describe`)."""
+        self._run(
+            lambda: self._describe_client(self.entry),
+            self._on_client,
+            self._on_client_failed,
+        )
+
+    @Slot(object)
+    def _on_client(self, text: object) -> None:
+        self.client_label.setText(str(text))
+
+    @Slot(object)
+    def _on_client_failed(self, exc: object) -> None:
+        self.client_label.setText(f"Client: could not be read ({exc})")
 
     def _client_text(self) -> str:
         assert self.entry.play is not None
@@ -447,7 +562,7 @@ class SingleServerView(QWidget):
         started FOR an account and reads its game data from the player's client
         (`SingleServer.start`); a container server reads neither.
         """
-        account = self.account_edit.text().strip() if self.entry.play is not None else ""
+        account = self.account_edit.text().strip() if self.account_edit is not None else ""
         client_dir = self.client_dir
         if not self._begin("starting", STARTING):
             return
@@ -626,7 +741,13 @@ class SingleServerView(QWidget):
     @Slot()
     def play(self) -> None:
         """Start the player's client, pointed at this server through this computer."""
-        account = self.account_edit.text().strip()
+        if self.entry.play is not None and self.entry.play.loader is not None:
+            self._play_through_loader()
+            return
+        if self.entry.play is not None and self.entry.play.forever is not None:
+            self._play_forever()
+            return
+        account = self.account_edit.text().strip() if self.account_edit is not None else ""
         # The tab's own platform seam, as the firewall rules ask it: the real one in the
         # app, and the one a test pins, on whatever machine runs the test.
         os_name = self._os_name()
@@ -654,11 +775,70 @@ class SingleServerView(QWidget):
         except single_play.PlayRefusal as exc:
             show_warning(self, f"{self.entry.name} was not started", str(exc))
             return
-        if self._remember_account is not None:
+        if self.account_edit is not None and self._remember_account is not None:
             self._remember_account(account)
         if not self._begin("starting the game"):
             return
         self._run(lambda: self._play_as(account, spec), self._on_played, self._on_play_failed)
+
+    def _play_through_loader(self) -> None:
+        """Start the loader (FFXI's xiloader): find the client, sign in, grant once, launch.
+
+        The name is checked here; the rest is on the worker: the registry read, the
+        version check, the account the server makes (`single_play.sign_in`), the write
+        probes and the one administrator prompt the first Play may raise.
+        """
+        account = self.account_edit.text().strip() if self.account_edit is not None else ""
+        problem = single_play.check_loader_account(self.entry, account)
+        if problem is not None:
+            show_warning(self, f"{self.entry.name} was not started", problem)
+            return
+        if self.account_edit is not None and self._remember_account is not None:
+            self._remember_account(account)
+        if not self._begin("starting the game"):
+            return
+        os_name = self._os_name()
+        server_dir = self.controller.server_dir
+
+        def work() -> bool:
+            spec, client = single_play.loader_spec(
+                self.entry, server_dir, host=LOOPBACK, os_name=os_name
+            )
+            if account:
+                login_file = self._sign_in(self.entry, LOOPBACK, account)
+                spec = single_play.with_login(self.entry, spec, login_file)
+            return self._start_loader(self.entry, spec, client)
+
+        self._run(work, self._on_played, self._on_play_failed)
+
+    def _play_forever(self) -> None:
+        """WoW Forever's Play (`forever_play.play`) on the worker: trust, account, config, start.
+
+        The trust step may raise the one administrator prompt the first Play needs; the
+        account is made through the running world server; the dialog afterwards says
+        what to type at the game's login screen.
+        """
+        if not self._begin("starting the game"):
+            return
+        os_name = self._os_name()
+        server_dir = self.controller.server_dir
+        client_dir = self.client_dir
+        seams = forever_play.PlaySeams(start_client=self._start_client)
+        self._run(
+            lambda: self._play_forever_seam(
+                self.entry, server_dir, client_dir, os_name=os_name, seams=seams
+            ),
+            self._on_forever_played,
+            self._on_play_failed,
+        )
+
+    @Slot(object)
+    def _on_forever_played(self, played: object) -> None:
+        self._end()
+        if isinstance(played, forever_play.Played):
+            show_information(
+                self, f"{self.entry.name} is starting", forever_play.login_text(self.entry, played)
+            )
 
     def _play_as(self, account: str, spec: LaunchSpec) -> bool:
         """Start the client, once the running server is known to be this account's (worker).
@@ -729,7 +909,7 @@ class SingleServerView(QWidget):
         seam = self._gaming_mode
         if seam is None:
             return
-        account = self.account_edit.text().strip()
+        account = self.account_edit.text().strip() if self.account_edit is not None else ""
         if self._remember_account is not None and single_play.check_account(account) is None:
             self._remember_account(account)
         if not self._begin("adding the Gaming Mode shortcuts"):

@@ -31,12 +31,12 @@ def _catalog_with(entry: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def test_the_shipped_catalog_has_ddon_and_dfo_as_its_single_servers() -> None:
-    """DDON (one container) and DFO (host programs) are the second kind, not `games` entries."""
+def test_the_shipped_catalog_has_ddon_dfo_ffxi_and_wow_forever_as_its_single_servers() -> None:
+    """DDON (one container), DFO (host programs), FFXI and WoW Forever (stacks): the second kind."""
     catalog = load_catalog()
-    assert tuple(e.id for e in catalog.single) == ("ddon", "dfo")
-    assert not {"ddon", "dfo"} & {g.id for g in catalog.games}
-    assert catalog.is_single("ddon") and catalog.is_single("dfo")
+    assert tuple(e.id for e in catalog.single) == ("ddon", "dfo", "ffxi", "wow-forever")
+    assert not {"ddon", "dfo", "ffxi"} & {g.id for g in catalog.games}
+    assert catalog.is_single("ddon") and catalog.is_single("dfo") and catalog.is_single("ffxi")
     assert not catalog.is_single("wow-wotlk")
     with pytest.raises(KeyError):
         catalog.get("ddon")

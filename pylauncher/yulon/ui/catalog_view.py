@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Protocol
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, Signal
@@ -522,6 +523,15 @@ _CAMPAIGN_PRESENTATION: dict[str, _CampaignPresentation] = {
         glyph="👊",
         subtitle="Dungeon Fighter Online",
     ),
+    "ffxi": _CampaignPresentation(
+        glyph="💎",
+        subtitle="Final Fantasy XI",
+    ),
+    "wow-forever": _CampaignPresentation(
+        glyph="⚔️",
+        subtitle="WoW Forever Classic with bots",
+        software="ForeverCore with Karrz's PlayerbotV2 bots",
+    ),
 }
 
 _CAMPAIGN_GLYPHS: dict[str, str] = {k: v.glyph for k, v in _CAMPAIGN_PRESENTATION.items()}
@@ -547,6 +557,23 @@ def _server_software(entry: CatalogEntry) -> str:
     return _SERVER_SOFTWARE.get(entry.id) or re.sub(r"\s*@\s*\S+", "", entry.emulator.name)
 
 
+def _single_engine(entry: SingleEntry) -> ModuleType:
+    """The install engine's module for a single server's runtime, imported where it is used.
+
+    Each has `existing_install()` and `cancelled_message()` with one signature: the
+    container engine for `native` (DDON), the host-program one for `process` (DFO),
+    the published-images one for `stack` (FFXI). Imported here rather than at the top
+    for MOVE_IN_FILE's reason: the Catalog view must not pull every engine in at start.
+    """
+    from yulon.catalog import process_install, single_install, stack_install
+
+    if entry.install.process is not None:
+        return process_install
+    if entry.install.stack is not None:
+        return stack_install
+    return single_install
+
+
 RECOMMENDED = "wow-wotlk"
 """The one tile marked "Recommended" (T195 C23): where a first-time player should start."""
 
@@ -570,12 +597,20 @@ WELCOME = (
 _SINGLE_GROUP_TITLES: dict[str, str] = {
     "ddon": "DDON",
     "dfo": "DFO",
+    "ffxi": "FFXI",
 }
 
 _SINGLE_GROUP_GLYPHS: dict[str, str] = {
     "ddon": "dragon",
     "dfo": "sparkles",
+    "ffxi": "sword",
 }
+
+_SINGLES_ON_THE_WOW_CARD: tuple[str, ...] = ("wow-forever",)
+"""Single servers that are WoW realms, listed on the WoW card after its server cores.
+
+A card of their own would be a fifth on Stage 1, and the K4 window (960x640) fits four.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,8 +631,14 @@ def group_catalog_entries(
 ) -> tuple[GameGroup, ...]:
     """Group `Catalog.games` and `Catalog.single` into franchise `GameGroup`s."""
     groups: list[GameGroup] = []
-    if catalog.games:
-        count = len(catalog.games)
+    wow_singles = (
+        tuple(s for s in catalog.single if s.id in _SINGLES_ON_THE_WOW_CARD)
+        if include_single
+        else ()
+    )
+    wow_entries: tuple[CatalogEntry | SingleEntry, ...] = (*catalog.games, *wow_singles)
+    if wow_entries:
+        count = len(wow_entries)
         word = "Server Core" if count == 1 else "Server Cores"
         groups.append(
             GameGroup(
@@ -605,11 +646,13 @@ def group_catalog_entries(
                 title="WoW",
                 subtitle=f"{count} {word}",
                 glyph="sword",
-                entries=tuple(catalog.games),
+                entries=wow_entries,
             )
         )
     if include_single and catalog.single:
         for single in catalog.single:
+            if single in wow_singles:
+                continue
             title = _SINGLE_GROUP_TITLES.get(single.id, single.name)
             glyph = _SINGLE_GROUP_GLYPHS.get(single.id, "shield")
             subtitle = (
@@ -1501,10 +1544,7 @@ class CatalogView(QWidget):
         pass the same folder rule as `attach_existing()`. No client folder is asked
         for: Play asks for the player's own when it is used.
         """
-        # The engine's module, imported where it is used (see MOVE_IN_FILE).
-        from yulon.catalog import process_install, single_install
-
-        engine = process_install if entry.install.process is not None else single_install
+        engine = _single_engine(entry)
         start = self._home / entry.install.default_server_dir
         server_dir = self._pick_dir(
             self,
@@ -1781,8 +1821,18 @@ class CatalogView(QWidget):
             server_dir = self._pick_dir(self, f"Where should {entry.name} be installed?", suggested)
         if server_dir is None:
             return False
+        # WoW Forever makes its maps from the player's own client at install
+        # (`catalog.ClientExtract`), so that one asks for the client folder here.
+        client_dir: Path | None = None
+        extract = entry.install.client_extract
+        if extract is not None:
+            client_dir = self._pick_dir(
+                self, f"Select {extract.client} (Yu'lon never downloads a client)", self._home
+            )
+            if client_dir is None:
+                return False
         return self._run_install(
-            entry, server_dir, None, self._make_single_installer(entry), first_install=True
+            entry, server_dir, client_dir, self._make_single_installer(entry), first_install=True
         )
 
     def _ask_folders(self, entry: CatalogEntry) -> tuple[Path, Path | None] | None:
@@ -1963,12 +2013,8 @@ class CatalogView(QWidget):
             # cancelled, and on a run stopped earlier still, a directory that did
             # not exist at all (install gate, 2026-08-23).
             if self._catalog.is_single(game_id):
-                # The engine's module, imported where it is used (see MOVE_IN_FILE).
-                from yulon.catalog import process_install, single_install
-
                 single = self._catalog.get_single(game_id)
-                engine = process_install if single.install.process is not None else single_install
-                note = engine.cancelled_message(single, server_dir)
+                note = _single_engine(single).cancelled_message(single, server_dir)
             else:
                 note = cancelled_install_message(self._catalog.get(game_id), server_dir)
             logger.info(f"install of {game_id} was cancelled; nothing remembered")
