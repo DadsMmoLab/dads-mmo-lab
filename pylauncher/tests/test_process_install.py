@@ -252,6 +252,7 @@ def test_a_fresh_install_runs_every_stage_in_order_and_records_them(
     assert [line[4:] for line in said if line.startswith("--- ")] == list(STAGE_NAMES)
     state = native.read_state(server, valid=STAGE_NAMES)
     assert state is not None and state.completed == STAGE_NAMES and state.family == "go"
+    assert (state.engine or "docker") == "docker", "item 4: without the switch the record reads docker"
     checkout = server / "src"
     assert (checkout / TARGET).read_text() == 'package catalog\n\nconst sha = "new"\n'
     assert json.loads((checkout / UNPACKED).read_text())["sha256"] == _sha(SOURCE_ZIP)
@@ -260,6 +261,24 @@ def test_a_fresh_install_runs_every_stage_in_order_and_records_them(
     assert "Applied fix.patch: applies fix.patch" in said
     assert said[-1].startswith("DFO is built in")
     assert "choose your DFO client folder" in said[-1]
+
+
+def test_a_fresh_process_install_records_podman_under_the_switch(
+    tmp_path: Path, installers: Path, fakes: Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 4: the process fresh record comes from `engine.resolve()`."""
+    from yulon import engine
+
+    monkeypatch.setenv("YULON_ENGINE", "podman")
+    monkeypatch.setattr(engine, "_on_supported_platform", lambda *_a, **_k: True)
+    engine._reset_for_tests()
+    try:
+        server = tmp_path / "yulon-dfo"
+        _run(_engine(_entry(), installers, fakes), server)
+        state = native.read_state(server, valid=STAGE_NAMES)
+        assert state is not None and state.engine == "podman"
+    finally:
+        engine._reset_for_tests()
 
 
 def test_the_build_uses_the_installs_own_go_and_nothing_of_the_players(

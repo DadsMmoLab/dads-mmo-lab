@@ -142,10 +142,29 @@ def test_a_fresh_install_runs_every_stage_in_order_and_records_them(
     assert state.completed == STAGE_NAMES
     assert state.game_id == "ddon" and state.family == "arrowgene"
     assert state.last_error == ""
+    assert (state.engine or "docker") == "docker"
     assert daemon.built == [(server, composegen.COMPOSE_FILES)]
     assert daemon.started == [(server, "ddon-server")]
     (spec,) = daemon.cloned
     assert spec.dest == server / "src" and spec.rev == DDON.emulator.sources[0].rev
+
+
+def test_a_fresh_single_install_records_podman_under_the_switch(
+    tmp_path: Path, daemon: Daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 4: the single-container fresh record comes from `engine.resolve()`."""
+    from yulon import engine
+
+    monkeypatch.setenv("YULON_ENGINE", "podman")
+    monkeypatch.setattr(engine, "_on_supported_platform", lambda *_a, **_k: True)
+    engine._reset_for_tests()
+    try:
+        server = tmp_path / "yulon-ddon"
+        _run(SingleInstaller(DDON, seams=daemon.seams()), server)
+        state = native.read_state(server, valid=STAGE_NAMES)
+        assert state is not None and state.engine == "podman"
+    finally:
+        engine._reset_for_tests()
 
 
 def test_the_rendered_files_carry_this_install_s_identity(tmp_path: Path, daemon: Daemon) -> None:

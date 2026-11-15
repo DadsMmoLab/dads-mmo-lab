@@ -421,8 +421,13 @@ class SingleInstaller:
                     f"{', …' if len(leftovers) > 3 else ''}), so nothing was installed there. "
                     "Pick an empty folder or a new one. Nothing was written."
                 )
+        from yulon import engine as engine_seam
+
         return native.InstallState(
-            game_id=self.entry.id, install_id=expected, family=self._native.family
+            game_id=self.entry.id,
+            install_id=expected,
+            family=self._native.family,
+            engine=engine_seam.resolve(),
         )
 
     @staticmethod
