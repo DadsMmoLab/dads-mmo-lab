@@ -51,6 +51,16 @@ class KnownInstall(BaseModel):
     module client files go into it and never into `client_dir`. Optional with a
     default, so every `state.json` written before it existed still loads.
     """
+    trusted_ca_thumbprint: str | None = None
+    """The thumbprint of the CA this install's Play added to Windows' trust store (T888).
+
+    Kept HERE, and not read back from the install's `certs/ca.pem`, because removing a
+    server from Yu'lon takes the CA out of `LocalMachine\\Root` and may run after the
+    folder - and the certificate it holds - is gone. Empty for an install that never
+    trusted anything on Windows (a Steam Deck install trusts the CA inside the game's own
+    Wine prefix, which is deleted with the install). ADDITIVE: optional, so every
+    `state.json` written before it existed still loads.
+    """
 
     def keeping_unknown_fields_of(self, known: KnownInstall | None) -> KnownInstall:
         """This record, plus the fields `known` carries that this build does not know.

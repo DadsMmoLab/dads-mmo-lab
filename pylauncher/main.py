@@ -1143,6 +1143,31 @@ def build_window() -> object:
 
         return set_client_dir
 
+    def _remember_trust_live(game: str, server_dir: Path) -> Callable[[str], None]:
+        """`state.remember()` over the window's own live `AppState`, for the trusted CA (T888).
+
+        Play hands this the thumbprint of the CA it put in this computer's trust store, so
+        removing the server can take that CA out again after its folder is gone. A failed
+        save is a warning, never a failed Play: the trust itself is already in place, and
+        the CA can still be taken out from the certificate manager by hand.
+        """
+        from yulon.state import save_state
+
+        def set_trusted_thumbprint(thumbprint: str) -> None:
+            install = state.find(game, server_dir)
+            if install is None or install.trusted_ca_thumbprint == thumbprint:
+                return
+            state.remember(install.model_copy(update={"trusted_ca_thumbprint": thumbprint}))
+            try:
+                save_state(state)
+            except OSError as exc:
+                logger.warning(
+                    f"could not remember the trusted certificate for {game} at {server_dir}: "
+                    f"{exc}"
+                )
+
+        return set_trusted_thumbprint
+
     def _remember_play_client_live(game: str, server_dir: Path) -> Callable[[Path | None], None]:
         """`_remember_client_live()` for the ready-to-play client (T181), same shape and reasons.
 
@@ -1339,6 +1364,35 @@ def build_window() -> object:
             return
         finish_removal(key)
 
+    def _remove_trust(game: str, folder: Path) -> None:
+        """Take a WoW Forever install's login trust off this computer as its record goes (T888).
+
+        Its CA is in this computer's trust store (Windows) or its hosts file names the
+        server (both), and both outlive the folder: an install left behind trusts a CA
+        whose key is gone with it. Nothing here can fail the removal -- a refused prompt
+        or a missing `sudo` leaves the command lines in the log (Details) and the record
+        is still forgotten, because a server the player cannot remove is worse than a
+        trust they can take out by hand.
+        """
+        from yulon import forever_play
+
+        try:
+            entry = catalog.get_single(game)
+        except KeyError:
+            return
+        if entry.install.stack is None or entry.play is None or entry.play.forever is None:
+            return
+        install = state.find(game, folder)
+        left = forever_play.remove_trust(
+            entry,
+            folder,
+            thumbprint=install.trusted_ca_thumbprint if install is not None else None,
+        )
+        for line in left:
+            logger.warning(
+                "taking WoW Forever's trust off this computer needs this by hand: " + line
+            )
+
     def finish_removal(key: tuple[str, Path]) -> None:
         """Forget the record, then drop the tab: `_forget_live_record()` + `on_uninstalled()`.
 
@@ -1351,6 +1405,7 @@ def build_window() -> object:
         that is still in `state.json` would come back at the next launch.
         """
         game, folder = key
+        _remove_trust(game, folder)
         try:
             _forget_live_record(game, folder)()
         except OSError as exc:
@@ -1635,6 +1690,7 @@ def build_window() -> object:
             # same live writer (T36); the account name beside it in `ui.json`.
             client_dir=known.client_dir if known else None,
             remember_client_dir=_remember_client_live(game, server_dir),
+            remember_trust=_remember_trust_live(game, server_dir),
             account=ui_settings.launcher_place(game, server_dir).account,
             remember_account=remember_account,
             # Add to Steam Deck (Gaming Mode)…: a seam on Linux only, None elsewhere.

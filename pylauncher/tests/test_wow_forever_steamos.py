@@ -406,7 +406,7 @@ def _linux_seams(calls: list[str], *, hosts: bool = True) -> forever_play.PlaySe
 
     return forever_play.PlaySeams(
         state_of=lambda _c: docker.ContainerState(status="running"),
-        trust=lambda *_a: calls.append("windows trust") or True,
+        trust=lambda *_a, **_k: calls.append("windows trust") or True,
         account=lambda *_a: (calls.append("account") or ("mmodad@local", "pass")),
         hosts_ready=lambda portal: calls.append(f"hosts {portal}") is None and hosts,
         prepare_proton=prepare,  # type: ignore[arg-type]

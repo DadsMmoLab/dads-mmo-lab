@@ -11,7 +11,16 @@ key never leaves the install's certs/ folder. Play therefore needs, once per com
 
 Both need an administrator, so they go behind ONE UAC prompt
 (`platform.elevated_admin_batch()`), and only what is missing is done. Reading is
-unelevated and has no side effects. `remove_commands()` is what an uninstall would run.
+unelevated and has no side effects.
+
+`remove()` is the other half, and it runs when the server is removed from Yu'lon or
+uninstalled: the CA out of `LocalMachine\\Root` by the thumbprint the install record keeps
+(T888), and the one tagged hosts line out, then a resolver flush. A CA left in the machine
+store is a CA this computer trusts forever, and the install folder it came from is gone
+with its key. On Linux (the Steam Deck) there is no machine store to touch — the CA is
+trusted inside the game's own Wine prefix, which is deleted with the server — so only the
+hosts line goes, through `sudo -n`; when that cannot run, the one command comes back for
+the player to run (Details).
 """
 
 from __future__ import annotations
@@ -20,6 +29,7 @@ import base64
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -73,11 +83,13 @@ def hosts_maps(text: str, portal: str) -> bool:
 class TrustSeams:
     """Everything this module reaches outside itself through. Real by default."""
 
-    run: Callable[[list[str]], subprocess.CompletedProcess[str]] = runner.run
+    run: Callable[..., subprocess.CompletedProcess[str]] = runner.run
     batch: Callable[[list[list[str]]], tuple[list[str], Path] | None] = (
         platform.elevated_admin_batch
     )
     hosts: Callable[[], Path] = hosts_path
+    which: Callable[[str], str | None] = shutil.which
+    os_name: Callable[[], str] = platform.detect
 
 
 def missing_commands(ca: Path, portal: str, *, seams: TrustSeams | None = None) -> list[list[str]]:
@@ -93,21 +105,33 @@ def missing_commands(ca: Path, portal: str, *, seams: TrustSeams | None = None) 
     except OSError:
         text = ""
     if not hosts_maps(text, portal):
-        # An empty echo first: a hosts file that does not end in a newline must not have
-        # this line glued to its last one.
-        commands.append(["cmd", "/c", f"(echo.& echo 127.0.0.1 {portal} {HOSTS_TAG})>>{hosts}"])
+        commands.append(_append_hosts(hosts, portal))
     if commands:
         commands.append(["cmd", "/c", "ipconfig", "/flushdns"])
     return commands
 
 
-def ensure(ca: Path, portal: str, *, seams: TrustSeams | None = None) -> bool:
+def ensure(
+    ca: Path,
+    portal: str,
+    *,
+    seams: TrustSeams | None = None,
+    record: Callable[[str], None] | None = None,
+) -> bool:
     """Make this computer trust `ca` and map `portal`; True if an administrator prompt was shown.
 
-    Raises `TrustError` when the player says No or a command fails, with what to do.
+    `record` is handed the thumbprint once the CA is trusted (or was already), so the
+    install's record can take it out again later (`remove`). Raises `TrustError` when the
+    player says No or a command fails, with what to do.
     """
     s = seams if seams is not None else TrustSeams()
     commands = missing_commands(ca, portal, seams=s)
+    thumb = thumbprint(ca)
+    if record is not None:
+        try:
+            record(thumb)
+        except OSError as exc:
+            logger.warning(f"could not record the trusted certificate's thumbprint: {exc}")
     if not commands:
         return False
     wrapped = s.batch(commands)
@@ -160,15 +184,125 @@ def _by_hand(commands: Sequence[list[str]]) -> str:
     )
 
 
-def remove_commands(ca: Path) -> list[list[str]]:
-    """What undoes `ensure()`: the CA out of Root, and this module's hosts line out of hosts."""
-    hosts = hosts_path()
+def hosts_line(portal: str) -> str:
+    """The one line this module adds to hosts: loopback, this server's name, and our tag."""
+    return f"127.0.0.1 {portal} {HOSTS_TAG}"
+
+
+def tagged(hosts: Path) -> bool:
+    """Whether `hosts` holds this module's line (read unelevated; a missing file has none)."""
+    try:
+        return HOSTS_TAG in hosts.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def _append_hosts(hosts: Path, portal: str) -> list[str]:
+    """`cmd`'s one-line append. An empty echo first: a hosts file with no final newline
+    must not have this line glued to its last one, and the path is quoted, so a
+    `SystemRoot` with a space in it stays one file name (T888)."""
+    return ["cmd", "/c", f'(echo.& echo {hosts_line(portal)})>>"{hosts}"']
+
+
+def _strip_hosts(hosts: Path) -> list[str]:
+    """`cmd`'s one-line removal of the tagged line, from an otherwise-empty file too.
+
+    `findstr /v` exits 1 when it finds no line to keep, and a plain `&&` would then skip
+    the `move` and leave the old hosts file in place (T888). The `|| type nul > tmp` writes
+    an empty file instead, so the move always lands. Same folder, so the move replaces.
+    """
+    kept = hosts.with_name(hosts.name + ".yulon")
     return [
-        ["certutil", "-delstore", "Root", thumbprint(ca)],
-        [
-            "cmd",
-            "/c",
-            f'findstr /v /c:"{HOSTS_TAG}" "{hosts}" > "{hosts}.yulon" && move /y "{hosts}.yulon" '
-            f'"{hosts}"',
-        ],
+        "cmd",
+        "/c",
+        f'(findstr /v /c:"{HOSTS_TAG}" "{hosts}" > "{kept}" || type nul > "{kept}") && '
+        f'move /y "{kept}" "{hosts}"',
     ]
+
+
+def remove_commands(
+    ca: Path | None = None, *, thumb: str | None = None, hosts: Path | None = None
+) -> list[list[str]]:
+    """What undoes `ensure()`: the CA out of Root, and this module's hosts line out of hosts.
+
+    `thumb` is the thumbprint the install record kept (`state.KnownInstall.trusted_ca_thumbprint`),
+    which is what makes this work after the certs folder — and the CA the thumbprint is of —
+    is gone. `ca` is the fallback for an install that predates that record. The hosts half
+    is one command and one file, whatever the CA's answer was.
+    """
+    known = thumb if thumb is not None else (thumbprint(ca) if ca is not None else None)
+    commands: list[list[str]] = []
+    if known:
+        commands.append(["certutil", "-delstore", "Root", known])
+    commands.append(_strip_hosts(hosts if hosts is not None else hosts_path()))
+    return commands
+
+
+def remove(
+    *, ca: Path | None = None, thumb: str | None = None, seams: TrustSeams | None = None
+) -> tuple[str, ...]:
+    """Take this install's trust off the computer; the commands it could not run.
+
+    Windows: the CA's thumbprint out of `LocalMachine\\Root` and the tagged hosts line out,
+    in ONE elevated batch (one prompt) — plus a resolver flush, because Windows caches the
+    name it no longer has to redirect. Linux: there is no machine store this app put
+    anything in (the CA lives in the game's own prefix), so only the hosts line, through
+    `sudo -n`. What cannot run there comes back as the command for the player, one line
+    each, which the caller shows under Details.
+    """
+    s = seams if seams is not None else TrustSeams()
+    hosts = s.hosts()
+    if s.os_name() != "windows":
+        if not tagged(hosts):
+            return ()
+        command = ["sudo", "-n", "sed", "-i", f"/{HOSTS_TAG}/d", str(hosts)]
+        if s.which("sudo") is not None:
+            try:
+                if s.run(command).returncode == 0:
+                    logger.info("took WoW Forever's hosts line out")
+                    return ()
+            except OSError as exc:
+                logger.warning(f"sudo could not take the hosts line out: {exc}")
+        return (platform.command_text(command),)
+    commands = [
+        *remove_commands(ca, thumb=thumb, hosts=hosts),
+        ["cmd", "/c", "ipconfig", "/flushdns"],
+    ]
+    wrapped = s.batch(commands)
+    if wrapped is None:
+        failed = [c for c in commands if _ran(s, c) != 0]
+    else:
+        argv, results_path = wrapped
+        try:
+            try:
+                proc = s.run(argv)
+            except OSError as exc:
+                proc = subprocess.CompletedProcess(argv, 1, "", str(exc))
+            results = platform.read_batch_results(results_path, len(commands))
+        finally:
+            try:
+                results_path.unlink()
+            except OSError:
+                pass
+        if proc.returncode == platform.UAC_DECLINED:
+            return tuple(platform.command_text(c) for c in commands)
+        if results is None:
+            return tuple(platform.command_text(c) for c in commands)
+        failed = [c for c, (rc, _out) in zip(commands, results, strict=True) if rc != 0]
+    if failed:
+        logger.warning(
+            "WoW Forever's trust could not be taken off this computer: "
+            + "; ".join(platform.command_text(c) for c in failed)
+        )
+        return tuple(platform.command_text(c) for c in failed)
+    logger.info("took WoW Forever's CA and hosts line off this computer")
+    return ()
+
+
+def _ran(s: TrustSeams, command: list[str]) -> int:
+    """`command`'s exit status, 1 when it could not run at all."""
+    try:
+        return s.run(command).returncode
+    except OSError as exc:
+        logger.warning(f"{platform.command_text(command)} could not run: {exc}")
+        return 1

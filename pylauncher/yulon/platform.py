@@ -603,7 +603,7 @@ def shell_metacharacter(text: str) -> str | None:
 
 
 _CMD_HOSTS_APPEND = re.compile(
-    r'^\(echo\.& echo 127\.0\.0\.1 [A-Za-z0-9.-]+ #[A-Za-z0-9_-]+\)>>"[^"&|<>^%!()]+"$'
+    r'^\(echo\.& echo 127\.0\.0\.1 [A-Za-z0-9.-]+ # ?[A-Za-z0-9_-]+\)>>"[^"&|<>^%!()]+"$'
 )
 r"""`forever_trust.missing_commands()`'s hosts append: the loopback line, then the quoted file."""
 
