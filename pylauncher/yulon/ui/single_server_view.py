@@ -118,7 +118,7 @@ class SingleServerView(QWidget):
         *,
         client_dir: Path | None = None,
         remember_client_dir: Callable[[Path | None], None] | None = None,
-        remember_trust: Callable[[str], None] | None = None,
+        trust_record: forever_play.TrustRecord | None = None,
         account: str = "",
         remember_account: Callable[[str], None] | None = None,
         run_job: JobRunner | None = None,
@@ -142,8 +142,11 @@ class SingleServerView(QWidget):
         self._play_forever_seam = play_forever
         self.client_dir = client_dir
         self._remember_client_dir = remember_client_dir
-        # Where Play records the CA it trusted, so removing this server takes it out (T888).
-        self._remember_trust = remember_trust
+        # Where Play records the CA it trusted (and the ones it replaced), so removing this
+        # server takes them out (T888).
+        self._trust_record = (
+            trust_record if trust_record is not None else forever_play.TrustRecord()
+        )
         self._remember_account = remember_account
         self._os_name = os_name
         self._pick_dir = pick_dir
@@ -832,7 +835,7 @@ class SingleServerView(QWidget):
         server_dir = self.controller.server_dir
         client_dir = self.client_dir
         seams = forever_play.PlaySeams(
-            start_client=self._start_client, remember_trust=self._remember_trust
+            start_client=self._start_client, trust_record=self._trust_record
         )
         self._run(
             lambda: self._play_forever_seam(

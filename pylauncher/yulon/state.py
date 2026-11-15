@@ -62,6 +62,17 @@ class KnownInstall(BaseModel):
     `state.json` written before it existed still loads.
     """
 
+    stale_ca_thumbprints: list[str] = Field(default_factory=list)
+    """The CA thumbprints this install trusted before and still has to take out (T888).
+
+    A certificate remake replaces `certs/ca.pem` with a new CA, and the old one is a root
+    this computer keeps trusting until `certutil -delstore` succeeds. The old thumbprint is
+    written HERE before anything replaces the file, so a prompt declined after the remake
+    -- or Yu'lon closed between the two -- leaves the name of the root to delete. Play and
+    removal keep asking the store for each one, and drop it from this list once `certutil
+    -store` says the store no longer holds it. ADDITIVE: optional, like the one above.
+    """
+
     def keeping_unknown_fields_of(self, known: KnownInstall | None) -> KnownInstall:
         """This record, plus the fields `known` carries that this build does not know.
 

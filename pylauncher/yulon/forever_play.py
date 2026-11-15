@@ -54,12 +54,30 @@ class Played:
 
 
 @dataclass(frozen=True)
+class TrustRecord:
+    """The install record's trust half (`state.KnownInstall`), as Play reads and writes it.
+
+    `stale` names the CA thumbprints still to be deleted from this computer's store;
+    `remember_stale` persists one BEFORE a remake replaces the certificate it is of
+    (T888), so a declined prompt cannot strand it; `forget_stale` drops one once the store
+    says it is gone; `trusted` records the new CA's thumbprint, and the trust step calls it
+    only after the batch and the post-check have succeeded. The defaults are a record with
+    nothing in it, for a Play that is not driven by a window.
+    """
+
+    stale: Callable[[], Sequence[str]] = lambda: ()
+    remember_stale: Callable[[str], None] = lambda _thumb: None
+    forget_stale: Callable[[str], None] = lambda _thumb: None
+    trusted: Callable[[str], None] | None = None
+
+
+@dataclass(frozen=True)
 class PlaySeams:
     """Everything Play reaches outside itself through. Real by default."""
 
     state_of: Callable[[str], docker.ContainerState] = docker.container_state
     trust: Callable[..., bool] = forever_trust.ensure
-    remember_trust: Callable[[str], None] | None = None
+    trust_record: TrustRecord = TrustRecord()
     """Where the trusted CA's thumbprint is recorded (`state.KnownInstall`), for removal."""
     remake_certificates: Callable[[Path], None] = stack_install.make_certificates
     """Make the install's certificates again, in the stack's own image (T888)."""
@@ -179,11 +197,20 @@ def remake_certificates(
     Raises `PlayRefusal` when the script or a restart fails.
     """
     ca = server_dir / login.ca
-    stale = ""
+    old = ""
     try:
-        stale = forever_trust.thumbprint(ca) if ca.is_file() else ""
+        old = forever_trust.thumbprint(ca) if ca.is_file() else ""
     except forever_trust.TrustError:
-        stale = ""
+        old = ""
+    if old and old not in seams.trust_record.stale():
+        try:
+            seams.trust_record.remember_stale(old)
+        except OSError as exc:
+            raise single_play.PlayRefusal(
+                f"The certificate this server used before could not be remembered "
+                f"({exc.strerror or exc}), so it was not replaced: a certificate this "
+                "computer trusts must not be lost track of. Press Play again."
+            ) from exc
     for name in CERTIFICATE_FILES:
         try:
             (ca.parent / name).unlink(missing_ok=True)
@@ -213,7 +240,7 @@ def remake_certificates(
         + (", ".join(restarted) if restarted else "nothing")
     )
     say("This server's certificate was made again for its own login name.")
-    return stale
+    return old
 
 
 def _listener_services(entry: SingleEntry) -> tuple[str, ...]:
@@ -262,18 +289,18 @@ def play(
             f"Start {entry.name} first and wait until it is ready: Play makes your account "
             "through the running world server."
         )
-    stale = ""
     if stack is not None and stack.certificates:
         reason = certificate_remake_reason(server_dir, login)
         if reason is not None:
-            stale = remake_certificates(entry, server_dir, login, seams=s, say=say)
+            remake_certificates(entry, server_dir, login, seams=s, say=say)
     if os_name == "windows":
         try:
             asked = s.trust(
                 server_dir / login.ca,
                 login.portal,
-                record=s.remember_trust,
-                stale=stale or None,
+                record=s.trust_record.trusted,
+                stale=s.trust_record.stale(),
+                forget=s.trust_record.forget_stale,
             )
         except forever_trust.TrustError as exc:
             raise single_play.PlayRefusal(str(exc)) from exc
