@@ -22,7 +22,7 @@ In order, on the worker thread the tab gives it:
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,6 +68,10 @@ class PlaySeams:
     account: Callable[..., tuple[str, str]] = forever_account.ensure
     start_client: Callable[[play_launch.LaunchSpec], bool] = single_play.start
     watch: Callable[..., object] = forever_key.start_watch
+    game_pids: Callable[[Path], Sequence[int]] = forever_key.pids_under
+    find_game: Callable[[Path], int | None] = lambda client: forever_keywatch.game_pid(
+        Path("/proc"), client
+    )
     hosts_ready: Callable[[str], bool] = forever_proton.hosts_ready
     prepare_proton: Callable[..., forever_proton.Runtime] = forever_proton.prepare
     start_game: Callable[..., None] = forever_proton.start_game
@@ -116,6 +120,9 @@ def _set(lines: list[str], key: str, value: str) -> list[str]:
         return [want if line.startswith(f"SET {key} ") else line for line in lines]
     return [*lines, want]
 
+
+ALREADY_RUNNING = "WoW Forever is already running. Close it, then press Play again."
+"""What Play refuses with while this client's game runs (T888)."""
 
 CERTIFICATE_FILES: tuple[str, ...] = (
     "ca.key",
@@ -239,6 +246,16 @@ def play(
         if problem is not None:
             raise single_play.PlayRefusal(problem)
     assert client_dir is not None and entry.play is not None
+    exe = client_dir / entry.play.exe
+    # One game per Play (T888): the key watch writes into a process's memory, and the game
+    # it must write into is the one this press starts, never the one already running.
+    before: tuple[int, ...] = ()
+    if os_name == "windows":
+        before = tuple(s.game_pids(client_dir))
+        if before:
+            raise single_play.PlayRefusal(ALREADY_RUNNING)
+    elif s.find_game(client_dir) is not None:
+        raise single_play.PlayRefusal(ALREADY_RUNNING)
     world = forever_account.container_of(entry, forever_account.WORLD_SERVICE)
     if s.state_of(world).status != "running":
         raise single_play.PlayRefusal(
@@ -268,7 +285,6 @@ def play(
         account, password = s.account(entry, server_dir)
     except forever_account.AccountError as exc:
         raise single_play.PlayRefusal(str(exc)) from exc
-    exe = client_dir / entry.play.exe
     try:
         write_config(exe.parent, login, forever_account.typed_name(login))
     except OSError as exc:
@@ -282,7 +298,7 @@ def play(
             entry, client_dir, host="127.0.0.1", account="", server_dir=server_dir, os_name=os_name
         )
         s.start_client(spec)
-        s.watch(exe, key, login.region_group)
+        s.watch(exe, key, login.region_group, before=before)
     else:
         try:
             runtime = s.prepare_proton(
@@ -291,7 +307,7 @@ def play(
             s.start_game(runtime, exe, entry.play.args)
         except (forever_proton.ProtonError, forever_trust.TrustError) as exc:
             raise single_play.PlayRefusal(str(exc)) from exc
-        s.keywatch(key, login.region_group, world_port(entry))
+        s.keywatch(key, login.region_group, world_port(entry), client_dir=client_dir, before=before)
     logger.info(f"started {exe} for {account}")
     return Played(account=forever_account.typed_name(login), password=password, asked_admin=asked)
 

@@ -348,6 +348,51 @@ class FakeMemory:
         pass
 
 
+def test_the_key_watch_attaches_only_to_the_pid_that_appeared_after_launch() -> None:
+    """T888 item 5: an older copy of the game keeps running; its memory is not this launch's."""
+    memory = FakeMemory(_table())
+    opened: list[int] = []
+    ticks = {"n": 0}
+
+    def pids(_exe: Path) -> list[int]:
+        ticks["n"] += 1
+        return [111, 222] if ticks["n"] < 3 else []
+
+    applied = forever_key.watch(
+        Path("Wow.exe"),
+        KEY,
+        8,
+        before=(111,),
+        seams=forever_key.KeySeams(
+            pids=pids,
+            open_memory=lambda pid: (opened.append(pid), memory)[1],
+            sleep=lambda _s: None,
+        ),
+    )
+    assert applied and opened == [222], "the pre-existing pid was never attached to"
+
+
+def test_a_second_key_watch_is_not_started_while_one_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T888 item 5: two watches over one game would rewrite the same table from two threads."""
+    gate = threading.Event()
+    started: list[int] = []
+
+    def hold(*_a: object) -> None:
+        started.append(1)
+        gate.wait(10)
+
+    monkeypatch.setattr(forever_key, "_logged_watch", hold)
+    try:
+        first = forever_key.start_watch(Path("Wow.exe"), KEY, 8)
+        second = forever_key.start_watch(Path("Wow.exe"), KEY, 8)
+        assert second is first and len(started) == 1
+    finally:
+        gate.set()
+        first.join(10)
+
+
 def test_the_watch_writes_the_key_and_writes_it_again_after_the_game_rebuilds_its_table() -> None:
     memory = FakeMemory(_table())
     ticks = {"n": 0}
@@ -834,7 +879,9 @@ def _play_seams(calls: list[str], *, world: str = "running") -> forever_play.Pla
         trust=trust,
         account=account,
         start_client=start,
-        watch=lambda exe, key, group: calls.append(f"watch {exe.name} {group}"),
+        watch=lambda exe, key, group, **_kw: calls.append(f"watch {exe.name} {group}"),
+        game_pids=lambda _client: (),
+        find_game=lambda _client: None,
         restart_service=lambda _where, service, **_kw: calls.append(f"restart {service}"),
     )
 
@@ -990,6 +1037,44 @@ def test_a_ca_the_key_it_left_beside_it_is_remade_even_when_it_passes_the_check(
     forever_play.play(FOREVER, server, _client(tmp_path), os_name="windows", seams=seams)
     assert made == [server]
     assert not (server / "certs" / "ca.key").exists()
+
+
+def test_play_refuses_while_this_clients_game_already_runs(tmp_path: Path) -> None:
+    """T888 item 5: a second press would write this server's key into the running copy."""
+    calls: list[str] = []
+    seams = forever_play.PlaySeams(
+        **{**_play_seams(calls).__dict__, "game_pids": lambda _client: (4242,)}
+    )
+    with pytest.raises(PlayRefusal) as raised:
+        forever_play.play(
+            FOREVER,
+            _server_with_certs(tmp_path),
+            _client(tmp_path),
+            os_name="windows",
+            seams=seams,
+        )
+    assert str(raised.value) == "WoW Forever is already running. Close it, then press Play again."
+    assert calls == [], "nothing is trusted, made or started"
+
+
+def test_play_hands_the_pre_launch_pid_set_to_the_watch(tmp_path: Path) -> None:
+    """T888 item 5: the watcher is told what was already running, not left to guess."""
+    seen: list[tuple[int, ...]] = []
+    calls: list[str] = []
+    seams = forever_play.PlaySeams(
+        **{
+            **_play_seams(calls).__dict__,
+            "watch": lambda exe, key, group, before=(): seen.append(tuple(before)),
+        }
+    )
+    forever_play.play(
+        FOREVER,
+        _server_with_certs(tmp_path),
+        _client(tmp_path),
+        os_name="windows",
+        seams=seams,
+    )
+    assert seen == [()]
 
 
 def test_play_refuses_a_stopped_server_another_os_and_another_client(tmp_path: Path) -> None:
