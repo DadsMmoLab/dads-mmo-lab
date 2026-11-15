@@ -699,7 +699,10 @@ def test_removal_builds_the_ca_command_from_the_recorded_thumbprint(tmp_path: Pa
     assert commands[1][:2] == ["powershell.exe", "-NoProfile"]
     assert "# yulon-wow-forever" in commands[1][3]
     ca = _ca(tmp_path)
-    assert forever_trust.remove_commands(ca, hosts=hosts)[0] == [
+    installed = forever_trust.TrustSeams(
+        run=lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, "", "")
+    )
+    assert forever_trust.remove_commands(ca, hosts=hosts, seams=installed)[0] == [
         "certutil",
         "-delstore",
         "Root",
@@ -735,6 +738,56 @@ def test_removal_asks_for_nothing_when_there_is_nothing_to_undo(tmp_path: Path) 
         which=lambda _n: "/usr/bin/sudo",
     )
     assert forever_trust.remove(seams=linux) == ()
+
+
+def test_removal_does_not_prompt_for_a_ca_the_store_does_not_hold(tmp_path: Path) -> None:
+    """T888 round 3 M1: the ca.pem fallback was a `-delstore` whether or not it was there.
+
+    An install whose CA was never trusted (or is already gone) asked for an administrator
+    prompt to delete nothing. The store read says no, so `remove()` has nothing to prompt
+    for -- and no prompt is what it raises.
+    """
+    ca = _ca(tmp_path)
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 localhost\n")
+    batched: list[list[list[str]]] = []
+
+    def batch(commands: list[list[str]]) -> tuple[list[str], Path]:
+        batched.append(commands)
+        raise AssertionError("no prompt for a CA the store does not hold")
+
+    seams = forever_trust.TrustSeams(
+        run=lambda argv, **_kw: subprocess.CompletedProcess(argv, 1, "", ""),
+        batch=batch,
+        hosts=lambda: hosts,
+        os_name=lambda: "windows",
+        is_admin=lambda: False,
+    )
+    assert forever_trust.remove(ca=ca, seams=seams) == ()
+    assert batched == []
+
+
+def test_removal_survives_a_ca_file_that_is_gone(tmp_path: Path) -> None:
+    """T888 round 3 M1: `thumbprint(ca)` raises TrustError for a missing ca.pem.
+
+    `remove_trust()` caught only OSError, so the RuntimeError went through
+    `finish_removal()`, aborted it, and the record and the tab stayed. The record is the
+    player's removal request: log the unreadable file and carry on.
+    """
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 localhost\n")
+
+    def batch(commands: list[list[str]]) -> tuple[list[str], Path]:
+        raise AssertionError("no prompt with no CA to delete")
+
+    seams = forever_trust.TrustSeams(
+        run=lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, "", ""),
+        batch=batch,
+        hosts=lambda: hosts,
+        os_name=lambda: "windows",
+        is_admin=lambda: False,
+    )
+    assert forever_play.remove_trust(FOREVER, tmp_path / "gone", seams=seams) == ()
 
 
 def test_the_shared_hosts_line_stays_while_another_install_uses_it(tmp_path: Path) -> None:

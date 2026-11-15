@@ -478,23 +478,30 @@ def remove_commands(
     stale: Sequence[str] = (),
     hosts: Path | None = None,
     strip_hosts: bool = True,
+    seams: TrustSeams | None = None,
 ) -> list[list[str]]:
     """What undoes `ensure()`: the CA out of Root, and this module's hosts line out of hosts.
 
     `thumb` is the thumbprint the install record kept (`state.KnownInstall.trusted_ca_thumbprint`),
     which is what makes this work after the certs folder — and the CA the thumbprint is of —
-    is gone. `ca` is the fallback for an install that predates that record. `stale` are the
-    CAs this install replaced and has not seen leave the store yet. `strip_hosts` is False
-    while another WoW Forever install is on this computer: the one tagged line sends every
-    one of them to 127.0.0.1, and taking it out would stop the other one too.
+    is gone. `ca` is the fallback for an install that predates that record, and it is
+    deleted only when the store says it is there (`_installed()`): an install whose CA was
+    never trusted, or is already gone, must not raise an administrator prompt to delete
+    nothing. `stale` are the CAs this install replaced and has not seen leave the store
+    yet. `strip_hosts` is False while another WoW Forever install is on this computer: the
+    one tagged line sends every one of them to 127.0.0.1, and taking it out would stop the
+    other one too.
 
-    Empty when there is nothing to undo — no thumbprint recorded or pending, and no tagged
-    line in `hosts` — because an empty list is what `remove()` turns into no prompt at all
-    (T888).
+    Empty when there is nothing to undo — no thumbprint recorded or pending, no fallback
+    the store still holds, and no tagged line in `hosts` — because an empty list is what
+    `remove()` turns into no prompt at all (T888).
     """
     known = [t for t in [thumb, *dict.fromkeys(stale)] if t]
     if thumb is None and ca is not None:
-        known.insert(0, thumbprint(ca))
+        s = seams if seams is not None else TrustSeams()
+        fallback = thumbprint(ca)
+        if _installed(s, fallback):
+            known.insert(0, fallback)
     commands: list[list[str]] = [
         ["certutil", "-delstore", "Root", thumbprint_] for thumbprint_ in dict.fromkeys(known)
     ]
@@ -539,7 +546,9 @@ def remove(
                 logger.warning(f"sudo could not take the hosts line out: {exc}")
         return (f"sudo sed -i '/{HOSTS_TAG}/d' {hosts}",)
     pending = [t for t in dict.fromkeys(stale) if t and _installed(s, t)]
-    commands = remove_commands(ca, thumb=thumb, stale=pending, hosts=hosts, strip_hosts=strip_hosts)
+    commands = remove_commands(
+        ca, thumb=thumb, stale=pending, hosts=hosts, strip_hosts=strip_hosts, seams=s
+    )
     if not commands:
         return ()
     commands.append(["cmd", "/c", "ipconfig", "/flushdns"])
