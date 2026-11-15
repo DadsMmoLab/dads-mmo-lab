@@ -167,6 +167,8 @@ class TrustSeams:
     hosts: Callable[[], Path] = hosts_path
     which: Callable[[str], str | None] = shutil.which
     os_name: Callable[[], str] = platform.detect
+    is_admin: Callable[[], bool] = platform.windows_is_admin
+    """Whether this process is already elevated: the hosts file is then edited here, in Python."""
 
 
 def missing_commands(ca: Path, portal: str, *, seams: TrustSeams | None = None) -> list[list[str]]:
@@ -177,12 +179,8 @@ def missing_commands(ca: Path, portal: str, *, seams: TrustSeams | None = None) 
     if s.run(["certutil", "-store", "Root", thumb]).returncode != 0:
         commands.append(["certutil", "-addstore", "-f", "Root", str(ca)])
     hosts = s.hosts()
-    try:
-        text = hosts.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        text = ""
-    if not hosts_maps(text, portal):
-        commands.append(_append_hosts(hosts, portal))
+    if not hosts_maps(hosts_text(hosts), portal):
+        commands.append(append_command(hosts, portal))
     if commands:
         commands.append(["cmd", "/c", "ipconfig", "/flushdns"])
     return commands
@@ -194,19 +192,22 @@ def ensure(
     *,
     seams: TrustSeams | None = None,
     record: Callable[[str], None] | None = None,
-    stale: str | None = None,
+    stale: Sequence[str] = (),
+    forget: Callable[[str], None] | None = None,
 ) -> bool:
     """Make this computer trust `ca` and map `portal`; True if an administrator prompt was shown.
 
-    `record` is handed the thumbprint once the CA is trusted (or was already), so the
-    install's record can take it out again later (`remove`). `stale` is the thumbprint of
-    the CA this install trusted before (see `_trust`). Raises `TrustError` when the player
-    says No or a command fails, with what to do.
+    `record` is handed the thumbprint once the CA is trusted (or was already) and the
+    post-check has passed, so the install's record can take it out again later (`remove`).
+    `stale` are the thumbprints of CAs this install trusted before; each is deleted in the
+    same prompt, and `forget` is handed the ones the store no longer holds. Raises
+    `TrustError` when the player says No or a command fails, with what to do -- and in
+    that case neither `record` nor `forget` has been called.
     """
     s = seams if seams is not None else TrustSeams()
     verified = verified_ca(ca, portal)
     try:
-        return _trust(verified, portal, s, record, stale)
+        return _trust(verified, portal, s, record, stale, forget)
     finally:
         try:
             verified.unlink()
@@ -215,36 +216,46 @@ def ensure(
 
 
 def _trust(
-    ca: Path, portal: str, s: TrustSeams, record: Callable[[str], None] | None, stale: str | None
+    ca: Path,
+    portal: str,
+    s: TrustSeams,
+    record: Callable[[str], None] | None,
+    stale: Sequence[str],
+    forget: Callable[[str], None] | None,
 ) -> bool:
     """`ensure()` over the checked copy `ca`: what is missing, behind one prompt.
 
-    `stale` is the thumbprint of a CA this install trusted before (the one Play replaced):
-    its `certutil -delstore` goes first, in the same batch, so the old root leaves the
-    store in the same prompt that adds the new one.
+    `stale` are the thumbprints of CAs this install trusted before (the ones Play
+    replaced): each `certutil -delstore` goes first, in the same batch, so the old roots
+    leave the store in the same prompt that adds the new one. One the store no longer
+    holds is dropped from the install record instead (`forget`). The new thumbprint is
+    recorded only once the batch AND the post-check have said the trust is in place
+    (T888): a declined prompt leaves the record exactly as it was, stale list included.
     """
+    hosts = s.hosts()
+    stale_live = tuple(t for t in dict.fromkeys(stale) if _installed(s, t))
     commands = missing_commands(ca, portal, seams=s)
-    if stale is not None:
-        try:
-            installed = s.run(["certutil", "-store", "Root", stale]).returncode == 0
-        except OSError:
-            installed = False
-        if installed:
-            commands.insert(0, ["certutil", "-delstore", "Root", stale])
-            if ["cmd", "/c", "ipconfig", "/flushdns"] not in commands:
-                commands.append(["cmd", "/c", "ipconfig", "/flushdns"])
+    if stale_live:
+        commands[:0] = [["certutil", "-delstore", "Root", thumb] for thumb in stale_live]
+        if not any(command[:2] == ["ipconfig", "/flushdns"] for command in commands[1:]):
+            commands.append(["cmd", "/c", "ipconfig", "/flushdns"])
     thumb = thumbprint(ca)
-    if record is not None:
-        try:
-            record(thumb)
-        except OSError as exc:
-            logger.warning(f"could not record the trusted certificate's thumbprint: {exc}")
     if not commands:
+        _forget_gone(s, stale, forget)
+        _record(record, thumb)
+        return False
+    if s.is_admin():  # already an administrator: the hosts edit is this process's own
+        failed = _run_as_admin(ca, portal, s, commands, hosts)
+        _check(ca, portal, s, failed)
+        _forget_gone(s, stale, forget)
+        _record(record, thumb)
         return False
     wrapped = s.batch(commands)
-    if wrapped is None:  # already an administrator (or not Windows): run them as they are
-        failed = [c for c in commands if s.run(c).returncode != 0]
+    if wrapped is None:  # not Windows, or the seam says there is no prompt to raise
+        failed = [platform.command_text(c) for c in commands if s.run(c).returncode != 0]
         _check(ca, portal, s, failed)
+        _forget_gone(s, stale, forget)
+        _record(record, thumb)
         return False
     argv, results_path = wrapped
     try:
@@ -262,10 +273,68 @@ def _trust(
             pass
     if proc.returncode != 0 or results is None:
         raise TrustError(_by_hand(commands))
-    failed = [c for c, (rc, _out) in zip(commands, results, strict=True) if rc != 0]
+    failed = [
+        platform.command_text(c) for c, (rc, _out) in zip(commands, results, strict=True) if rc != 0
+    ]
     _check(ca, portal, s, failed)
+    _forget_gone(s, stale, forget)
+    _record(record, thumb)
     logger.info(f"trusted {ca} and mapped {portal} to 127.0.0.1")
     return True
+
+
+def _run_as_admin(
+    ca: Path, portal: str, s: TrustSeams, commands: Sequence[list[str]], hosts: Path
+) -> list[str]:
+    """Run `commands` in this already-elevated process, the hosts edit in Python (T888).
+
+    The hosts edit was a `cmd /c` line whose path had to survive `subprocess.list2cmdline`
+    and then `cmd.exe`'s own parse: `C:/Program Files (x86)/...` on a `SystemRoot` with a
+    space came back with inner quotes cmd does not read as escapes. Read, edit and
+    `os.replace` need no command line at all, so the edit goes through `edit_hosts()`.
+    """
+    failed: list[str] = []
+    edit = append_command(hosts, portal)
+    for command in commands:
+        if command == edit:
+            try:
+                edit_hosts(hosts, portal)
+            except OSError as exc:
+                failed.append(f"could not edit {hosts}: {exc}")
+        elif s.run(command).returncode != 0:
+            failed.append(platform.command_text(command))
+    return failed
+
+
+def _record(record: Callable[[str], None] | None, thumb: str) -> None:
+    """Hand the install record the thumbprint now in the store. A failed save is a warning."""
+    if record is None:
+        return
+    try:
+        record(thumb)
+    except OSError as exc:
+        logger.warning(f"could not record the trusted certificate's thumbprint: {exc}")
+
+
+def _installed(s: TrustSeams, thumb: str) -> bool:
+    """Whether this computer's Root store still holds `thumb`."""
+    try:
+        return s.run(["certutil", "-store", "Root", thumb]).returncode == 0
+    except OSError:
+        return False
+
+
+def _forget_gone(s: TrustSeams, stale: Sequence[str], forget: Callable[[str], None] | None) -> None:
+    """Drop from the install record every stale thumbprint the store no longer holds."""
+    if forget is None:
+        return
+    for thumb in dict.fromkeys(stale):
+        if _installed(s, thumb):
+            continue
+        try:
+            forget(thumb)
+        except OSError as exc:
+            logger.warning(f"could not forget the removed certificate {thumb}: {exc}")
 
 
 DECLINED = (
@@ -275,12 +344,12 @@ DECLINED = (
 )
 
 
-def _check(ca: Path, portal: str, s: TrustSeams, failed: Sequence[list[str]]) -> None:
+def _check(ca: Path, portal: str, s: TrustSeams, failed: Sequence[str]) -> None:
     still = missing_commands(ca, portal, seams=s)
     if still:
         raise TrustError(_by_hand(still))
     for command in failed:
-        logger.warning(f"{platform.command_text(command)} failed, but what it does is in place")
+        logger.warning(f"{command} failed, but what it does is in place")
 
 
 def _by_hand(commands: Sequence[list[str]]) -> str:
@@ -304,26 +373,86 @@ def tagged(hosts: Path) -> bool:
         return False
 
 
-def _append_hosts(hosts: Path, portal: str) -> list[str]:
-    """`cmd`'s one-line append. An empty echo first: a hosts file with no final newline
-    must not have this line glued to its last one, and the path is quoted, so a
-    `SystemRoot` with a space in it stays one file name (T888)."""
-    return ["cmd", "/c", f'(echo.& echo {hosts_line(portal)})>>"{hosts}"']
+def hosts_text(hosts: Path) -> str:
+    """`hosts` as text, or "" when it cannot be read (a missing file maps nothing)."""
+    try:
+        return hosts.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
-def _strip_hosts(hosts: Path) -> list[str]:
-    """`cmd`'s one-line removal of the tagged line, from an otherwise-empty file too.
+def _write_hosts(hosts: Path, lines: Sequence[str]) -> None:
+    """`lines` written to `hosts` through a temp beside it and `os.replace`.
 
-    `findstr /v` exits 1 when it finds no line to keep, and a plain `&&` would then skip
-    the `move` and leave the old hosts file in place (T888). The `|| type nul > tmp` writes
-    an empty file instead, so the move always lands. Same folder, so the move replaces.
+    Beside it, not `/tmp`: a replace only replaces within one filesystem. The mode is
+    the file's own where it is already there, so an administrators-only hosts stays so.
     """
-    kept = hosts.with_name(hosts.name + ".yulon")
+    try:
+        mode = hosts.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    handle, name = tempfile.mkstemp(dir=hosts.parent, prefix=f".{hosts.name}.yulon-")
+    temp = Path(name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("".join(line + "\n" for line in lines))
+        os.chmod(temp, mode)
+        os.replace(temp, hosts)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+
+
+def edit_hosts(hosts: Path, portal: str | None) -> None:
+    """Put `hosts_line(portal)` in `hosts`, or take every tagged line out with `None`.
+
+    The edit an already-elevated Yu'lon makes itself (T888): reading, editing and
+    `os.replace` need no command line, so no `cmd.exe` reparses a path that holds a space,
+    `&` or `(`, and no quote has to survive `subprocess.list2cmdline()`.
+    """
+    lines = hosts_text(hosts).splitlines()
+    if portal is None:
+        lines = [line for line in lines if HOSTS_TAG not in line]
+    else:
+        lines = [line for line in lines if HOSTS_TAG not in line]
+        lines.append(hosts_line(portal))
+    _write_hosts(hosts, lines)
+
+
+def append_command(hosts: Path, portal: str) -> list[str]:
+    """The one PowerShell command that adds the tagged line to `hosts`, `-LiteralPath` only.
+
+    `Get-Content` splits the file into lines first, so a hosts file without a final
+    newline does not have the line glued to its last one; `Set-Content` writes them back
+    with one. Both paths are single-quoted PowerShell literals: nothing in them is parsed.
+    """
+    path = platform.powershell_literal(str(hosts))
+    line = platform.powershell_literal(hosts_line(portal))
     return [
-        "cmd",
-        "/c",
-        f'(findstr /v /c:"{HOSTS_TAG}" "{hosts}" > "{kept}" || type nul > "{kept}") && '
-        f'move /y "{kept}" "{hosts}"',
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        f"$p={path}; $l=@(Get-Content -LiteralPath $p -ErrorAction SilentlyContinue); "
+        f"Set-Content -LiteralPath $p -Value ($l + {line})",
+    ]
+
+
+def strip_command(hosts: Path) -> list[str]:
+    """The one PowerShell command that takes this module's tagged line out of `hosts`.
+
+    `-notlike` keeps every other line; `-join [Environment]::NewLine` writes them back,
+    and an empty result is an empty file (the file must stay, or Windows recreates a
+    default one on some updates). No `cmd`, no inner double quote.
+    """
+    path = platform.powershell_literal(str(hosts))
+    tag = platform.powershell_literal(f"*{HOSTS_TAG}*")
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        f"$p={path}; $k=@(Get-Content -LiteralPath $p -ErrorAction SilentlyContinue | "
+        f"Where-Object {{ $_ -notlike {tag} }}); "
+        "Set-Content -LiteralPath $p -Value ($k -join [Environment]::NewLine)",
     ]
 
 
@@ -341,7 +470,7 @@ def remove_commands(
     commands: list[list[str]] = []
     if known:
         commands.append(["certutil", "-delstore", "Root", known])
-    commands.append(_strip_hosts(hosts if hosts is not None else hosts_path()))
+    commands.append(strip_command(hosts if hosts is not None else hosts_path()))
     return commands
 
 
@@ -370,7 +499,7 @@ def remove(
                     return ()
             except OSError as exc:
                 logger.warning(f"sudo could not take the hosts line out: {exc}")
-        return (platform.command_text(command),)
+        return (f"sudo sed -i '/{HOSTS_TAG}/d' {hosts}",)
     commands = [
         *remove_commands(ca, thumb=thumb, hosts=hosts),
         ["cmd", "/c", "ipconfig", "/flushdns"],

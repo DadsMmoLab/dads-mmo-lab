@@ -559,9 +559,9 @@ def test_what_is_missing_goes_behind_one_prompt_and_no_says_so(tmp_path: Path) -
     results = tmp_path / "results.json"
 
     def batch(commands: list[list[str]]) -> tuple[list[str], Path]:
-        assert [c[0] for c in commands] == ["certutil", "cmd", "cmd"]
+        assert [c[0] for c in commands] == ["certutil", "powershell.exe", "cmd"]
         assert commands[0][:4] == ["certutil", "-addstore", "-f", "Root"]
-        assert "127.0.0.1 trinity.actual.battle.net # yulon-wow-forever" in commands[1][2]
+        assert "127.0.0.1 trinity.actual.battle.net # yulon-wow-forever" in commands[1][3]
         return (["powershell.exe", "elevated"], results)
 
     seams, _ = _trust_seams(
@@ -619,32 +619,78 @@ def test_the_trust_step_installs_the_checked_copy_not_the_players_file(tmp_path:
     assert not Path(installed[0]).exists(), "the checked copy is gone once it is trusted"
 
 
-def test_the_hosts_append_quotes_the_file_and_the_removal_survives_an_empty_one() -> None:
-    """T888 item 2: a `SystemRoot` with a space stayed one file name, and an otherwise-empty
-    hosts file still got rewritten (`findstr /v` exits 1 when it keeps no line)."""
-    hosts = Path(r"C:\Program Files\Windows\hosts")
-    append = forever_trust._append_hosts(hosts, "trinity.actual.battle.net")
-    assert append[:2] == ["cmd", "/c"]
-    assert append[2] == (
-        "(echo.& echo 127.0.0.1 trinity.actual.battle.net # yulon-wow-forever)>>"
-        '"C:\\Program Files\\Windows\\hosts"'
+def test_the_hosts_edits_are_literal_paths_with_no_inner_double_quote() -> None:
+    """T888 item 2 (Gemini #4): `list2cmdline`'s inner quotes are not escapes to `cmd`.
+
+    A `SystemRoot` with a space, a path with `(x86)` and a hosts line all go into one
+    single-quoted PowerShell literal, so the edit is one argv element with no interior
+    `"` for `cmd` to misread -- and no `cmd` in the command at all. Both edits put every
+    line through `Get-Content`/`Set-Content`, so a file with no final newline is not
+    glued, and an otherwise-empty file is still written (T888).
+    """
+    hosts = Path(r"C:\Program Files (x86)\Windows\hosts")
+    for command in (
+        forever_trust.append_command(hosts, "trinity.actual.battle.net"),
+        forever_trust.strip_command(hosts),
+    ):
+        assert command[:2] == ["powershell.exe", "-NoProfile"]
+        assert not any('"' in element for element in command), command
+        assert platform.powershell_literal(str(hosts)) in command[3]
+    assert (
+        "Get-Content -LiteralPath $p"
+        in forever_trust.append_command(hosts, "trinity.actual.battle.net")[3]
     )
-    strip = forever_trust._strip_hosts(hosts)
-    assert strip[:2] == ["cmd", "/c"]
-    assert strip[2] == (
-        '(findstr /v /c:"# yulon-wow-forever" "C:\\Program Files\\Windows\\hosts" > '
-        '"C:\\Program Files\\Windows\\hosts.yulon" || type nul > '
-        '"C:\\Program Files\\Windows\\hosts.yulon") && move /y '
-        '"C:\\Program Files\\Windows\\hosts.yulon" '
-        '"C:\\Program Files\\Windows\\hosts"'
+    assert "Set-Content -LiteralPath $p" in forever_trust.strip_command(hosts)[3]
+
+
+def test_an_administrator_edits_a_tmp_hosts_file_in_python(tmp_path: Path) -> None:
+    """T888 item 2: already elevated, Yu'lon reads, edits and replaces the file itself.
+
+    No command line is built for the hosts half at all, so nothing a `cmd` or PowerShell
+    prompt would have parsed is involved. The tagged line is added once, after a last
+    line with no newline, and the file is replaced whole.
+    """
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 localhost")  # no final newline on purpose
+    ran: list[list[str]] = []
+    trusted = [False]
+
+    def run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        ran.append(argv)
+        if argv[:2] == ["certutil", "-store"]:
+            return subprocess.CompletedProcess(argv, 0 if trusted[0] else 1, "")
+        if argv[:2] == ["certutil", "-addstore"]:
+            trusted[0] = True
+        return subprocess.CompletedProcess(argv, 0, "")
+
+    seams = forever_trust.TrustSeams(
+        run=run,  # type: ignore[arg-type]
+        hosts=lambda: hosts,
+        os_name=lambda: "windows",
+        is_admin=lambda: True,
     )
+    ca = _narrow_ca(tmp_path)
+    assert forever_trust.ensure(ca, "trinity.actual.battle.net", seams=seams) is False
+    text = hosts.read_text()
+    assert text.splitlines() == [
+        "127.0.0.1 localhost",
+        "127.0.0.1 trinity.actual.battle.net # yulon-wow-forever",
+    ]
+    assert all(argv[:1] != ["powershell.exe"] for argv in ran), "no command line for hosts"
+    assert [argv[0] for argv in ran] == [
+        "certutil",
+        "certutil",
+        "cmd",
+        "certutil",
+    ], "why: one store read, the add, the flush, and the post-check's store read"
 
 
 def test_removal_builds_the_ca_command_from_the_recorded_thumbprint(tmp_path: Path) -> None:
     """T888 item 2: after the install folder is gone the record's thumbprint is what is left."""
     commands = forever_trust.remove_commands(thumb="AB12CD")
     assert commands[0] == ["certutil", "-delstore", "Root", "AB12CD"]
-    assert commands[1][:2] == ["cmd", "/c"] and "# yulon-wow-forever" in commands[1][2]
+    assert commands[1][:2] == ["powershell.exe", "-NoProfile"]
+    assert "# yulon-wow-forever" in commands[1][3]
     ca = _ca(tmp_path)
     assert forever_trust.remove_commands(ca)[0] == [
         "certutil",
@@ -675,9 +721,9 @@ def test_windows_removal_is_one_elevated_batch_with_the_recorded_thumbprint(
         os_name=lambda: "windows",
     )
     assert forever_trust.remove(thumb="AB12CD", seams=seams) == ()
-    assert [c[0] for c in batched[0]] == ["certutil", "cmd", "cmd"]
+    assert [c[0] for c in batched[0]] == ["certutil", "powershell.exe", "cmd"]
     assert batched[0][0] == ["certutil", "-delstore", "Root", "AB12CD"]
-    assert batched[0][1][2].startswith('(findstr /v /c:"# yulon-wow-forever"')
+    assert batched[0][1][3].startswith("$p=")
     assert batched[0][2] == ["cmd", "/c", "ipconfig", "/flushdns"]
     assert not results.exists(), "the results file is removed once read"
 
@@ -707,7 +753,7 @@ def test_steamos_removal_takes_the_hosts_line_with_sudo_n_or_says_the_command(
         run=run, hosts=lambda: hosts, os_name=lambda: "linux", which=lambda _n: None
     )
     left = forever_trust.remove(seams=no_sudo)
-    assert len(left) == 1 and "sudo -n sed" in left[0] and str(hosts) in left[0]
+    assert left == (f"sudo sed -i '/# yulon-wow-forever/d' {hosts}",)
     assert forever_trust.remove(seams=no_sudo) != (), "the line is still there"
     hosts.write_text("127.0.0.1 localhost\n")
     assert forever_trust.remove(seams=no_sudo) == (), "nothing tagged, nothing to run"
@@ -720,7 +766,7 @@ def test_every_hosts_command_passes_the_elevated_allowlist(
     monkeypatch.setattr(platform, "detect", lambda: "windows")
     hosts = Path(r"C:\Windows\System32\drivers\etc\hosts")
     commands = [
-        forever_trust._append_hosts(hosts, "trinity.actual.battle.net"),
+        forever_trust.append_command(hosts, "trinity.actual.battle.net"),
         *forever_trust.remove_commands(thumb="AB12CD", hosts=hosts),
         ["cmd", "/c", "ipconfig", "/flushdns"],
     ]

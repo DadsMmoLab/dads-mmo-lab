@@ -612,17 +612,18 @@ _PS_NEW_FOLDER = re.compile(
 )
 r"""`single_client.grant_commands()`'s folder: one literal path, `''` spelling a quote."""
 
-_CMD_HOSTS_APPEND = re.compile(
-    r'^\(echo\.& echo 127\.0\.0\.1 [A-Za-z0-9.-]+ # ?[A-Za-z0-9_-]+\)>>"[^"&|<>^%!()]+"$'
+_PS_HOSTS_ADD = re.compile(
+    r"^\$p=" + _PS_LITERAL + r"; \$l=@\(Get-Content -LiteralPath \$p -ErrorAction "
+    r"SilentlyContinue\); Set-Content -LiteralPath \$p -Value \(\$l \+ " + _PS_LITERAL + r"\)$"
 )
-r"""`forever_trust.missing_commands()`'s hosts append: the loopback line, then the quoted file."""
+r"""`forever_trust.append_command()`: the tagged line added, one literal path each side."""
 
-_CMD_HOSTS_STRIP = re.compile(
-    r'^\(findstr /v /c:"[^"&|<>^%!()]+" "[^"&|<>^%!()]+" > "'
-    r'[^"&|<>^%!()]+\.yulon" \|\| type nul > "[^"&|<>^%!()]+\.yulon"\) && move /y "'
-    r'[^"&|<>^%!()]+\.yulon" "[^"&|<>^%!()]+"$'
+_PS_HOSTS_STRIP = re.compile(
+    r"^\$p=" + _PS_LITERAL + r"; \$k=@\(Get-Content -LiteralPath \$p -ErrorAction "
+    r"SilentlyContinue \| Where-Object \{ \$_ -notlike " + _PS_LITERAL + r" \}\); "
+    r"Set-Content -LiteralPath \$p -Value \(\$k -join \[Environment\]::NewLine\)$"
 )
-r"""`forever_trust.remove_commands()`'s tagged-line removal, empty hosts file included."""
+r"""`forever_trust.strip_command()`: every tagged line gone, the file kept."""
 
 _CMD_FLUSH_DNS: tuple[str, ...] = ("ipconfig", "/flushdns")
 """The one `cmd` form left: Windows' own resolver flush after a hosts edit."""
@@ -636,28 +637,27 @@ def _cmd_form_allowed(argv: Sequence[str]) -> bool:
     and appends a second command):
 
     * `cmd /c ipconfig /flushdns` — the resolver flush after a hosts edit;
-    * the hosts append and the tagged-line strip `forever_trust` builds, whose only
-      variable parts are one host name, one tag and one file path;
     * `powershell.exe -NoProfile -Command New-Item -ItemType Directory -Force
       -LiteralPath '<one path>'` — `single_client.grant_commands()`, the folder a
       Program Files grant finds missing (T888);
+    * `powershell.exe -NoProfile -Command` with `forever_trust.append_command()`'s or
+      `strip_command()`'s text exactly: `-LiteralPath` only, one host name and one path
+      (T888);
 
     A `powershell.exe` argv of any other shape, or a `cmd` argv that is not one of the
     forms above, is refused.
     """
     if argv[:1] == ["cmd"]:
-        if argv[1:2] != ["/c"]:
-            return False
-        if len(argv) == 4 and tuple(argv[2:]) == _CMD_FLUSH_DNS:
-            return True
-        return len(argv) == 3 and bool(
-            _CMD_HOSTS_APPEND.match(argv[2]) or _CMD_HOSTS_STRIP.match(argv[2])
-        )
+        return len(argv) == 4 and argv[1:2] == ["/c"] and tuple(argv[2:]) == _CMD_FLUSH_DNS
     if argv[:1] != ["powershell.exe"]:
         return False
     if len(argv) != 4 or list(argv[1:3]) != ["-NoProfile", "-Command"]:
         return False
-    return bool(_PS_NEW_FOLDER.match(argv[3]))
+    return bool(
+        _PS_NEW_FOLDER.match(argv[3])
+        or _PS_HOSTS_ADD.match(argv[3])
+        or _PS_HOSTS_STRIP.match(argv[3])
+    )
 
 
 def elevated_admin_batch(
