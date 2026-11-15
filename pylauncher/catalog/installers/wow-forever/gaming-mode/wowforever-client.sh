@@ -109,8 +109,35 @@ FIRST_PLAY="Press Play on WoW Forever's tab in Yu'lon once, on the desktop: it s
     "In Steam: Library, search for \"Steam Linux Runtime 4.0\", Install. Then launch again."
 getent hosts "$PORTAL" | grep -q '^127\.0\.0\.1' || fail "The login server's name is not on this Deck yet." \
     "In Konsole run once:  echo '127.0.0.1 $PORTAL' | sudo tee -a /etc/hosts"
-# Exact process name, never `pgrep -f <path>` (self-matches wrapper command lines).
-if pgrep -x Wow.exe >/dev/null 2>&1; then fail "WoW Forever is already running."; fi
+# Exact process name, never `pgrep -f <path>` (self-matches wrapper command lines), and
+# scoped to THIS client folder (T888): another install's game on the same Deck is not
+# this tile's, and a global pgrep refused or skipped the wrong copy. The pids printed here
+# are the ones already running BEFORE this launch; the key watch below gets them and
+# attaches only to a pid that is not among them.
+client_pids() {
+    python3 -I - "$CLIENT_ROOT" <<'PYEOF' 2>/dev/null || true
+import os, re, sys
+client = os.path.realpath(sys.argv[1])
+game = re.compile(rb"\\_forever_\\wowb?\.exe(?: |$)", re.I)
+for d in os.listdir("/proc"):
+    if not d.isdigit():
+        continue
+    try:
+        if os.stat("/proc/" + d).st_uid != os.getuid():
+            continue
+        argv0 = open("/proc/%s/cmdline" % d, "rb").read().split(b"\0", 1)[0]
+    except OSError:
+        continue
+    text = argv0.decode("utf-8", "replace").strip().strip('"')
+    if len(text) < 2 or text[1] != ":" or text[0].upper() != "Z":
+        continue
+    path = os.path.realpath("/" + text[2:].replace("\\", "/").lstrip("/"))
+    if game.search(argv0) and (path == client or path.startswith(client.rstrip("/") + "/")):
+        print(d)
+PYEOF
+}
+BEFORE="$(client_pids | tr '\n' ' ')"
+case "$BEFORE" in *[0-9]*) fail "WoW Forever is already running." "Close it, then launch again.";; esac
 # A real TLS answer, not a bare connect: docker-proxy accepts connections even when
 # the server is down.
 curl -sf -m 4 -o /dev/null --cacert "$SERVER_DIR/certs/ca.pem" "https://$PORTAL:$REST_PORT/bnetserver/login/" \
@@ -165,7 +192,7 @@ if [ -n "$CA_THUMB" ] && [ "$CA_THUMB" != "$(cat "$PREFIX/.yulon-ca-thumbprint" 
 fi
 
 # ── The login key, from Linux beside the game (stops with it) ─────────────────
-setsid python3 -I - "${WOWFO_WORLD_PORT:-8085}" "$$" "$CLIENT_ROOT" >>"$LOGFILE" 2>&1 <<'PY' &
+setsid python3 -I - "${WOWFO_WORLD_PORT:-8085}" "$$" "$CLIENT_ROOT" "$BEFORE" >>"$LOGFILE" 2>&1 <<'PY' &
 import ctypes, os, re, sys, time
 from bisect import bisect_right
 
@@ -229,7 +256,8 @@ def game_pids():
                 pass
     return out
 
-BEFORE = set(game_pids())  # running before the launch below: not ours to write into
+BEFORE = {int(x) for x in sys.argv[4].split()}  # taken by the shell before the launch, and
+# before this watcher started: an older copy that was already running is not ours.
 
 def find_game():
     return next((p for p in game_pids() if p not in BEFORE), None)

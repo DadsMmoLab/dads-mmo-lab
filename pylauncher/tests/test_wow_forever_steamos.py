@@ -150,7 +150,7 @@ def _watch_seams(game: FakeGame | None, tcp: Sequence[str] = ()) -> WatchSeams:
         now[0] += seconds
 
     return WatchSeams(
-        find_game=lambda _client: game.pid if game is not None else None,
+        game_pids=lambda _client: [game.pid] if game is not None else [],
         open_memory=lambda _pid: game,  # type: ignore[arg-type,return-value]
         tcp_tables=lambda: list(tcp),
         sleep=sleep,
@@ -182,7 +182,7 @@ def test_the_watch_idles_in_the_world_and_gives_up_on_a_game_that_never_starts()
             game.buf[64:96] = GROUP8  # a copy made long after the login
 
     seams = WatchSeams(
-        find_game=lambda _client: game.pid,
+        game_pids=lambda _client: [game.pid],
         open_memory=lambda _pid: game,  # type: ignore[arg-type,return-value]
         tcp_tables=lambda: [up],
         sleep=sleep,
@@ -214,18 +214,21 @@ def test_only_a_game_running_from_this_client_folder_is_this_servers_game() -> N
 
 
 def test_the_watch_ignores_a_game_that_was_already_running() -> None:
-    """T888 item 5: the pre-launch pid set is skipped; the new pid is the one attached to."""
+    """T888 item 9: every matching pid is seen, and an older one in `before` is skipped.
+
+    The older copy has the LOWER pid here, the order `/proc` tends to list them in: a
+    finder that answered only its first match would attach to the wrong game (or report
+    that nothing started) while this launch's game sat beside it.
+    """
     data, spots = _memory_with_keys()
     game = FakeGame(bytes(data))
     opened: list[int] = []
-    asked = {"n": 0}
 
-    def find_game(_client: Path | None) -> int | None:
-        asked["n"] += 1
-        return 111 if asked["n"] == 1 else game.pid
+    def game_pids(_client: Path | None) -> list[int]:
+        return [111, game.pid]  # the older copy keeps running beside this launch's game
 
     seams = WatchSeams(
-        find_game=find_game,
+        game_pids=game_pids,
         open_memory=lambda pid: (opened.append(pid), game)[1],  # type: ignore[arg-type,return-value]
         tcp_tables=lambda: [],
         sleep=lambda _s: None,
@@ -236,13 +239,33 @@ def test_the_watch_ignores_a_game_that_was_already_running() -> None:
     assert game.buf[spots[0] : spots[0] + 32] == SERVER_KEY
 
 
+def test_the_finder_is_every_pid_and_resolves_the_client_folder(tmp_path: Path) -> None:
+    """T888 item 9: `game_pids` answers all matches, and a symlinked folder is one folder."""
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    client = tmp_path / "Games" / "WoWForever"
+    (client / "_forever_").mkdir(parents=True)
+    alias = tmp_path / "linked"
+    alias.symlink_to(client, target_is_directory=True)
+    argv0 = f"Z:{client}/_forever_/Wow.exe".replace("/", "\\").encode()
+    for pid in ("100", "200", "300"):
+        (proc / pid).mkdir()
+        (proc / pid / "cmdline").write_bytes(argv0 + b"\0")
+    other = tmp_path / "Games" / "Other" / "_forever_"
+    other.mkdir(parents=True)
+    (proc / "400").mkdir()
+    (proc / "400" / "cmdline").write_bytes(f"Z:{other}/Wow.exe".replace("/", "\\").encode() + b"\0")
+    assert forever_keywatch.game_pids(proc, client) == [100, 200, 300]
+    assert forever_keywatch.game_pids(proc, alias) == [100, 200, 300], "the alias is the folder"
+
+
 def test_linux_play_refuses_while_the_game_this_client_starts_already_runs(
     tmp_path: Path,
 ) -> None:
     """T888 item 5: on the Deck, `forever_keywatch`'s own finder is the refusal."""
     calls: list[str] = []
     seams = forever_play.PlaySeams(
-        **{**_linux_seams(calls).__dict__, "find_game": lambda _client: 4040}
+        **{**_linux_seams(calls).__dict__, "linux_game_pids": lambda _client: (4040,)}
     )
     with pytest.raises(PlayRefusal, match="already running"):
         forever_play.play(

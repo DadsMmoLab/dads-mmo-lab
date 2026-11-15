@@ -1037,7 +1037,7 @@ def _play_seams(
         start_client=start,
         watch=lambda exe, key, group, **_kw: calls.append(f"watch {exe.name} {group}"),
         game_pids=lambda _client: (),
-        find_game=lambda _client: None,
+        linux_game_pids=lambda _client: (),
         restart_service=lambda _where, service, **_kw: calls.append(f"restart {service}"),
         container_project=lambda _c: "project",
         compose_project=lambda _e, _d: "project",
@@ -1391,6 +1391,65 @@ def test_play_refuses_while_this_clients_game_already_runs(tmp_path: Path) -> No
         )
     assert str(raised.value) == "WoW Forever is already running. Close it, then press Play again."
     assert calls == [], "nothing is trusted, made or started"
+
+
+def test_play_snapshots_the_running_game_right_before_it_starts_this_one(
+    tmp_path: Path,
+) -> None:
+    """T888 item 9 (Codex #4, Gemini #9): a game that appears during trust is still refused.
+
+    The early check saw nothing; by the time the trust prompt, the account and the config
+    are done, the player (or another press) has a game running. The snapshot Play hands
+    the watch is taken immediately before the launch, so this one is refused there -- and
+    nothing is started, so this press cannot write its key into somebody else's game.
+    """
+    calls: list[str] = []
+    seen = {"n": 0}
+
+    def game_pids(_client: Path) -> tuple[int, ...]:
+        seen["n"] += 1
+        return () if seen["n"] == 1 else (4242,)
+
+    seams = forever_play.PlaySeams(**{**_play_seams(calls).__dict__, "game_pids": game_pids})
+    with pytest.raises(PlayRefusal) as raised:
+        forever_play.play(
+            FOREVER,
+            _server_with_certs(tmp_path),
+            _client(tmp_path),
+            os_name="windows",
+            seams=seams,
+        )
+    assert str(raised.value) == "WoW Forever is already running. Close it, then press Play again."
+    assert seen["n"] == 2, "the early check and the pre-launch snapshot are two reads"
+    assert "trust ca.pem trinity.actual.battle.net" in calls
+    assert not any(call.startswith("start") or call.startswith("watch") for call in calls)
+
+
+def test_the_linux_play_snapshots_before_starting_under_proton(tmp_path: Path) -> None:
+    """T888 item 9: on the Deck the snapshot is taken after prepare, right before start."""
+    calls: list[str] = []
+    seen = {"n": 0}
+
+    def linux_pids(_client: Path) -> tuple[int, ...]:
+        seen["n"] += 1
+        return () if seen["n"] == 1 else (9090,)
+
+    seams = forever_play.PlaySeams(
+        **{
+            **_play_seams(calls).__dict__,
+            "linux_game_pids": linux_pids,
+            "hosts_ready": lambda _portal: True,
+            "prepare_proton": lambda *_a, **_k: "runtime",
+            "start_game": lambda *_a, **_k: calls.append("start"),
+        }
+    )
+    with pytest.raises(PlayRefusal) as raised:
+        forever_play.play(
+            FOREVER, _server_with_certs(tmp_path), _client(tmp_path), os_name="linux", seams=seams
+        )
+    assert "already running" in str(raised.value)
+    assert seen["n"] == 2 and "start" not in calls
+    assert "prepare ca.pem" not in calls, "the second read is after prepare, before start"
 
 
 def test_play_refuses_a_stopped_server_another_os_and_another_client(tmp_path: Path) -> None:

@@ -498,8 +498,12 @@ def test_the_client_scripts_key_watch_compiles_and_matches_the_catalog_and_forev
 def test_the_tile_watch_takes_this_client_folder_and_skips_a_game_that_was_already_running() -> (
     None
 ):
-    """T888 item 5: the Gaming Mode tile runs without Yu'lon, so its key watch is a copy --
-    and it must pick the pid this launch made, in this client's folder, as Play's does."""
+    """T888 item 9: the Gaming Mode tile runs without Yu'lon, so its key watch is a copy --
+    and it must pick the pid this launch made, in this client's folder, as Play's does.
+
+    The pids that were running before this launch come from the shell, which snapshots them
+    before the game starts; the watch attaches to the first one that is not among them.
+    """
     text = (resources.installers_dir() / "wow-forever/gaming-mode/wowforever-client.sh").read_text(
         encoding="utf-8"
     )
@@ -508,7 +512,7 @@ def test_the_tile_watch_takes_this_client_folder_and_skips_a_game_that_was_alrea
     client = Path("/home/deck/Games/WoWForever-70888/World of Warcraft")
     scope: dict[str, Any] = {}
     argv = sys.argv
-    sys.argv = ["-", "8085", "1", str(client)]
+    sys.argv = ["-", "8085", "1", str(client), "111"]
     try:
         exec(compile(head, "keywatch", "exec"), scope)
     finally:
@@ -517,7 +521,7 @@ def test_the_tile_watch_takes_this_client_folder_and_skips_a_game_that_was_alrea
     assert under(b"Z:\\home\\deck\\Games\\WoWForever-70888\\World of Warcraft\\_forever_\\Wow.exe")
     assert not under(b"Z:\\home\\deck\\Games\\Other\\_forever_\\Wow.exe")
     scope["game_pids"] = lambda: [111, 222]
-    scope["BEFORE"] = {111}
+    assert scope["BEFORE"] == {111}, "the shell's pre-launch snapshot, not the watch's own"
     assert scope["find_game"]() == 222, "the pid that was there before the launch is skipped"
 
 

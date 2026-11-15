@@ -344,7 +344,10 @@ def replace(
 class WatchSeams:
     """What the watch reaches outside itself through. Real by default (Linux)."""
 
-    find_game: Callable[[Path | None], int | None] = lambda client: game_pid(Path("/proc"), client)
+    game_pids: Callable[[Path | None], Sequence[int]] = lambda client: game_pids(
+        Path("/proc"), client
+    )
+    """Every pid of this client's game; the watch attaches to one that was not there before."""
     open_memory: Callable[[int], Memory] = Memory
     tcp_tables: Callable[[], list[str]] = field(default=lambda: _tcp_tables(Path("/proc")))
     sleep: Callable[[float], None] = time.sleep
@@ -371,23 +374,25 @@ def is_this_game(argv0: bytes, client_dir: Path | None) -> bool:
     """`argv0` is WoW Forever's game AND it runs from `client_dir` (when one is named).
 
     T888: the same client folder on the same Deck is what Play launched; a second copy
-    elsewhere (another install's folder, a desktop game) is not this server's game.
+    elsewhere (another install's folder, a desktop game) is not this server's game. Both
+    paths are resolved first: `/home/deck/Games` and a symlink to it are one folder, and a
+    client folder reached through one must not let the other's game in (or keep this one
+    out).
     """
     if not is_game(argv0):
         return False
     if client_dir is None:
         return True
     path = wine_path(argv0)
-    return path is not None and path.is_relative_to(client_dir)
-
-
-def game_pid(proc: Path, client_dir: Path | None = None) -> int | None:
-    """The pid of this client's game under Wine, or None (`is_this_game`)."""
-    return next(iter(game_pids(proc, client_dir)), None)
+    return path is not None and path.resolve().is_relative_to(client_dir.resolve())
 
 
 def game_pids(proc: Path, client_dir: Path | None = None) -> list[int]:
-    """Every pid of this client's game under Wine, in `proc`'s order (Linux)."""
+    """Every pid of this client's game under Wine, oldest first (Linux).
+
+    All of them, never just the first: an older copy that is already running (a lower pid,
+    usually) must not hide the game this Play just started (T888).
+    """
     found: list[int] = []
     for entry in proc.iterdir():
         if not entry.name.isdigit():
@@ -400,7 +405,7 @@ def game_pids(proc: Path, client_dir: Path | None = None) -> list[int]:
             continue
         if is_this_game(argv0, client_dir):
             found.append(int(entry.name))
-    return found
+    return sorted(found)
 
 
 def _uid() -> int:
@@ -432,21 +437,23 @@ def watch(
     """Watch the game until it closes; True once the server's key was written at least once.
 
     `client_dir` is the player's client folder: only a game running from under it is this
-    server's game (T888). `before` is the set of pids that matched before Play launched,
-    and only a pid outside it is attached to -- an older copy that was already running is
-    somebody else's game.
+    server's game (T888). `before` is the set of pids that matched immediately before Play
+    launched (taken there, not here), and the FIRST pid outside it is attached to -- an
+    older copy that was already running is somebody else's game, whatever its pid number.
     """
     s = seams if seams is not None else WatchSeams()
     stop = halt if halt is not None else threading.Event()
     group_key = KNOWN_REGION_KEYS[region_group - 1]
     started = s.clock()
-    pid = s.find_game(client_dir)
-    while pid is None or pid in before:
+    seen = s.game_pids(client_dir)
+    pid = next((found for found in seen if found not in before), None)
+    while pid is None:
         if stop.is_set() or s.clock() - started > START_WAIT:
             say("The game did not start, so no login key was written.")
             return False
         s.sleep(0.25)
-        pid = s.find_game(client_dir)
+        seen = s.game_pids(client_dir)
+        pid = next((found for found in seen if found not in before), None)
     memory: Memory | None = None
     for _ in range(120):  # Wine allows ptrace a moment after the process starts
         try:
