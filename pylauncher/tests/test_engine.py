@@ -774,7 +774,7 @@ def test_ensure_docker_under_podman_never_enters_the_docker_linux_path(
 def test_engine_sentence_answers_none_when_the_record_cannot_be_read(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """An unreadable record (a `PermissionError` on the read) never refuses (T887 p1 r4 item 2)."""
+    """Without the switch an unreadable record never refuses: no player change (T887 p1 r4)."""
     from yulon.ui import controller_view as view
 
     def denied(_server: Path, **kwargs: object) -> object:
@@ -782,6 +782,38 @@ def test_engine_sentence_answers_none_when_the_record_cannot_be_read(
 
     monkeypatch.setattr(view.native, "read_state", denied)
     assert view._engine_sentence(tmp_path / "wow") is None
+
+
+def test_engine_sentence_refuses_an_unreadable_record_under_podman(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Under the switch an unreadable record fails closed (Codex r4): engine unknown."""
+    from yulon import forgetting
+    from yulon.ui import controller_view as view
+
+    def denied(_server: Path, **kwargs: object) -> object:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(view.native, "read_state", denied)
+    monkeypatch.setattr(view.engine_seam, "is_podman", lambda: True)
+    assert view._engine_sentence(tmp_path / "wow") == forgetting.engine_unknown_refusal()
+
+
+def test_engine_sentence_refuses_a_corrupt_record_under_podman_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A present but unparseable record refuses under the switch and passes without it."""
+    from yulon import forgetting
+    from yulon.ui import controller_view as view
+
+    server = tmp_path / "wow"
+    server.mkdir()
+    (server / view.native.STATE_FILE).write_text("{not json", encoding="utf-8")
+    assert view._engine_sentence(server) is None
+    monkeypatch.setattr(view.engine_seam, "is_podman", lambda: True)
+    assert view._engine_sentence(server) == forgetting.engine_unknown_refusal()
+    (server / view.native.STATE_FILE).unlink()
+    assert view._engine_sentence(server) is None, "an absent record never refuses"
 
 
 # -- engine-guard completeness (T887 p1 r4 item 4) ---------------------------------

@@ -327,12 +327,17 @@ def _engine_sentence(server_dir: Path, *, wsl_distro: str | None = None) -> str 
     """
     if wsl_distro is not None:
         return None
+    # Unreadable or unparseable but present: without the switch nobody is on Podman, so
+    # nothing changes for a player; under it the engine cannot be told, so fail closed.
     try:
         record = native.read_state(server_dir, valid=())
     except OSError:
-        return None
+        record = None
+        unknown = True
+    else:
+        unknown = record is None and (server_dir / native.STATE_FILE).exists()
     if record is None:
-        return None
+        return forgetting.engine_unknown_refusal() if unknown and engine_seam.is_podman() else None
     was = record.engine or "docker"
     now = engine_seam.resolve()
     if was == now:
