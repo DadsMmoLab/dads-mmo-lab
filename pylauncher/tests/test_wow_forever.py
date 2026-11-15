@@ -899,15 +899,50 @@ def test_the_config_sets_the_portal_and_account_and_keeps_the_players_lines(
     assert written.name == "ForeverLauncher.wtf"
 
 
-def _play_seams(calls: list[str], *, world: str = "running") -> forever_play.PlaySeams:
+class TrustBook:
+    """The install record's trust half, in memory: what Play persists and what it reports."""
+
+    def __init__(self) -> None:
+        self.stale: list[str] = []
+        self.trusted: list[str] = []
+        self.writes = 0
+
+    def record(self) -> forever_play.TrustRecord:
+        """The `TrustRecord` Play is handed, over this book's three lists."""
+
+        def remember_stale(thumb: str) -> None:
+            self.writes += 1
+            if thumb not in self.stale:
+                self.stale.append(thumb)
+
+        def forget_stale(thumb: str) -> None:
+            self.writes += 1
+            self.stale = [t for t in self.stale if t != thumb]
+
+        def trusted(thumb: str) -> None:
+            self.writes += 1
+            self.trusted = [thumb]
+
+        return forever_play.TrustRecord(
+            stale=lambda: tuple(self.stale),
+            remember_stale=remember_stale,
+            forget_stale=forget_stale,
+            trusted=trusted,
+        )
+
+
+def _play_seams(
+    calls: list[str], *, world: str = "running", book: TrustBook | None = None
+) -> forever_play.PlaySeams:
     def trust(
         ca: Path,
         portal: str,
         *,
         record: Callable[[str], None] | None = None,
-        stale: str | None = None,
+        stale: Sequence[str] = (),
+        forget: Callable[[str], None] | None = None,
     ) -> bool:
-        calls.append(f"trust {ca.name} {portal}" + (f" after {stale}" if stale else ""))
+        calls.append(f"trust {ca.name} {portal}" + (f" after {' '.join(stale)}" if stale else ""))
         if record is not None:
             record("AB12CD34")
         return True
@@ -923,6 +958,7 @@ def _play_seams(calls: list[str], *, world: str = "running") -> forever_play.Pla
     return forever_play.PlaySeams(
         state_of=lambda _c: docker.ContainerState(status=world),
         trust=trust,
+        trust_record=(book or TrustBook()).record(),
         account=account,
         start_client=start,
         watch=lambda exe, key, group, **_kw: calls.append(f"watch {exe.name} {group}"),
@@ -952,20 +988,151 @@ def test_play_trusts_makes_the_account_writes_the_config_starts_and_watches(
 
 
 def test_windows_play_records_the_thumbprint_of_the_ca_it_trusted(tmp_path: Path) -> None:
-    """T888 item 2: the install record keeps it, so removal works once certs/ is gone."""
+    """T888 item 2/3: the install record keeps it, so removal works once certs/ is gone."""
     calls: list[str] = []
-    recorded: list[str] = []
+    book = TrustBook()
     seams = forever_play.PlaySeams(
-        **{
-            **_play_seams(calls).__dict__,
-            "remember_trust": recorded.append,
-        }
+        **{**_play_seams(calls, book=book).__dict__},
     )
     forever_play.play(
         FOREVER, _server_with_certs(tmp_path), _client(tmp_path), os_name="windows", seams=seams
     )
-    assert recorded == ["AB12CD34"]
+    assert book.trusted == ["AB12CD34"]
     assert calls[0] == "trust ca.pem trinity.actual.battle.net"
+
+
+def test_the_new_thumbprint_is_recorded_only_after_the_batch_and_the_check(
+    tmp_path: Path,
+) -> None:
+    """T888 item 3 (Codex #2, Claude #2): a failed batch loses nothing and records nothing."""
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 trinity.actual.battle.net # yulon-wow-forever\n")
+    book = TrustBook()
+    book.stale = ["STALET"]
+    results = tmp_path / "results.json"
+    trusted = [False]
+
+    def run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["certutil", "-store"]:
+            if argv[3] == "STALET":
+                return subprocess.CompletedProcess(argv, 0, "", "")  # still in the store
+            return subprocess.CompletedProcess(argv, 0 if trusted[0] else 1, "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def batch(commands: list[list[str]]) -> tuple[list[str], Path]:
+        assert ["certutil", "-delstore", "Root", "STALET"] in commands
+        second = 0 if trusted[0] else 1
+        results.write_text(f'[{{"rc": 0, "out": ""}}, {{"rc": {second}, "out": ""}}]')
+        return (["powershell.exe", "elevated"], results)
+
+    seams = forever_trust.TrustSeams(
+        run=run,  # type: ignore[arg-type]
+        batch=batch,
+        hosts=lambda: hosts,
+        os_name=lambda: "windows",
+        is_admin=lambda: False,
+    )
+    with pytest.raises(forever_trust.TrustError):
+        forever_trust.ensure(
+            _narrow_ca(tmp_path),
+            "trinity.actual.battle.net",
+            seams=seams,
+            record=book.record().trusted,
+            stale=book.stale,
+            forget=book.record().forget_stale,
+        )
+    assert book.trusted == [] and book.stale == ["STALET"], "nothing recorded, nothing dropped"
+
+    trusted[0] = True
+    assert forever_trust.ensure(
+        _narrow_ca(tmp_path),
+        "trinity.actual.battle.net",
+        seams=seams,
+        record=book.record().trusted,
+        stale=book.stale,
+        forget=book.record().forget_stale,
+    )
+    assert book.trusted == [forever_trust.thumbprint(_narrow_ca(tmp_path))]
+
+
+def test_play_remembers_the_ca_it_replaces_before_anything_deletes_it(tmp_path: Path) -> None:
+    """T888 item 3: a remake writes the old thumbprint before the file it names is replaced.
+
+    The prompt is declined, so Play refuses and records no new thumbprint; the old one is
+    in the record for the next Play to delete, and the batch it was going to run named it.
+    """
+    server = tmp_path / "server"
+    (server / "certs").mkdir(parents=True)
+    (server / "certs" / "ca.pem").write_bytes(BROAD_CA.read_bytes())
+    old = forever_trust.thumbprint(server / "certs" / "ca.pem")
+    book = TrustBook()
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 trinity.actual.battle.net # yulon-wow-forever\n")
+    results = tmp_path / "results.json"
+    batched: list[list[list[str]]] = []
+
+    def batch(commands: list[list[str]]) -> tuple[list[str], Path]:
+        batched.append(commands)
+        return (["powershell.exe", "elevated"], results)
+
+    def run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["certutil", "-store"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")  # the old root is installed
+        return subprocess.CompletedProcess(argv, platform.UAC_DECLINED, "", "")
+
+    def remake(where: Path) -> None:
+        (where / "certs" / "ca.pem").write_bytes(NARROW_CA.read_bytes())
+
+    trust_seams = forever_trust.TrustSeams(
+        run=run,  # type: ignore[arg-type]
+        batch=batch,
+        hosts=lambda: hosts,
+        os_name=lambda: "windows",
+        is_admin=lambda: False,
+    )
+    seams = forever_play.PlaySeams(
+        **{
+            **_play_seams([], book=book).__dict__,
+            "remake_certificates": remake,
+            "restart_service": lambda *_a, **_k: None,
+            "trust": lambda ca, portal, **kw: forever_trust.ensure(
+                ca, portal, seams=trust_seams, **kw
+            ),
+        }
+    )
+    client = _client(tmp_path)
+    with pytest.raises(PlayRefusal) as raised:
+        forever_play.play(FOREVER, server, client, os_name="windows", seams=seams)
+    assert str(raised.value) == forever_trust.DECLINED
+    assert book.stale == [old], "the replaced CA is still on the record"
+    assert book.trusted == [], "a declined prompt records nothing"
+    assert ["certutil", "-delstore", "Root", old] in batched[0]
+
+    calls: list[str] = []
+    retried: list[Sequence[str]] = []
+
+    def later_trust(
+        ca: Path,
+        portal: str,
+        *,
+        record: Callable[[str], None] | None = None,
+        stale: Sequence[str] = (),
+        forget: Callable[[str], None] | None = None,
+    ) -> bool:
+        retried.append(tuple(stale))
+        if forget is not None:
+            for thumb in stale:
+                forget(thumb)
+        if record is not None:
+            record("NEWTHUMB")
+        return True
+
+    later = forever_play.PlaySeams(
+        **{**_play_seams(calls, book=book).__dict__, "trust": later_trust}
+    )
+    forever_play.play(FOREVER, server, client, os_name="windows", seams=later)
+    assert retried == [(old,)], "a later Play still asks for the old root's delete"
+    assert book.stale == [] and book.trusted == ["NEWTHUMB"]
 
 
 def test_removing_a_forever_server_takes_its_trust_with_it(tmp_path: Path) -> None:
