@@ -622,6 +622,7 @@ def _import_ca_run(
     stale: Sequence[str] = (),
     *,
     delete_sticks: bool = True,
+    exit_code: int = 0,
 ) -> tuple[list[str], _Crypt32, list[bytes]]:
     """Run the generated import script against a fake crypt32; its argv, the fake, the new DER."""
     import base64
@@ -653,7 +654,7 @@ def _import_ca_run(
             exec(compile(forever_proton.IMPORT_CA, "import_ca.py", "exec"), {"__name__": "ca"})
     finally:
         sys.argv = argv
-    assert ended.value.code == 0
+    assert ended.value.code == exit_code
     return report.read_text(encoding="utf-8").splitlines(), fake, [new]
 
 
@@ -704,10 +705,14 @@ def test_a_reported_removal_is_one_the_store_actually_dropped(
         [old],
         {old: "Yulon WoW Forever Local CA"},
         delete_sticks=False,
+        exit_code=1,
     )
     assert fake.store == [old, *added]
     assert "removed 0 superseded certificate(s)" in lines
     assert any(line.startswith("could not delete") for line in lines)
+    # T888 final review: a superseded root still trusted fails the import outright.
+    assert any(line.startswith(forever_proton.REPORT_STUCK) for line in lines)
+    assert forever_proton.REPORT_TRUSTED not in lines
 
 
 def _linux_path(winpath: str) -> Path:
@@ -750,6 +755,40 @@ def test_trust_ca_records_the_thumbprint_the_prefix_imported(tmp_path: Path) -> 
     assert (prefix / forever_proton.CA_THUMBPRINT_FILE).read_text().strip() == (
         forever_trust.thumbprint(NARROW_CA)
     )
+
+
+def test_trust_ca_refuses_a_report_that_names_a_surviving_root(tmp_path: Path) -> None:
+    """T888 final review: the CA in place is not enough while a superseded root survives.
+
+    The report can carry both lines; Play must not launch over an old broad root.
+    """
+    server = _server(tmp_path)
+    prefix = server / "wowforever-offline-pfx-1"
+    python_dir = prefix / "pfx" / "drive_c" / "python313"
+    python_dir.mkdir(parents=True, exist_ok=True)
+    (python_dir / "python.exe").write_bytes(b"MZ")
+    runtime = forever_proton.Runtime(
+        slr=Path("/slr"), proton=Path("/proton"), prefix=prefix, compat={}, env={}
+    )
+
+    def run(argv: list[str], **_kw: object) -> object:
+        report = _linux_path(argv[-2]) if argv[-2].startswith("Z:") else _linux_path(argv[-1])
+        report.write_text(
+            forever_proton.REPORT_STUCK + " ABC123\n" + forever_proton.REPORT_TRUSTED + "\n",
+            encoding="utf-8",
+        )
+        return object()
+
+    with pytest.raises(forever_proton.ProtonError):
+        forever_proton.trust_ca(
+            runtime,
+            NARROW_CA,
+            server,
+            lambda _line: None,
+            ProtonSeams(run=run),  # type: ignore[arg-type]
+            stale=("ABC123",),
+        )
+    assert not (prefix / forever_proton.CA_THUMBPRINT_FILE).exists()
 
 
 def test_linux_play_hands_the_prefix_the_replaced_cas(tmp_path: Path) -> None:

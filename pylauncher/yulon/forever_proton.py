@@ -86,6 +86,8 @@ HOSTS_MISSING = (
 )
 
 REPORT_TRUSTED = "CA in LocalMachine\\Root: yes"
+REPORT_STUCK = "superseded certificates still trusted:"
+"""The import script's line when a superseded root survived its delete (T888 final review)."""
 
 CA_THUMBPRINT_FILE = ".yulon-ca-thumbprint"
 """In the prefix: the CA's thumbprint as the prefix last imported it (T888).
@@ -196,6 +198,11 @@ def main():
     if not ok:
         say("CertAddEncodedCertificateToStore failed, error %d" % err); return 1
     say("removed %d superseded certificate(s)" % removed)
+    stuck = [thumb for thumb in targets if thumb in left]
+    if stuck:
+        # A superseded root still trusted is the hole this cleanup closes: not a success.
+        say("superseded certificates still trusted: " + " ".join(stuck))
+        return 1
     say("CA in LocalMachine\\Root: " + ("yes" if present else "NO"))
     return 0 if present else 1
 
@@ -458,7 +465,7 @@ def trust_ca(
         timeout=300,
     )
     said = report.read_text(encoding="utf-8", errors="replace") if report.is_file() else ""
-    if REPORT_TRUSTED not in said:
+    if REPORT_TRUSTED not in said or REPORT_STUCK in said:
         raise ProtonError(
             "The game's prefix did not take the install's certificate"
             + (f": {said.strip()}" if said.strip() else " (no report was written).")
