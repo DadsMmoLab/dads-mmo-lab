@@ -142,6 +142,7 @@ from yulon import apply as apply_module
 from yulon import bot_population as botpop
 from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
+from yulon import engine as engine_seam
 from yulon import play as play_module
 from yulon import steam as steam_module
 from yulon.apply import (
@@ -298,6 +299,42 @@ def _dumps_kept(exc: object) -> str:
     said = str(exc)
     at = said.find(DUMPS_KEPT_LEAD)
     return f" {said[at:].strip()}" if at >= 0 else ""
+
+
+class EngineMismatch(docker.DockerCommandError, SaidByYulon):
+    """A container operation refused: the record was made under the other engine (T887).
+
+    Raised by every docker-touching seam of `ControllerServices.for_entry()` when the
+    folder's install record names the other engine. A `DockerCommandError`, so every
+    `except DockerCommandError` already written keeps catching it, and the status poll's
+    `_quiet()` carries it to the banner like any docker failure. `SaidByYulon`, so the
+    tab shows the sentence as written. Carries forgetting's sentence: switch back to use it.
+    """
+
+
+def _engine_sentence(server_dir: Path, *, wsl_distro: str | None = None) -> str | None:
+    """The engine-mismatch refusal for `server_dir`'s record, or None when it may run (T887).
+
+    The ONE guard where the controller's services are built for a server folder: both
+    `main.py` (state.json restores) and `server_cli.run()` (``--server``) build through
+    `ControllerServices.for_entry()`, and a remembered Docker record under the Podman
+    switch (or the reverse) would otherwise drive the wrong engine. Absent record reads
+    as docker and never refuses, so a folder with no record is unchanged.
+
+    Never refused for a server inside a WSL distro (T133): reading its folder to build
+    the tab would boot a stopped distro, and the switch never selects Podman there
+    (`engine.resolve()` is Docker on WSL), so a record there can never mismatch.
+    """
+    if wsl_distro is not None:
+        return None
+    record = native.read_state(server_dir, valid=())
+    if record is None:
+        return None
+    was = record.engine or "docker"
+    now = engine_seam.resolve()
+    if was == now:
+        return None
+    return forgetting.engine_mismatch_refusal(was.capitalize(), now.capitalize())
 
 
 class _DockerSilent(NamedTuple):
@@ -2905,24 +2942,29 @@ class ControllerServices:
                 f"manage are: {', '.join(sorted(_FACTORIES))}."
             )
         if play_client_dir is None:
-            return _with_client_addons(
-                _with_the_ready_wait(
-                    _with_take_back(
-                        _knowing_its_server_sources(
-                            _with_the_database_refusal(
-                                factory(entry, server_dir, client_dir, wsl_distro),
+            return _with_the_engine_guard(
+                _with_client_addons(
+                    _with_the_ready_wait(
+                        _with_take_back(
+                            _knowing_its_server_sources(
+                                _with_the_database_refusal(
+                                    factory(entry, server_dir, client_dir, wsl_distro),
+                                    entry,
+                                    server_dir,
+                                    wsl_distro=wsl_distro,
+                                ),
                                 entry,
-                                server_dir,
-                                wsl_distro=wsl_distro,
-                            ),
-                            entry,
-                        )
+                            )
+                        ),
+                        entry,
                     ),
                     entry,
+                    server_dir,
+                    client_dir,
                 ),
                 entry,
                 server_dir,
-                client_dir,
+                wsl_distro=wsl_distro,
             )
         services = _knowing_its_server_sources(
             _with_the_database_refusal(
@@ -2939,7 +2981,8 @@ class ControllerServices:
             services.applier.client_game = entry.id
         services = _with_the_ready_wait(_with_take_back(services), entry)
         services = _with_client_addons(services, entry, server_dir, play_client_dir, origins)
-        return replace(services, client_dir=client_dir, play_client_dir=play_client_dir)
+        services = replace(services, client_dir=client_dir, play_client_dir=play_client_dir)
+        return _with_the_engine_guard(services, entry, server_dir, wsl_distro=wsl_distro)
 
     def bind_other_server_dirs(self, other_server_dirs: Callable[[], tuple[Path, ...]]) -> None:
         """Bind the other installs' server folders here and on every applier this tab holds.
@@ -2991,15 +3034,24 @@ def _with_the_ready_wait(services: ControllerServices, entry: CatalogEntry) -> C
     are the container the start just started and the daemon it runs on.
     """
     controller = services.controller
-    return replace(
-        services,
-        ready_after_start=partial(
-            native.ready_after_start,
-            entry,
-            controller.spec,
-            wsl_distro=controller.wsl_distro,
-        ),
+    wait = partial(
+        native.ready_after_start,
+        entry,
+        controller.spec,
+        wsl_distro=controller.wsl_distro,
     )
+
+    def ready_after_start(
+        cancel: threading.Event | None = None,
+        **kwargs: object,
+    ) -> native.StartAnswer:
+        if (
+            sentence := _engine_sentence(controller.server_dir, wsl_distro=controller.wsl_distro)
+        ) is not None:
+            raise EngineMismatch(sentence)
+        return wait(cancel=cancel, **kwargs)  # type: ignore[arg-type]
+
+    return replace(services, ready_after_start=ready_after_start)
 
 
 def _what_the_start_did(
@@ -3380,6 +3432,193 @@ def _with_the_database_refusal(
     )
 
 
+def _engine_guarded(
+    controller: Controller, entry: CatalogEntry, server_dir: Path, sentence: str
+) -> Controller:
+    """`controller` refusing every docker-touching call with an `EngineMismatch` (T887).
+
+    A subclass of the controller's own class, so every `isinstance` the view or a
+    seam already reads keeps answering as it did. Built through the base
+    `Controller.__init__` with the install's own spec, folder and seams, then given
+    the entry and the live fields the factory's controller carried. Subclass
+    constructors add nothing of their own besides the entry (Centurion), which is
+    copied after.
+    """
+    inner = controller
+
+    class _EngineGuarded(type(inner)):  # type: ignore[misc]
+        def _refuse(self) -> NoReturn:
+            raise EngineMismatch(sentence)
+
+        def status(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def start(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def stop(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def stop_conflicting_and_start(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def restart(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def recreate(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def remove(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def repair_import(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def import_state(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def wait_db_healthy(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def wait_ready(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def host_ports(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def port_conflicts(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+    guarded = _EngineGuarded.__new__(_EngineGuarded)
+    Controller.__init__(
+        guarded,
+        inner.spec,
+        inner.server_dir,
+        wsl_distro=inner.wsl_distro,
+        import_probe=inner.import_probe,
+        reset_unfinished=inner.reset_unfinished,
+        pre_stop=inner.pre_stop,
+        start_guard=inner.start_guard,
+        before_servers=inner.before_servers,
+        safety_copy=inner.safety_copy,
+        hold_server=inner.hold_server,
+    )
+    guarded.entry = inner.entry
+    guarded.stop_control = inner.stop_control
+    guarded.zone_problem = inner.zone_problem
+    guarded.world_data_problem = inner.world_data_problem
+    guarded.bot_settings_renamed = inner.bot_settings_renamed
+    guarded.seeded_accounts_locked = inner.seeded_accounts_locked
+    return guarded
+
+
+def _refusing_sql(sql: DockerSql, sentence: str) -> DockerSql:
+    """`sql` refusing every statement with an `EngineMismatch` carrying `sentence` (T887).
+
+    A subclass of the instance's own class, so `isinstance` keeps answering as it
+    did. Every SQL seam the tab presses (accounts, bots, module SQL, the applier,
+    the realm keepers, the channel) goes through these objects, so refusing here
+    refuses them all BEFORE any docker command.
+    """
+
+    class _RefusingSql(type(sql)):  # type: ignore[misc]
+        def _refuse(self) -> NoReturn:
+            raise EngineMismatch(sentence)
+
+        def run_file(self, db: object, path: Path) -> NoReturn:
+            self._refuse()
+
+        def run_statement(self, db: object, statement: str) -> NoReturn:
+            self._refuse()
+
+        def query(self, db: object, statement: str) -> NoReturn:
+            self._refuse()
+
+    return _RefusingSql(
+        sql.db_container,
+        sql.root_password,
+        wsl_distro=sql.wsl_distro,
+        schemas=sql.schemas,
+        client=sql.client,
+    )
+
+
+def _refusing_mysql(
+    mysql: wotlk_maintenance.DockerMysql, sentence: str
+) -> wotlk_maintenance.DockerMysql:
+    """`mysql` refusing every dump and load with an `EngineMismatch` carrying `sentence` (T887).
+
+    A subclass of the instance's own class, so `isinstance` keeps answering as it
+    did. Backup, restore and the move go through this one object, so refusing its
+    `_exec` refuses them all BEFORE any docker command.
+    """
+
+    class _RefusingMysql(type(mysql)):  # type: ignore[misc]
+        def _exec(self, *args: object, **kwargs: object) -> NoReturn:
+            raise EngineMismatch(sentence)
+
+    return _RefusingMysql(
+        mysql.db_container,
+        mysql.root_password,
+        wsl_distro=mysql.wsl_distro,
+        client=mysql.client,
+    )
+
+
+def _with_the_engine_guard(
+    services: ControllerServices,
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> ControllerServices:
+    """`services` refusing every docker-touching seam under the other engine (T887).
+
+    The ONE guard where the controller's services are built for a server folder
+    (`for_entry()`): reads the folder's install record (absent record = no refusal)
+    and, on mismatch, raises one new `EngineMismatch(SaidByYulon)` carrying
+    forgetting's sentence from every container operation (start, stop, status/poll,
+    SQL, backup, apply, rebuild), BEFORE any docker command. The GUI tab still opens
+    and shows the sentence through its existing error paths; `server_cli` prints it
+    and exits non-zero.
+    """
+    sentence = _engine_sentence(server_dir, wsl_distro=wsl_distro)
+    if sentence is None:
+        return services
+    refuse = _refusing_call(sentence)
+    alone = (
+        DatabaseAlone(bring_up=refuse, take_down=refuse)
+        if services.database_alone is not None
+        else None
+    )
+    return replace(
+        services,
+        controller=_engine_guarded(services.controller, entry, server_dir, sentence),
+        logs_source=refuse,
+        send_console=refuse,
+        network_plan=refuse,
+        network_apply=refuse,
+        create_account=refuse,
+        backup=refuse,
+        plan_restore=refuse,
+        restore=refuse,
+        hold_server=refuse if services.hold_server is not None else None,
+        database_alone=alone,
+        realm_name_save=refuse if services.realm_name_save is not None else None,
+        repair_database=refuse if services.repair_database is not None else None,
+        rebuild=refuse if services.rebuild is not None else None,
+    )
+
+
+def _refusing_call(sentence: str) -> Callable[..., NoReturn]:
+    """A seam refusing with `sentence`: an `EngineMismatch` before any docker command (T887)."""
+
+    def refuse(*_args: object, **_kwargs: object) -> NoReturn:
+        raise EngineMismatch(sentence)
+
+    return refuse
+
+
 def _db_client(entry: CatalogEntry) -> str | None:
     """Which client family this game's database image ships (`install.native.db.client`).
 
@@ -3391,7 +3630,11 @@ def _db_client(entry: CatalogEntry) -> str | None:
 
 
 def _sql_for(
-    entry: CatalogEntry, password: apply_module.RootPassword, *, wsl_distro: str | None
+    entry: CatalogEntry,
+    password: apply_module.RootPassword,
+    *,
+    wsl_distro: str | None,
+    server_dir: Path | None = None,
 ) -> DockerSql:
     """The read+write SQL seam every SQL-backed control on this tab goes through.
 
@@ -3407,6 +3650,20 @@ def _sql_for(
     a catalog entry naming a different one cannot end up addressing somebody
     else's database.
     """
+    if (
+        server_dir is not None
+        and (sentence := _engine_sentence(server_dir, wsl_distro=wsl_distro)) is not None
+    ):
+        return _refusing_sql(
+            DockerSql(
+                entry.container_spec().db,
+                password,
+                schemas=entry.schema_map(),
+                client=_db_client(entry),
+                wsl_distro=wsl_distro,
+            ),
+            sentence,
+        )
     return DockerSql(
         entry.container_spec().db,
         password,
@@ -3417,7 +3674,11 @@ def _sql_for(
 
 
 def _mysql_for(
-    entry: CatalogEntry, password: apply_module.RootPassword, *, wsl_distro: str | None
+    entry: CatalogEntry,
+    password: apply_module.RootPassword,
+    *,
+    wsl_distro: str | None,
+    server_dir: Path | None = None,
 ) -> wotlk_maintenance.DockerMysql:
     """The dump/load seam, bound to this entry's own db container.
 
@@ -3436,12 +3697,18 @@ def _mysql_for(
     asked "which OTHER builders were missed", after the same defect had already
     been fixed twice (2026-09-03).
     """
-    return wotlk_maintenance.DockerMysql(
+    made = wotlk_maintenance.DockerMysql(
         entry.container_spec().db,
         password,
         wsl_distro=wsl_distro,
         client=_db_client(entry),
     )
+    if (
+        server_dir is not None
+        and (sentence := _engine_sentence(server_dir, wsl_distro=wsl_distro)) is not None
+    ):
+        return _refusing_mysql(made, sentence)
+    return made
 
 
 def _copy_the_table_files(
@@ -3536,6 +3803,8 @@ def _database_alone(
     """
 
     def bring_up(because: str) -> bool:
+        if (sentence := _engine_sentence(server_dir, wsl_distro=wsl_distro)) is not None:
+            raise EngineMismatch(sentence)
         if spec.db in set(docker.status(wsl_distro=wsl_distro)):
             return False
         try:
@@ -3560,9 +3829,14 @@ def _database_alone(
                 ) from exc
             raise
 
+    def take_down() -> None:
+        if (sentence := _engine_sentence(server_dir, wsl_distro=wsl_distro)) is not None:
+            raise EngineMismatch(sentence)
+        docker.stop_containers([spec.db], wsl_distro=wsl_distro)
+
     return DatabaseAlone(
         bring_up=bring_up,
-        take_down=lambda: docker.stop_containers([spec.db], wsl_distro=wsl_distro),
+        take_down=take_down,
     )
 
 
@@ -3840,6 +4114,8 @@ def _server_hold_for(
     def hold(
         press: str, *, budget: float | None = budget
     ) -> contextlib.AbstractContextManager[None]:
+        if (sentence := _engine_sentence(server_dir, wsl_distro=wsl_distro)) is not None:
+            raise EngineMismatch(sentence)
         return docker.server_hold(
             server_dir,
             press,
@@ -4687,8 +4963,8 @@ def _for_wotlk(
     record_backed = _record_backed_keys(listed_store)
     settings_mods = _settings_mods(listed_store)
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
-    sql = _sql_for(entry, password, wsl_distro=wsl_distro)
-    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    sql = _sql_for(entry, password, wsl_distro=wsl_distro, server_dir=server_dir)
+    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro, server_dir=server_dir)
     # The probe pair is `(None, None)` for a game that names no one-shot import
     # service — `install_wiring.import_gate_for()` carries the reasoning, once,
     # for this tab, the Catalog tab and the CLI. `wsl_distro=` because that
@@ -5224,8 +5500,8 @@ def _for_tbc(
     """
     tbc_settings_mods = _settings_mods(tbc_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
-    sql = _sql_for(entry, password, wsl_distro=wsl_distro)
-    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    sql = _sql_for(entry, password, wsl_distro=wsl_distro, server_dir=server_dir)
+    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro, server_dir=server_dir)
     # 8.1b, and every fact under these two is this tree's own: `characters`,
     # `realmd`, and a bot marker that is an account prefix with no registry
     # table behind it. The seams are the same; nothing about them is inherited.
@@ -5417,8 +5693,8 @@ def _for_vanilla(
     """
     vanilla_settings_mods = _settings_mods(vanilla_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
-    sql = _sql_for(entry, password, wsl_distro=wsl_distro)
-    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    sql = _sql_for(entry, password, wsl_distro=wsl_distro, server_dir=server_dir)
+    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro, server_dir=server_dir)
     # 8.1c. Measured on `~/vanilla-75b` before this block was written: this tree
     # has `etc/aiplayerbot.conf` with the key live at column 0, `characters` and
     # `realmd` for its schemas, and — its own section of the read says so, not
@@ -5644,8 +5920,8 @@ def _for_centurion(
     Centurion "module" does not exist.
     """
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
-    sql = _sql_for(entry, password, wsl_distro=wsl_distro)
-    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    sql = _sql_for(entry, password, wsl_distro=wsl_distro, server_dir=server_dir)
+    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro, server_dir=server_dir)
     spec = entry.container_spec()
     measured = entry.observability is not None
     recorder = (
@@ -5923,8 +6199,8 @@ def _for_tortoise(
     """
     tortoise_settings_mods = _settings_mods(tortoise_modules.store())
     password = _db_password(entry, server_dir, wsl_distro=wsl_distro)
-    sql = _sql_for(entry, password, wsl_distro=wsl_distro)
-    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    sql = _sql_for(entry, password, wsl_distro=wsl_distro, server_dir=server_dir)
+    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro, server_dir=server_dir)
     # 8.1d. This is NOT a CMaNGOS tree — `cmangos.md` says so in as many words —
     # so every value under these two seams comes from its own section and its
     # own source: `tw_char`/`tw_logon`, and a bot marker that is an account
