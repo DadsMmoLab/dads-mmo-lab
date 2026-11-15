@@ -327,11 +327,16 @@ def _record(record: Callable[[str], None] | None, thumb: str) -> None:
 
 
 def _installed(s: TrustSeams, thumb: str) -> bool:
-    """Whether this computer's Root store still holds `thumb`."""
+    """Whether this computer's Root store still holds `thumb`.
+
+    A `certutil` that cannot run answers True: "I could not look" is not "it is gone", and
+    a thumbprint dropped on that reading is a root this computer keeps trusting with no
+    record of it (T888).
+    """
     try:
         return s.run(["certutil", "-store", "Root", thumb]).returncode == 0
     except OSError:
-        return False
+        return True
 
 
 def _forget_gone(s: TrustSeams, stale: Sequence[str], forget: Callable[[str], None] | None) -> None:
