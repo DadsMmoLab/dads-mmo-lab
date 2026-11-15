@@ -4575,6 +4575,7 @@
               }
             ]
           },
+          "certificates": true,
           "secrets": [
             "MYSQL_ROOT_PASSWORD",
             "DB_PASSWORD"
