@@ -141,8 +141,9 @@ def test_the_grant_makes_missing_folders_then_grants_modify_by_sid(tmp_path: Pat
             "powershell.exe",
             "-NoProfile",
             "-Command",
-            "New-Item -ItemType Directory -Force -LiteralPath "
-            + platform.powershell_literal(str(client / "SYS")),
+            "[System.IO.Directory]::CreateDirectory("
+            + platform.powershell_literal(str(client / "SYS"))
+            + ") | Out-Null",
         ],
         ["icacls", str(client / "SYS"), "/grant", f"*{SID}:{GRANT}"],
     ]
@@ -225,7 +226,8 @@ def test_a_missing_folder_is_made_by_powershell_with_one_literal_path(
 
     `cmd /c mkdir` was the one elevated form, and it reparsed its argument, so a path with
     a `cmd` metacharacter in it was refused one layer up -- `(x86)` included, which is
-    FFXI's default install. PowerShell's `-LiteralPath` takes the path whole and `''`
+    FFXI's default install. A single-quoted literal hands `CreateDirectory` the path whole
+    and `''`
     spells a quote, so the folder is one argument and the allowlist matches that form
     alone.
     """
@@ -234,8 +236,9 @@ def test_a_missing_folder_is_made_by_powershell_with_one_literal_path(
     commands = grant_commands([folder], SID)
     assert commands[0][:3] == ["powershell.exe", "-NoProfile", "-Command"]
     assert commands[0][3] == (
-        "New-Item -ItemType Directory -Force -LiteralPath "
+        "[System.IO.Directory]::CreateDirectory("
         + platform.powershell_literal(str(folder))
+        + ") | Out-Null"
     )
     assert commands[1] == ["icacls", str(folder), "/grant", f"*{SID}:{GRANT}"]
     argv, results = platform.elevated_admin_batch(commands, is_admin=False)
@@ -254,7 +257,9 @@ def test_a_folder_with_a_cmd_metacharacter_is_one_literal_argument(tail: str) ->
     folder = Path("C:/") / tail
     command = grant_commands([folder], SID)[0]
     assert len(command) == 4, "one -Command argument, no split path"
-    literal = command[3].split(" -LiteralPath ", 1)[1]
+    prefix, suffix = "[System.IO.Directory]::CreateDirectory(", ") | Out-Null"
+    assert command[3].startswith(prefix) and command[3].endswith(suffix)
+    literal = command[3][len(prefix) : -len(suffix)]
     assert literal.startswith("'") and literal.endswith("'")
     assert literal.count("'") % 2 == 0, "every inner quote is doubled"
     assert str(folder).replace("'", "''") in literal
@@ -298,9 +303,20 @@ def test_the_admin_batch_refuses_a_powershell_command_that_is_not_the_folder_for
             "powershell.exe",
             "-NoProfile",
             "-Command",
-            "New-Item -ItemType Directory -Force -LiteralPath 'C:\\x'; Remove-Item C:\\y",
+            "[System.IO.Directory]::CreateDirectory('C:\\x') | Out-Null; Remove-Item C:\\y",
         ],
-        ["powershell.exe", "-Command", "New-Item -ItemType Directory -Force -LiteralPath 'C:\\x'"],
+        [
+            "powershell.exe",
+            "-Command",
+            "[System.IO.Directory]::CreateDirectory('C:\\x') | Out-Null",
+        ],
+        # Windows PowerShell 5.1's New-Item has no -LiteralPath: the old form is refused too.
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "New-Item -ItemType Directory -Force -LiteralPath 'C:\\x'",
+        ],
         ["cmd", "/c", "mkdir", "C:\\Program Files\\FFXI\\USER"],
         ["cmd", "/c", "whoami"],
         ["cmd", "/c", "del", "C:\\x"],
