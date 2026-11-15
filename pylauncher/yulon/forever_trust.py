@@ -250,7 +250,7 @@ def _trust(
         _record(record, thumb)
         return False
     if s.is_admin():  # already an administrator: the hosts edit is this process's own
-        failed = _run_as_admin(ca, portal, s, commands, hosts)
+        failed = _run_as_admin(s, commands, hosts=hosts, portal=portal)
         _check(ca, portal, s, failed)
         _forget_gone(s, stale, forget)
         _record(record, thumb)
@@ -289,17 +289,22 @@ def _trust(
 
 
 def _run_as_admin(
-    ca: Path, portal: str, s: TrustSeams, commands: Sequence[list[str]], hosts: Path
+    s: TrustSeams,
+    commands: Sequence[list[str]],
+    *,
+    hosts: Path,
+    portal: str | None,
 ) -> list[str]:
     """Run `commands` in this already-elevated process, the hosts edit in Python (T888).
 
     The hosts edit was a `cmd /c` line whose path had to survive `subprocess.list2cmdline`
     and then `cmd.exe`'s own parse: `C:/Program Files (x86)/...` on a `SystemRoot` with a
     space came back with inner quotes cmd does not read as escapes. Read, edit and
-    `os.replace` need no command line at all, so the edit goes through `edit_hosts()`.
+    `os.replace` need no command line at all, so the edit goes through `edit_hosts()`
+    (`portal` speaking for the line to add, `None` for the ones to take out).
     """
     failed: list[str] = []
-    edit = append_command(hosts, portal)
+    edit = append_command(hosts, portal) if portal is not None else strip_command(hosts)
     for command in commands:
         if command == edit:
             try:
@@ -462,39 +467,62 @@ def strip_command(hosts: Path) -> list[str]:
 
 
 def remove_commands(
-    ca: Path | None = None, *, thumb: str | None = None, hosts: Path | None = None
+    ca: Path | None = None,
+    *,
+    thumb: str | None = None,
+    stale: Sequence[str] = (),
+    hosts: Path | None = None,
+    strip_hosts: bool = True,
 ) -> list[list[str]]:
     """What undoes `ensure()`: the CA out of Root, and this module's hosts line out of hosts.
 
     `thumb` is the thumbprint the install record kept (`state.KnownInstall.trusted_ca_thumbprint`),
     which is what makes this work after the certs folder — and the CA the thumbprint is of —
-    is gone. `ca` is the fallback for an install that predates that record. The hosts half
-    is one command and one file, whatever the CA's answer was.
+    is gone. `ca` is the fallback for an install that predates that record. `stale` are the
+    CAs this install replaced and has not seen leave the store yet. `strip_hosts` is False
+    while another WoW Forever install is on this computer: the one tagged line sends every
+    one of them to 127.0.0.1, and taking it out would stop the other one too.
+
+    Empty when there is nothing to undo — no thumbprint recorded or pending, and no tagged
+    line in `hosts` — because an empty list is what `remove()` turns into no prompt at all
+    (T888).
     """
-    known = thumb if thumb is not None else (thumbprint(ca) if ca is not None else None)
-    commands: list[list[str]] = []
-    if known:
-        commands.append(["certutil", "-delstore", "Root", known])
-    commands.append(strip_command(hosts if hosts is not None else hosts_path()))
+    known = [t for t in [thumb, *dict.fromkeys(stale)] if t]
+    if thumb is None and ca is not None:
+        known.insert(0, thumbprint(ca))
+    commands: list[list[str]] = [
+        ["certutil", "-delstore", "Root", thumbprint_] for thumbprint_ in dict.fromkeys(known)
+    ]
+    hosts = hosts if hosts is not None else hosts_path()
+    if strip_hosts and tagged(hosts):
+        commands.append(strip_command(hosts))
     return commands
 
 
 def remove(
-    *, ca: Path | None = None, thumb: str | None = None, seams: TrustSeams | None = None
+    *,
+    ca: Path | None = None,
+    thumb: str | None = None,
+    stale: Sequence[str] = (),
+    strip_hosts: bool = True,
+    seams: TrustSeams | None = None,
 ) -> tuple[str, ...]:
     """Take this install's trust off the computer; the commands it could not run.
 
-    Windows: the CA's thumbprint out of `LocalMachine\\Root` and the tagged hosts line out,
-    in ONE elevated batch (one prompt) — plus a resolver flush, because Windows caches the
-    name it no longer has to redirect. Linux: there is no machine store this app put
-    anything in (the CA lives in the game's own prefix), so only the hosts line, through
-    `sudo -n`. What cannot run there comes back as the command for the player, one line
-    each, which the caller shows under Details.
+    Windows: the recorded CA out of `LocalMachine\\Root`, every replaced one the store
+    still holds, and the tagged hosts line out, in ONE elevated batch (one prompt) — plus
+    a resolver flush, because Windows caches the name it no longer has to redirect. Linux:
+    there is no machine store this app put anything in (the CA lives in the game's own
+    prefix), so only the hosts line, through `sudo -n`. What cannot run there comes back
+    as the command for the player, one line each, which the caller shows under Details.
+
+    Nothing prompts when there is nothing to do (T888), and `strip_hosts` is False while
+    another WoW Forever install still uses the line (`remove_commands()`).
     """
     s = seams if seams is not None else TrustSeams()
     hosts = s.hosts()
     if s.os_name() != "windows":
-        if not tagged(hosts):
+        if not strip_hosts or not tagged(hosts):
             return ()
         command = ["sudo", "-n", "sed", "-i", f"/{HOSTS_TAG}/d", str(hosts)]
         if s.which("sudo") is not None:
@@ -505,13 +533,23 @@ def remove(
             except OSError as exc:
                 logger.warning(f"sudo could not take the hosts line out: {exc}")
         return (f"sudo sed -i '/{HOSTS_TAG}/d' {hosts}",)
-    commands = [
-        *remove_commands(ca, thumb=thumb, hosts=hosts),
-        ["cmd", "/c", "ipconfig", "/flushdns"],
-    ]
+    pending = [t for t in dict.fromkeys(stale) if t and _installed(s, t)]
+    commands = remove_commands(ca, thumb=thumb, stale=pending, hosts=hosts, strip_hosts=strip_hosts)
+    if not commands:
+        return ()
+    commands.append(["cmd", "/c", "ipconfig", "/flushdns"])
+    if s.is_admin():
+        failed = _run_as_admin(s, commands, hosts=hosts, portal=None)
+        if failed:
+            logger.warning(
+                "WoW Forever's trust could not be taken off this computer: " + "; ".join(failed)
+            )
+        else:
+            logger.info("took WoW Forever's CA and hosts line off this computer")
+        return tuple(failed)
     wrapped = s.batch(commands)
     if wrapped is None:
-        failed = [c for c in commands if _ran(s, c) != 0]
+        failed = [platform.command_text(c) for c in commands if _ran(s, c) != 0]
     else:
         argv, results_path = wrapped
         try:
@@ -529,13 +567,16 @@ def remove(
             return tuple(platform.command_text(c) for c in commands)
         if results is None:
             return tuple(platform.command_text(c) for c in commands)
-        failed = [c for c, (rc, _out) in zip(commands, results, strict=True) if rc != 0]
+        failed = [
+            platform.command_text(c)
+            for c, (rc, _out) in zip(commands, results, strict=True)
+            if rc != 0
+        ]
     if failed:
         logger.warning(
-            "WoW Forever's trust could not be taken off this computer: "
-            + "; ".join(platform.command_text(c) for c in failed)
+            "WoW Forever's trust could not be taken off this computer: " + "; ".join(failed)
         )
-        return tuple(platform.command_text(c) for c in failed)
+        return tuple(failed)
     logger.info("took WoW Forever's CA and hosts line off this computer")
     return ()
 

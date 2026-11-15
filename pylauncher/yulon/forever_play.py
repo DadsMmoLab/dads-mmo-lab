@@ -346,19 +346,30 @@ def remove_trust(
     server_dir: Path,
     *,
     thumbprint: str | None = None,
+    stale: Sequence[str] = (),
+    strip_hosts: bool = True,
     seams: forever_trust.TrustSeams | None = None,
 ) -> tuple[str, ...]:
     """Take this install's login trust off the computer; the comments left for Details.
 
     The CA's thumbprint comes from the install record when there is one, so this works
     after the certs folder (and the certificate) is gone; `certs/ca.pem` is the fallback
-    for an install recorded before the thumbprint was kept. Nothing here raises: the
-    caller is dropping a record, and a refused prompt must not keep a server the player
-    asked to remove.
+    for an install recorded before the thumbprint was kept. `stale` are the CAs this
+    install replaced and has not seen leave the store; `strip_hosts` is False while
+    another WoW Forever install on this computer still needs the one tagged hosts line
+    (T888), and then nothing prompts unless there is a certificate to delete. Nothing here
+    raises: the caller is dropping a record, and a refused prompt must not keep a server
+    the player asked to remove.
     """
     login = login_of(entry)
     try:
-        return forever_trust.remove(ca=server_dir / login.ca, thumb=thumbprint, seams=seams)
+        return forever_trust.remove(
+            ca=server_dir / login.ca,
+            thumb=thumbprint,
+            stale=stale,
+            strip_hosts=strip_hosts,
+            seams=seams,
+        )
     except OSError as exc:
         logger.warning(f"could not take {entry.name}'s trust off this computer: {exc}")
         return ()

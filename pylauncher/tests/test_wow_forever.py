@@ -691,19 +691,89 @@ def test_an_administrator_edits_a_tmp_hosts_file_in_python(tmp_path: Path) -> No
 
 
 def test_removal_builds_the_ca_command_from_the_recorded_thumbprint(tmp_path: Path) -> None:
-    """T888 item 2: after the install folder is gone the record's thumbprint is what is left."""
-    commands = forever_trust.remove_commands(thumb="AB12CD")
+    """T888 item 2/7: after the install folder is gone, the record's thumbprint is what is left."""
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 trinity.actual.battle.net # yulon-wow-forever\n")
+    commands = forever_trust.remove_commands(thumb="AB12CD", hosts=hosts)
     assert commands[0] == ["certutil", "-delstore", "Root", "AB12CD"]
     assert commands[1][:2] == ["powershell.exe", "-NoProfile"]
     assert "# yulon-wow-forever" in commands[1][3]
     ca = _ca(tmp_path)
-    assert forever_trust.remove_commands(ca)[0] == [
+    assert forever_trust.remove_commands(ca, hosts=hosts)[0] == [
         "certutil",
         "-delstore",
         "Root",
         forever_trust.thumbprint(ca),
     ]
-    assert forever_trust.remove_commands() == [commands[1]], "no CA known, so only hosts"
+    assert forever_trust.remove_commands(hosts=hosts) == [commands[1]], "no CA known, so only hosts"
+
+
+def test_removal_asks_for_nothing_when_there_is_nothing_to_undo(tmp_path: Path) -> None:
+    """T888 item 7 (Claude #6): a never-played install's removal raises no prompt at all."""
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 localhost\n")
+    assert forever_trust.remove_commands(hosts=hosts) == []
+    batched: list[list[list[str]]] = []
+
+    def batch(commands: list[list[str]]) -> tuple[list[str], Path]:
+        batched.append(commands)
+        raise AssertionError("no prompt for a removal with nothing to take off")
+
+    seams = forever_trust.TrustSeams(
+        run=lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, "", ""),
+        batch=batch,
+        hosts=lambda: hosts,
+        os_name=lambda: "windows",
+        is_admin=lambda: False,
+    )
+    assert forever_trust.remove(seams=seams) == ()
+    assert batched == []
+    linux = forever_trust.TrustSeams(
+        run=lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, "", ""),
+        hosts=lambda: hosts,
+        os_name=lambda: "linux",
+        which=lambda _n: "/usr/bin/sudo",
+    )
+    assert forever_trust.remove(seams=linux) == ()
+
+
+def test_the_shared_hosts_line_stays_while_another_install_uses_it(tmp_path: Path) -> None:
+    """T888 item 7 (Codex #7): one tagged line serves every WoW Forever install on the box."""
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 trinity.actual.battle.net # yulon-wow-forever\n")
+    assert [
+        c for c in forever_trust.remove_commands(thumb="AB12CD", hosts=hosts) if c[0] != "certutil"
+    ], "the last install takes the line out"
+    assert forever_trust.remove_commands(thumb="AB12CD", hosts=hosts, strip_hosts=False) == [
+        ["certutil", "-delstore", "Root", "AB12CD"]
+    ], "another install still needs it, so only the CA goes"
+    batched: list[list[list[str]]] = []
+    results = tmp_path / "results.json"
+
+    def batch(commands: list[list[str]]) -> tuple[list[str], Path]:
+        batched.append(commands)
+        results.write_text('[{"rc": 0, "out": ""}, {"rc": 0, "out": ""}]')
+        return (["powershell.exe", "elevated"], results)
+
+    seams = forever_trust.TrustSeams(
+        run=lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, "", ""),
+        batch=batch,
+        hosts=lambda: hosts,
+        os_name=lambda: "windows",
+        is_admin=lambda: False,
+    )
+    assert forever_trust.remove(thumb="AB12CD", strip_hosts=False, seams=seams) == ()
+    assert [c[0] for c in batched[0]] == ["certutil", "cmd"]
+    assert "# yulon-wow-forever" in hosts.read_text(), "the other install still resolves"
+
+    linux = forever_trust.TrustSeams(
+        run=lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, "", ""),
+        hosts=lambda: hosts,
+        os_name=lambda: "linux",
+        which=lambda _n: "/usr/bin/sudo",
+    )
+    assert forever_trust.remove(strip_hosts=False, seams=linux) == (), "no sudo, no prompt"
+    assert forever_trust.tagged(hosts)
 
 
 def test_windows_removal_is_one_elevated_batch_with_the_recorded_thumbprint(
@@ -716,7 +786,7 @@ def test_windows_removal_is_one_elevated_batch_with_the_recorded_thumbprint(
 
     def batch(commands: list[list[str]]) -> tuple[list[str], Path]:
         batched.append(commands)
-        results.write_text('[{"rc": 0, "out": ""}, {"rc": 0, "out": ""}, {"rc": 0, "out": ""}]')
+        results.write_text('[{"rc": 0, "out": ""}, {"rc": 0, "out": ""}]')
         return (["powershell.exe", "elevated"], results)
 
     seams = forever_trust.TrustSeams(
@@ -726,10 +796,9 @@ def test_windows_removal_is_one_elevated_batch_with_the_recorded_thumbprint(
         os_name=lambda: "windows",
     )
     assert forever_trust.remove(thumb="AB12CD", seams=seams) == ()
-    assert [c[0] for c in batched[0]] == ["certutil", "powershell.exe", "cmd"]
+    assert [c[0] for c in batched[0]] == ["certutil", "cmd"]
     assert batched[0][0] == ["certutil", "-delstore", "Root", "AB12CD"]
-    assert batched[0][1][3].startswith("$p=")
-    assert batched[0][2] == ["cmd", "/c", "ipconfig", "/flushdns"]
+    assert batched[0][1] == ["cmd", "/c", "ipconfig", "/flushdns"]
     assert not results.exists(), "the results file is removed once read"
 
 
