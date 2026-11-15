@@ -570,19 +570,20 @@ def elevated_batch(
     return _elevated_script(commands, "yulon-netsh-")
 
 
-ADMIN_BATCH_PROGRAMS: tuple[str, ...] = ("icacls", "certutil")
+ADMIN_BATCH_PROGRAMS: tuple[str, ...] = ("icacls", "certutil", "powershell.exe")
 """The programs `elevated_admin_batch()` will run behind its one prompt, and no others.
 
 `icacls` grants a folder to the player; `certutil -addstore Root` trusts a WoW Forever
-install's own name-constrained CA and `-delstore` takes it out again (`forever_trust.py`).
-A short list on purpose: an elevated batch is a place where a wrong argv does the most
-harm.
+install's own name-constrained CA and `-delstore` takes it out again (`forever_trust.py`);
+`powershell.exe` makes a missing client folder and edits the hosts file, both by
+`-LiteralPath` (T888). A short list on purpose: an elevated batch is a place where a wrong
+argv does the most harm.
 
 `cmd` is deliberately NOT in it. It was, "for `cmd /c mkdir` and the hosts line", and a
 bare entry means ANY `cmd /c …` runs elevated: a client folder named `C:\\a&b` became
-`mkdir C:\\a & b`, with `b` run as Administrator. Its few exact forms Yu'lon itself
-writes are matched whole instead (`_cmd_form_allowed()`), and every variable part of them
-is refused if it holds a character `cmd.exe` reparses.
+`mkdir C:\\a & b`, with `b` run as Administrator. The one exact form Yu'lon itself still
+writes is matched whole instead (`_cmd_form_allowed()`), and `powershell.exe`'s forms are
+too: a folder is made by a single-quoted `-LiteralPath`, which `cmd.exe` never sees.
 """
 
 SHELL_METACHARACTERS = '&|<>^%!()"'
@@ -594,13 +595,22 @@ def shell_metacharacter(text: str) -> str | None:
 
     A path or a host name that holds one is not one argument to `cmd.exe`, whatever
     quoting was used above it: `cmd /c` joins its arguments back into a command line and
-    parses that again.
+    parses that again. Nothing Yu'lon builds for an elevated prompt goes through `cmd`
+    any more (T888), so this is read only by the tests that pin that.
     """
     for char in SHELL_METACHARACTERS:
         if char in text:
             return char
     return None
 
+
+_PS_LITERAL = r"'(?:[^']|'')*'"
+"""`powershell_literal()`'s output: one single-quoted string with inner quotes doubled."""
+
+_PS_NEW_FOLDER = re.compile(
+    r"^New-Item -ItemType Directory -Force -LiteralPath " + _PS_LITERAL + r"$"
+)
+r"""`single_client.grant_commands()`'s folder: one literal path, `''` spelling a quote."""
 
 _CMD_HOSTS_APPEND = re.compile(
     r'^\(echo\.& echo 127\.0\.0\.1 [A-Za-z0-9.-]+ # ?[A-Za-z0-9_-]+\)>>"[^"&|<>^%!()]+"$'
@@ -615,32 +625,39 @@ _CMD_HOSTS_STRIP = re.compile(
 r"""`forever_trust.remove_commands()`'s tagged-line removal, empty hosts file included."""
 
 _CMD_FLUSH_DNS: tuple[str, ...] = ("ipconfig", "/flushdns")
-"""The one other command: Windows' own resolver flush after a hosts edit."""
+"""The one `cmd` form left: Windows' own resolver flush after a hosts edit."""
 
 
 def _cmd_form_allowed(argv: Sequence[str]) -> bool:
-    """Whether this `cmd` argv is one of the exact forms Yu'lon itself writes, whole.
+    """Whether this `cmd` or `powershell.exe` argv is one of the exact forms Yu'lon writes.
 
-    Three of them, each matched in full rather than by its program:
+    Matched in full rather than by program, so the elevated prompt cannot be handed a
+    command line somebody else composed (`cmd /c whoami`, a path that closes the literal
+    and appends a second command):
 
-    * `cmd /c mkdir <one folder>` — `single_client.grant_commands()`, which refuses a
-      folder with a `cmd` metacharacter in it before it builds this (`shell_metacharacter`);
+    * `cmd /c ipconfig /flushdns` — the resolver flush after a hosts edit;
     * the hosts append and the tagged-line strip `forever_trust` builds, whose only
       variable parts are one host name, one tag and one file path;
-    * `cmd /c ipconfig /flushdns`.
+    * `powershell.exe -NoProfile -Command New-Item -ItemType Directory -Force
+      -LiteralPath '<one path>'` — `single_client.grant_commands()`, the folder a
+      Program Files grant finds missing (T888);
 
-    Anything else is refused, so the elevated prompt cannot be handed a command line
-    somebody else composed (`cmd /c whoami`, a path that closes the quote and appends).
+    A `powershell.exe` argv of any other shape, or a `cmd` argv that is not one of the
+    forms above, is refused.
     """
-    if argv[:2] != ["cmd", "/c"]:
+    if argv[:1] == ["cmd"]:
+        if argv[1:2] != ["/c"]:
+            return False
+        if len(argv) == 4 and tuple(argv[2:]) == _CMD_FLUSH_DNS:
+            return True
+        return len(argv) == 3 and bool(
+            _CMD_HOSTS_APPEND.match(argv[2]) or _CMD_HOSTS_STRIP.match(argv[2])
+        )
+    if argv[:1] != ["powershell.exe"]:
         return False
-    if len(argv) == 4 and argv[2] == "mkdir":
-        return bool(argv[3])
-    if tuple(argv[2:]) == _CMD_FLUSH_DNS:
-        return len(argv) == 4
-    if len(argv) != 3:
+    if len(argv) != 4 or list(argv[1:3]) != ["-NoProfile", "-Command"]:
         return False
-    return bool(_CMD_HOSTS_APPEND.match(argv[2]) or _CMD_HOSTS_STRIP.match(argv[2]))
+    return bool(_PS_NEW_FOLDER.match(argv[3]))
 
 
 def elevated_admin_batch(
@@ -652,14 +669,17 @@ def elevated_admin_batch(
     grant a client under Program Files needs (`single_client.grant_commands()`) and for
     WoW Forever's trust (`forever_trust.py`). None when nothing needs wrapping (not
     Windows, already admin, or no commands). Refused (`ValueError`) for a program
-    outside `ADMIN_BATCH_PROGRAMS`, and for a `cmd` argv that is not one of the exact
-    forms `_cmd_form_allowed()` names.
+    outside `ADMIN_BATCH_PROGRAMS`, and for a `cmd` or `powershell.exe` argv that is not
+    one of the exact forms `_cmd_form_allowed()` names.
     """
     commands = [list(c) for c in cmds]
     for cmd in commands:
-        if cmd[:1] == ["cmd"]:
+        if cmd[:1] in (["cmd"], ["powershell.exe"]):
             if not _cmd_form_allowed(cmd):
-                raise ValueError(f"an elevated batch runs cmd only in its exact forms, got {cmd}")
+                raise ValueError(
+                    f"an elevated batch runs cmd and powershell.exe only in their exact "
+                    f"forms, got {cmd}"
+                )
         elif cmd[:1] not in ([p] for p in ADMIN_BATCH_PROGRAMS):
             raise ValueError(f"an elevated batch runs only {ADMIN_BATCH_PROGRAMS}, got {cmd[:1]}")
     if not commands:
@@ -5370,9 +5390,19 @@ def _docker_service_active(do: RunCmd) -> bool:
     return proc.stdout.strip() == "active"
 
 
-def _ps_quote(value: object) -> str:
-    """`value` as a PowerShell single-quoted literal (inner quotes doubled)."""
+def powershell_literal(value: object) -> str:
+    """`value` as a PowerShell single-quoted literal: nothing inside it is parsed (T888).
+
+    A single-quoted PowerShell string holds every character as itself, `&`, `;` and `(`
+    included, and `''` spells one `'`. So a path can go into a command whole, where
+    `cmd.exe` would have reparsed it.
+    """
     return SINGLE_QUOTE + str(value).replace(SINGLE_QUOTE, SINGLE_QUOTE * 2) + SINGLE_QUOTE
+
+
+def _ps_quote(value: object) -> str:
+    """`powershell_literal()`, under the name the elevated script's builders use."""
+    return powershell_literal(value)
 
 
 # ------------------------------------------------------- finding Docker Desktop
