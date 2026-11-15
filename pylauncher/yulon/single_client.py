@@ -216,8 +216,9 @@ def grant_commands(folders: Sequence[Path], user_sid: str) -> list[list[str]]:
 
     A folder that is missing is made by .NET `CreateDirectory` in PowerShell, one literal
     argument and no `cmd.exe` in the way (T888): `cmd /c mkdir` rejoined its arguments into
-    a command line it parsed again, so `C:\\a&b` ran `b` as Administrator; refusing every path that holds
-    a `cmd` metacharacter refused `C:\\Program Files (x86)`, FFXI's default. Inside a
+    a command line it parsed again, so `C:\\a&b` ran `b` as Administrator; refusing every
+    path that holds a `cmd` metacharacter refused `C:\\Program Files (x86)`, FFXI's
+    default. Inside a
     single-quoted PowerShell literal nothing is parsed, `''` spells one `'`, so the path
     goes whole.
     """
