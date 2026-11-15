@@ -76,6 +76,11 @@ to run the suites is in [contribution.md](contribution.md); this file says what 
 | CI | Sharded `-m "not integration"` (6 shards per Python version), a separate live-Docker `integration` job, platform smoke on Windows and macOS, lint and types | Pull requests, and pushes to `main`, `Yulon`, `release/**` and `v*` tags. A topic branch gets CI only once it has a pull request. |
 | Live | A real server on a test machine, driven by the change | Before merging a change to runtime behavior; evidence in `.notes/gates/` |
 
+Targeted runs cannot see the guards that scan the whole package (seam counts, ready waits,
+the write ledger, tab names, types for Windows and macOS). Before a branch merges, run the files
+those guards live in, or let CI run on a pull request first: T887 phase 1 passed every
+targeted run and still turned eight CI jobs red on five such guards.
+
 `tests/test_controller_view.py` (about 1060 tests) is left out of the local inner loop: run its
 node ids for what you touched, and let CI run the whole file. Paths are relative to `pylauncher/`.
 
