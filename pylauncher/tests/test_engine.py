@@ -74,6 +74,36 @@ def test_resolve_ignores_other_switch_values(monkeypatch: pytest.MonkeyPatch) ->
         engine._reset_for_tests()
 
 
+def test_resolve_names_docker_for_a_foreign_docker_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A user-set `DOCKER_HOST` at real Docker wins over the Podman switch."""
+    _podman(monkeypatch, tmp_path)
+    try:
+        with caplog.at_level("INFO", logger="yulon.engine"):
+            monkeypatch.setenv("DOCKER_HOST", "tcp://custom:2375")
+            assert engine.resolve(sys_platform="linux", wsl=False) == "docker"
+        assert "DOCKER_HOST" in caplog.text and "tcp://custom:2375" in caplog.text
+    finally:
+        engine._reset_for_tests()
+
+
+def test_resolve_stays_podman_when_docker_host_is_the_socket(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Unset, empty, or the socket itself: the switch still selects Podman."""
+    for host in (None, "", f"unix://{tmp_path}/podman/podman.sock"):
+        _podman(monkeypatch, tmp_path)
+        try:
+            if host is None:
+                monkeypatch.delenv("DOCKER_HOST", raising=False)
+            else:
+                monkeypatch.setenv("DOCKER_HOST", host)
+            assert engine.resolve(sys_platform="linux", wsl=False) == "podman"
+        finally:
+            engine._reset_for_tests()
+
+
 # -- podman_socket() ---------------------------------------------------------
 
 
@@ -388,17 +418,20 @@ def test_install_record_engine_defaults_to_docker(tmp_path: Path) -> None:
     )
     state = native.read_state(tmp_path, valid=())
     assert state is not None
-    assert state.engine == ""
+    assert (state.engine or "docker") == "docker"
 
 
 def test_install_record_round_trips_the_engine(tmp_path: Path) -> None:
     """`write_state` persists the engine; `read_state` parses it back."""
+    import json
+
     native.write_state(
         tmp_path,
         native.InstallState(
             game_id="wow-wotlk", install_id="abc", family="azerothcore", engine="podman"
         ),
     )
+    assert json.loads((tmp_path / native.STATE_FILE).read_text(encoding="utf-8"))["engine"] == "podman"
     state = native.read_state(tmp_path, valid=())
     assert state is not None
     assert state.engine == "podman"
@@ -408,7 +441,11 @@ def test_install_record_round_trips_the_engine(tmp_path: Path) -> None:
             game_id="wow-wotlk", install_id="abc", family="azerothcore", engine="docker"
         ),
     )
-    assert native.read_state(tmp_path, valid=()).engine == "docker"  # type: ignore[union-attr]
+    written = json.loads((tmp_path / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert "engine" not in written
+    reread = native.read_state(tmp_path, valid=())
+    assert reread is not None
+    assert (reread.engine or "docker") == "docker"
 
 
 def _fresh_state(recorder: Recorder, server_dir: Path) -> native.InstallState:
@@ -450,3 +487,72 @@ def test_fresh_install_records_docker_without_the_switch(tmp_path: Path) -> None
     server_dir = tmp_path / "wow"
     server_dir.mkdir()
     assert _fresh_state(Recorder(), server_dir).engine == "docker"
+
+
+def test_a_docker_record_reopened_under_podman_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A docker/absent record met under Podman refuses before any command or write."""
+    from tests.support_native import ENTRY, Recorder
+    from yulon import resources
+    from yulon.catalog.families.azerothcore import AzerothCoreInstaller
+    from yulon.catalog.installer import InstallerError
+
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    installer = AzerothCoreInstaller(
+        ENTRY,
+        installers_root=resources.installers_dir(),
+        import_probe=Recorder().probe,
+        reset_unfinished=Recorder().reset,
+        seams=Recorder().seams(),
+    )
+    opened = installer._claim_folder(server_dir)
+    assert (opened.engine or "docker") == "docker"
+    native.write_state(server_dir, opened)
+    _podman(monkeypatch, tmp_path)
+    try:
+        with pytest.raises(InstallerError, match="set up with Docker.*now using Podman"):
+            installer._claim_folder(server_dir)
+    finally:
+        engine._reset_for_tests()
+
+
+def test_a_podman_record_reopened_without_the_switch_is_refused(tmp_path: Path) -> None:
+    """A podman record met without the switch refuses: switch back to Podman."""
+    from tests.support_native import ENTRY, Recorder
+    from yulon import resources
+    from yulon.catalog.families.azerothcore import AzerothCoreInstaller
+    from yulon.catalog.installer import InstallerError
+
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    installer = AzerothCoreInstaller(
+        ENTRY,
+        installers_root=resources.installers_dir(),
+        import_probe=Recorder().probe,
+        reset_unfinished=Recorder().reset,
+        seams=Recorder().seams(),
+    )
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id="wow-wotlk",
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family="azerothcore",
+            engine="podman",
+        ),
+    )
+    engine._reset_for_tests()
+    with pytest.raises(InstallerError, match="set up with Podman.*Switch back to Podman"):
+        installer._claim_folder(server_dir)
+
+
+def test_a_docker_record_without_the_switch_proceeds(tmp_path: Path) -> None:
+    """Without the switch a docker/absent record never refuses: no behaviour change."""
+    from tests.support_native import Recorder
+
+    engine._reset_for_tests()
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    assert (_fresh_state(Recorder(), server_dir).engine or "docker") == "docker"

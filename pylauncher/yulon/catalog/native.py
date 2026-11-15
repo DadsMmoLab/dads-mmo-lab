@@ -5453,6 +5453,27 @@ def read_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | None
     return read_claim(server_dir, valid=valid).state
 
 
+def refuse_engine_mismatch(state: InstallState | None) -> None:
+    """Refuse a record made under the other container engine, before anything runs (T887).
+
+    Compares the record's engine (absent reads as docker) with `engine.resolve()`.
+    Without the switch a docker/absent record never refuses: behaviour and files
+    written are exactly today's. The sentence lives in `forgetting` with the
+    other install refusals.
+    """
+    if state is None:
+        return
+    from yulon import engine as engine_seam
+
+    was = state.engine or "docker"
+    now = engine_seam.resolve()
+    if was == now:
+        return
+    raise InstallerError(
+        forgetting.engine_mismatch(was.capitalize(), now.capitalize())
+    )
+
+
 def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | None:
     """The state file's contents, or None if it will not open, parse, or say whose it is."""
     path = server_dir / STATE_FILE
@@ -5617,7 +5638,6 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         "version": state.version,
         "game_id": state.game_id,
         "family": state.family,
-        "engine": state.engine or "docker",
         "install_id": state.install_id,
         # Both halves. `completed` alone is what used to make a downgrade lossy:
         # the unknown names were read, dropped, and then written out of existence.
@@ -5627,6 +5647,10 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         "last_error": state.last_error,
         "updated_unix": int(time.time()),
     }
+    if state.engine == "podman":
+        # T887: the only engine ever written. Docker is the absent default, so a
+        # record written without the switch is byte for byte what it was before T887.
+        payload["engine"] = "podman"
     if state.source_revs:
         # Only when there is one, so the file an ordinary install writes is byte
         # for byte what it was before T64: an empty mapping in every state file
@@ -15608,6 +15632,7 @@ class StagedInstaller:
                 )
             )
         existing = claim.state
+        refuse_engine_mismatch(existing)
         if existing is not None and existing.install_id != install_id:
             raise InstallerError(
                 f"{server_dir} holds an install record made for a different folder, so this "

@@ -106,6 +106,18 @@ NETWORK_APPLY_WRITES_ALONE = (
 )
 
 
+def engine_mismatch(was: str, now: str) -> str:
+    """Why an install made under one container engine is refused under the other (T887).
+
+    `was` and `now` are `"Docker"` or `"Podman"`: the engine the record names
+    and the engine this process resolves. No commands, only the switch-back.
+    """
+    return (
+        f"This server was set up with {was}, and Yu'lon is now using {now}. Switch back "
+        f"to {was} to use it."
+    )
+
+
 # What a Backup, Restore or Apply refused by `docker.maintenance_lease()` is told: the running
 # job's own sentence, to which the refused one adds what it did not do (T216 review round 3).
 BACKUP_HOLDS_THE_DATABASES = (
