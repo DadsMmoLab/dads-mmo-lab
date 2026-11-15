@@ -122,7 +122,9 @@ def test_podman_socket_uses_xdg_runtime_dir(
 
 def test_podman_socket_falls_back_to_uid_run_user() -> None:
     """No `XDG_RUNTIME_DIR`: `/run/user/<uid>/podman/podman.sock`."""
-    assert engine.podman_socket(uid=1000) == Path("/run/user/1000/podman/podman.sock")
+    assert engine.podman_socket(runtime_dir="", uid=1000) == Path(
+        "/run/user/1000/podman/podman.sock"
+    )
 
 
 # -- apply_docker_host() -----------------------------------------------------

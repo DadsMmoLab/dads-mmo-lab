@@ -3454,55 +3454,16 @@ def _engine_guarded(
     """
     inner = controller
 
-    class _EngineGuarded(type(inner)):  # type: ignore[misc]
-        def _refuse(self) -> NoReturn:
-            raise EngineMismatch(sentence)
+    def _refuse(self: Controller, *args: object, **kwargs: object) -> NoReturn:
+        raise EngineMismatch(sentence)
 
-        def status(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def start(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def stop(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def stop_conflicting_and_start(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def restart(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def recreate(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def remove(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def repair_import(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def import_state(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def wait_db_healthy(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def wait_ready(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def host_ports(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def port_conflicts(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def refuse_start(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
-        def refuse_before_a_stop(self, *args: object, **kwargs: object) -> NoReturn:
-            self._refuse()
-
+    # Built from `ENGINE_GUARDED_METHODS`, so the overrides ARE the list the completeness
+    # test reads, and a refusal is never mistaken for a ready wait by `test_ready_budget`.
+    _EngineGuarded: type[Controller] = type(
+        "_EngineGuarded",
+        (type(inner),),
+        {name: _refuse for name in ENGINE_GUARDED_METHODS},
+    )
     guarded = _EngineGuarded.__new__(_EngineGuarded)
     Controller.__init__(
         guarded,
@@ -3611,7 +3572,7 @@ ENGINE_GUARD_EXEMPT: dict[str, str] = {
     "applier": "module installs are refused below this seam, in DockerSql and the hold",
     "backups_dir": "path arithmetic under the server dir; writes nothing",
     "interrupted_restore": "reads the interrupted-restore record; writes nothing",
-    "forget_interrupted": "Maintenance-box bookkeeping; the restore itself refuses",
+    "forget_interrupted": "interrupted-restore bookkeeping; the restore itself refuses",
     "db_refusal": "a sentence, not a seam",
     "realm_name_current": "the realm row's name, else the saved one; writes nothing",
     "shelf": "the backups folder listing; the lease it takes refuses",

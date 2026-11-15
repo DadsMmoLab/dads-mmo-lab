@@ -100,7 +100,12 @@ def podman_socket(uid: int | None = None, runtime_dir: str | None = None) -> Pat
     directory = runtime_dir if runtime_dir is not None else os.environ.get("XDG_RUNTIME_DIR")
     if directory:
         return Path(directory) / "podman" / "podman.sock"
-    who = uid if uid is not None else os.getuid()
+    if uid is not None:
+        who = uid
+    elif sys.platform != "win32":  # Podman is Linux-only; Windows has no uid
+        who = os.getuid()
+    else:
+        who = 0
     return Path(f"/run/user/{who}/podman/podman.sock")
 
 
