@@ -665,6 +665,17 @@ class StackInstaller:
         self, server_dir: Path, state: native.InstallState, cancel: threading.Event | None
     ) -> Iterator[str]:
         """Write the two compose files, refusing to overwrite one this app did not write."""
+        yield from self.write_compose(server_dir)
+        yield "The compose files are in place."
+
+    def write_compose(self, server_dir: Path) -> list[str]:
+        """Render both compose files and copy the stack's files; the lines that say what changed.
+
+        One function for the install stage and for the certificate remake (T888), because
+        a remake on an install made before Yu'lon's own certificate script existed has a
+        compose file with no `certificates` service and no `certs-yulon.sh` beside it: the
+        one-shot it needs would not be there to run.
+        """
         template_dir = self.installers_root / self.stack.templates
         tokens = self.tokens(server_dir)
         rendered: list[tuple[Path, str]] = []
@@ -681,13 +692,17 @@ class StackInstaller:
                     "try again."
                 )
             rendered.append((target, text))
+        written: list[str] = []
         for target, text in rendered:
             if target.is_file() and target.read_text(encoding="utf-8") == text:
                 continue
-            target.write_text(text, encoding="utf-8", newline="\n")
-            yield f"Wrote {target.name}"
-        yield from self._place_stack_files(template_dir / STACK_FILES, server_dir)
-        yield "The compose files are in place."
+            try:
+                target.write_text(text, encoding="utf-8", newline="\n")
+            except OSError as exc:
+                raise InstallerError(f"{target} could not be written: {exc}") from exc
+            written.append(f"Wrote {target.name}")
+        written.extend(self._place_stack_files(template_dir / STACK_FILES, server_dir))
+        return written
 
     def _place_stack_files(self, source: Path, server_dir: Path) -> Iterator[str]:
         """Copy the entry's own files (`stack/files/...`) to the same paths in the install folder.
@@ -870,19 +885,47 @@ class CertificatesError(RuntimeError):
     """The stack's certificate script did not finish; the message says why."""
 
 
-def make_certificates(server_dir: Path) -> None:
+def make_certificates(server_dir: Path, *, force: bool = False) -> None:
     """Make a stack's own certificates now, in its image (`compose run --rm certificates`).
 
     The install's `certificates` stage and Play's remake of an existing install (T888)
-    both come through here, so the two cannot run different things. Raises
+    both come through here, so the two cannot run different things. `force` hands the
+    script `--force`, which makes a new set even though a complete one is already there:
+    the script builds it in a staging folder inside the container, verifies it, and only
+    then swaps it in, so a failed run leaves the old files exactly as they were. Raises
     `CertificatesError` with the run's last words when the script fails.
     """
-    run = docker.compose_run_once(server_dir, CERTIFICATES_SERVICE, profiles=(SEED_PROFILE,))
+    run = docker.compose_run_once(
+        server_dir,
+        CERTIFICATES_SERVICE,
+        profiles=(SEED_PROFILE,),
+        command=("--force",) if force else (),
+    )
     if run.returncode != 0:
         raise CertificatesError(
             f"The server's certificate could not be made (exit {run.returncode}). "
             + docker.last_words(run.tail)
         )
+
+
+def remake_certificates(entry: SingleEntry, server_dir: Path) -> None:
+    """Render this install's compose files and files, then make its certificates again.
+
+    Play's remake (T888). The render comes first and for a reason: an install made before
+    Yu'lon's own certificate script existed has no `certificates` service in its compose
+    file and no `certs-yulon.sh` beside it, so `compose run --rm certificates` would name
+    a service the project does not have -- or run the image's broad CA again. The same
+    `write_compose()` the install stage uses puts both back. Raises `InstallerError` or
+    `CertificatesError` with the sentence a player reads.
+    """
+    installer = StackInstaller(entry)
+    installer.write_compose(server_dir)
+    make_certificates(server_dir, force=True)
+
+
+def project_of(entry: SingleEntry, server_dir: Path) -> str:
+    """This install's compose project name (`StackInstaller.project()`), for ownership checks."""
+    return StackInstaller(entry).project(server_dir)
 
 
 def listener_containers(entry: SingleEntry) -> Sequence[str]:

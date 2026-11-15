@@ -12,26 +12,36 @@
 # deletes that folder with the container. What lands in /srv/certs is only what the
 # servers read: ca.pem, server.pem, chain.pem, and server.key (0600).
 #
-# It runs once, before the first `up` of a fresh install (the `certificates` stage), and
-# Play runs it again for an install whose ca.pem is the old broad CA (T888). The image's
-# certs.sh sees the four files and skips; a second run here does too.
+# It runs once, before the first `up` of a fresh install (the `certificates` stage). With
+# `--force` it makes the set again for an install whose CA must be replaced (Play's
+# remake): the new set is built and verified in /srv/certs/.staging, INSIDE this
+# container and as root, and only then swapped into /srv/certs. Yu'lon never deletes a
+# file in certs/ from the host, where rootful Docker owns the folder; and a run that
+# fails at openssl leaves the old set exactly where it was.
 set -euo pipefail
 
 C=/srv/certs
 NAME=trinity.actual.battle.net
+FORCE=0
+[ "${1:-}" = "--force" ] && FORCE=1
 mkdir -p "$C"
-# Even when the certificates are already there: a key from the image's script is a key
-# that must not stay in the player's folder.
-rm -f "$C/ca.key"
 
-if [ -f "$C/chain.pem" ] && [ -f "$C/server.key" ] && [ -f "$C/server.pem" ] && [ -f "$C/ca.pem" ]; then
+if [ "$FORCE" = 0 ] \
+    && [ -f "$C/chain.pem" ] && [ -f "$C/server.key" ] && [ -f "$C/server.pem" ] \
+    && [ -f "$C/ca.pem" ]; then
+    # Even when the certificates are already there: a key from the image's script is a
+    # key that must not stay in the player's folder.
+    rm -f "$C/ca.key"
     echo "certificates ready"
     exit 0
 fi
 
 umask 077
 T=$(mktemp -d)
-trap 'rm -rf "$T"' EXIT
+S="$C/.staging"
+rm -rf "$S"
+mkdir -p "$S"
+trap 'rm -rf "$T" "$S"' EXIT
 
 cat > "$T/ca.cnf" <<'EOF'
 [req]
@@ -70,8 +80,14 @@ openssl x509 -req -in "$T/server.csr" -CA "$T/ca.pem" -CAkey "$T/ca.key" \
 cat "$T/server.pem" "$T/ca.pem" > "$T/chain.pem"
 openssl verify -CAfile "$T/ca.pem" "$T/server.pem"
 
-cp "$T/ca.pem" "$T/server.pem" "$T/chain.pem" "$C/"
-cp "$T/server.key" "$C/server.key"
-chmod 644 "$C/ca.pem" "$C/server.pem" "$C/chain.pem"
-chmod 600 "$C/server.key"
+# The whole set, verified, staged in the folder it will live in (same filesystem, so
+# each move is a rename). Only now does anything in /srv/certs change.
+cp "$T/ca.pem" "$T/server.pem" "$T/chain.pem" "$T/server.key" "$S/"
+chmod 644 "$S/ca.pem" "$S/server.pem" "$S/chain.pem"
+chmod 600 "$S/server.key"
+mv -f "$S/ca.pem" "$S/server.pem" "$S/chain.pem" "$S/server.key" "$C/"
+# What no set writes any more: the image's CA key, and any file the old script left that
+# this one does not (the CSR, the serial, the staging folder itself).
+rm -f "$C/ca.key" "$C/server.csr" "$C/ca.srl" "$C/.staging/ca.key"
+rm -rf "$S"
 echo "certificates ready for $NAME"
