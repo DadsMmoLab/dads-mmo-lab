@@ -482,6 +482,116 @@ def test_what_is_missing_goes_behind_one_prompt_and_no_says_so(tmp_path: Path) -
         forever_trust.ensure(_ca(tmp_path), "trinity.actual.battle.net", seams=seams)
 
 
+def test_the_hosts_append_quotes_the_file_and_the_removal_survives_an_empty_one() -> None:
+    """T888 item 2: a `SystemRoot` with a space stayed one file name, and an otherwise-empty
+    hosts file still got rewritten (`findstr /v` exits 1 when it keeps no line)."""
+    hosts = Path(r"C:\Program Files\Windows\hosts")
+    append = forever_trust._append_hosts(hosts, "trinity.actual.battle.net")
+    assert append[:2] == ["cmd", "/c"]
+    assert append[2] == (
+        "(echo.& echo 127.0.0.1 trinity.actual.battle.net # yulon-wow-forever)>>"
+        '"C:\\Program Files\\Windows\\hosts"'
+    )
+    strip = forever_trust._strip_hosts(hosts)
+    assert strip[:2] == ["cmd", "/c"]
+    assert strip[2] == (
+        '(findstr /v /c:"# yulon-wow-forever" "C:\\Program Files\\Windows\\hosts" > '
+        '"C:\\Program Files\\Windows\\hosts.yulon" || type nul > '
+        '"C:\\Program Files\\Windows\\hosts.yulon") && move /y '
+        '"C:\\Program Files\\Windows\\hosts.yulon" '
+        '"C:\\Program Files\\Windows\\hosts"'
+    )
+
+
+def test_removal_builds_the_ca_command_from_the_recorded_thumbprint(tmp_path: Path) -> None:
+    """T888 item 2: after the install folder is gone the record's thumbprint is what is left."""
+    commands = forever_trust.remove_commands(thumb="AB12CD")
+    assert commands[0] == ["certutil", "-delstore", "Root", "AB12CD"]
+    assert commands[1][:2] == ["cmd", "/c"] and "# yulon-wow-forever" in commands[1][2]
+    ca = _ca(tmp_path)
+    assert forever_trust.remove_commands(ca)[0] == [
+        "certutil",
+        "-delstore",
+        "Root",
+        forever_trust.thumbprint(ca),
+    ]
+    assert forever_trust.remove_commands() == [commands[1]], "no CA known, so only hosts"
+
+
+def test_windows_removal_is_one_elevated_batch_with_the_recorded_thumbprint(
+    tmp_path: Path,
+) -> None:
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 localhost\n")
+    batched: list[list[list[str]]] = []
+    results = tmp_path / "results.json"
+
+    def batch(commands: list[list[str]]) -> tuple[list[str], Path]:
+        batched.append(commands)
+        results.write_text('[{"rc": 0, "out": ""}, {"rc": 0, "out": ""}, {"rc": 0, "out": ""}]')
+        return (["powershell.exe", "elevated"], results)
+
+    seams = forever_trust.TrustSeams(
+        run=lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, "", ""),
+        batch=batch,
+        hosts=lambda: hosts,
+        os_name=lambda: "windows",
+    )
+    assert forever_trust.remove(thumb="AB12CD", seams=seams) == ()
+    assert [c[0] for c in batched[0]] == ["certutil", "cmd", "cmd"]
+    assert batched[0][0] == ["certutil", "-delstore", "Root", "AB12CD"]
+    assert batched[0][1][2].startswith('(findstr /v /c:"# yulon-wow-forever"')
+    assert batched[0][2] == ["cmd", "/c", "ipconfig", "/flushdns"]
+    assert not results.exists(), "the results file is removed once read"
+
+
+def test_steamos_removal_takes_the_hosts_line_with_sudo_n_or_says_the_command(
+    tmp_path: Path,
+) -> None:
+    """T888 item 2: SteamOS has no machine store this app touched, so only the line goes."""
+    hosts = tmp_path / "hosts"
+    hosts.write_text(
+        "127.0.0.1 localhost\n127.0.0.1 trinity.actual.battle.net # yulon-wow-forever\n"
+    )
+    ran: list[list[str]] = []
+
+    def run(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        ran.append(argv)
+        hosts.write_text("127.0.0.1 localhost\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    seams = forever_trust.TrustSeams(
+        run=run, hosts=lambda: hosts, os_name=lambda: "linux", which=lambda _n: "/usr/bin/sudo"
+    )
+    assert forever_trust.remove(seams=seams) == () and ran[0][:2] == ["sudo", "-n"]
+    assert ran[0][-1] == str(hosts)
+    hosts.write_text("127.0.0.1 trinity.actual.battle.net # yulon-wow-forever\n")
+    no_sudo = forever_trust.TrustSeams(
+        run=run, hosts=lambda: hosts, os_name=lambda: "linux", which=lambda _n: None
+    )
+    left = forever_trust.remove(seams=no_sudo)
+    assert len(left) == 1 and "sudo -n sed" in left[0] and str(hosts) in left[0]
+    assert forever_trust.remove(seams=no_sudo) != (), "the line is still there"
+    hosts.write_text("127.0.0.1 localhost\n")
+    assert forever_trust.remove(seams=no_sudo) == (), "nothing tagged, nothing to run"
+
+
+def test_every_hosts_command_passes_the_elevated_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T888 item 4's exact forms are the ones item 2's removal builds: crossed, not assumed."""
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    hosts = Path(r"C:\Windows\System32\drivers\etc\hosts")
+    commands = [
+        forever_trust._append_hosts(hosts, "trinity.actual.battle.net"),
+        *forever_trust.remove_commands(thumb="AB12CD", hosts=hosts),
+        ["cmd", "/c", "ipconfig", "/flushdns"],
+    ]
+    argv, results = platform.elevated_admin_batch(commands, is_admin=False)
+    results.unlink(missing_ok=True)
+    assert argv[:2] == ["powershell.exe", "-NoProfile"]
+
+
 def test_only_certutil_and_icacls_run_elevated_and_cmd_only_in_its_own_forms() -> None:
     """T888 item 4: `cmd` left the list, so a bare `cmd /c ...` cannot reach the prompt."""
     assert platform.ADMIN_BATCH_PROGRAMS == ("icacls", "certutil")
@@ -607,8 +717,10 @@ def test_the_config_sets_the_portal_and_account_and_keeps_the_players_lines(
 
 
 def _play_seams(calls: list[str], *, world: str = "running") -> forever_play.PlaySeams:
-    def trust(ca: Path, portal: str) -> bool:
+    def trust(ca: Path, portal: str, *, record: Callable[[str], None] | None = None) -> bool:
         calls.append(f"trust {ca.name} {portal}")
+        if record is not None:
+            record("AB12CD34")
         return True
 
     def account(entry: SingleEntry, server_dir: Path) -> tuple[str, str]:
@@ -645,6 +757,46 @@ def test_play_trusts_makes_the_account_writes_the_config_starts_and_watches(
     assert played == forever_play.Played("mmodad", "pw", True)  # the name typed at login
     assert (client / "_forever_" / "WTF" / "ForeverLauncher.wtf").is_file()
     assert "press Login again" in forever_play.login_text(FOREVER, played)
+
+
+def test_windows_play_records_the_thumbprint_of_the_ca_it_trusted(tmp_path: Path) -> None:
+    """T888 item 2: the install record keeps it, so removal works once certs/ is gone."""
+    calls: list[str] = []
+    recorded: list[str] = []
+    seams = forever_play.PlaySeams(
+        **{
+            **_play_seams(calls).__dict__,
+            "remember_trust": recorded.append,
+        }
+    )
+    forever_play.play(
+        FOREVER, tmp_path / "server", _client(tmp_path), os_name="windows", seams=seams
+    )
+    assert recorded == ["AB12CD34"]
+    assert calls[0] == "trust ca.pem trinity.actual.battle.net"
+
+
+def test_removing_a_forever_server_takes_its_trust_with_it(tmp_path: Path) -> None:
+    """T888 item 2: the removal path asks forever_trust with the record's thumbprint."""
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 trinity.actual.battle.net # yulon-wow-forever\n")
+    batched: list[list[list[str]]] = []
+
+    def batch(commands: list[list[str]]) -> tuple[list[str], Path]:
+        batched.append(commands)
+        return None  # type: ignore[return-value]  # run as they are, like an administrator
+
+    seams = forever_trust.TrustSeams(
+        run=lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, "", ""),
+        batch=batch,
+        hosts=lambda: hosts,
+        os_name=lambda: "windows",
+    )
+    assert (
+        forever_play.remove_trust(FOREVER, tmp_path / "server", thumbprint="AB12CD34", seams=seams)
+        == ()
+    )
+    assert batched[0][0] == ["certutil", "-delstore", "Root", "AB12CD34"]
 
 
 def test_play_refuses_a_stopped_server_another_os_and_another_client(tmp_path: Path) -> None:
