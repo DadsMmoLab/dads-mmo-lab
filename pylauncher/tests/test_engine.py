@@ -10,8 +10,12 @@ import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from yulon.catalog.catalog import CatalogEntry
 
 from tests.support_native import Recorder
 from yulon import docker, engine, platform
@@ -240,7 +244,7 @@ def test_container_user_args_linux_answer_unchanged_without_the_switch(
 # -- composegen.container_user() ----------------------------------------------
 
 
-def _wotlk_entry():  # type: ignore[no-untyped-def]
+def _wotlk_entry() -> CatalogEntry:
     from yulon.catalog.catalog import load_catalog
 
     return load_catalog().get("wow-wotlk")
@@ -270,7 +274,11 @@ def test_composegen_render_puts_root_on_the_env_dist_writers_under_podman(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The full render carries the key on exactly the three bound-etc writers."""
-    from tests.test_composegen import TEMPLATES, WRITES_TO_BOUND_ETC
+    from tests.test_composegen import (
+        TEMPLATES,
+        WRITES_TO_BOUND_ETC,
+        _services_with_user_key,
+    )
 
     _podman(monkeypatch, tmp_path)
     try:
@@ -280,9 +288,7 @@ def test_composegen_render_puts_root_on_the_env_dist_writers_under_podman(
             templates_root=TEMPLATES,
             platform_id=lambda: "linux",
         )
-        assert 'user: "0:0"' in plan.base
-        for service in WRITES_TO_BOUND_ETC:
-            assert f"{service}:" in plan.base
+        assert _services_with_user_key(plan.base) == WRITES_TO_BOUND_ETC
     finally:
         engine._reset_for_tests()
 
@@ -391,7 +397,7 @@ def test_port_refusal_still_reads_docker_wording() -> None:
 def test_daemon_identity_is_empty_under_podman(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Podman has no daemon: `""` ("cannot tell"), and no subprocess runs."""
+    from yulon import runner
 
     def never(
         cmd: list[str], cwd: object = None, timeout: object = None
@@ -400,7 +406,7 @@ def test_daemon_identity_is_empty_under_podman(
 
     _podman(monkeypatch, tmp_path)
     try:
-        monkeypatch.setattr(docker.runner, "run", never)
+        monkeypatch.setattr(runner, "run", never)
         assert docker.daemon_identity() == ""
     finally:
         engine._reset_for_tests()
@@ -431,7 +437,8 @@ def test_install_record_round_trips_the_engine(tmp_path: Path) -> None:
             game_id="wow-wotlk", install_id="abc", family="azerothcore", engine="podman"
         ),
     )
-    assert json.loads((tmp_path / native.STATE_FILE).read_text(encoding="utf-8"))["engine"] == "podman"
+    written = (tmp_path / native.STATE_FILE).read_text(encoding="utf-8")
+    assert json.loads(written)["engine"] == "podman"
     state = native.read_state(tmp_path, valid=())
     assert state is not None
     assert state.engine == "podman"
