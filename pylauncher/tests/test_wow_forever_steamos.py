@@ -488,6 +488,194 @@ def _linux_seams(calls: list[str], *, hosts: bool = True) -> forever_play.PlaySe
     )
 
 
+class _Crypt32:
+    """A fake crypt32: the prefix's Root store is a list of DER, and a context a handle."""
+
+    def __init__(self, store: list[bytes], names: dict[bytes, str]) -> None:
+        self.store = list(store)
+        self.names = names
+        self.deleted: list[bytes] = []
+        self.added: list[bytes] = []
+        self.CertOpenStore = _Call(lambda *a: 1)
+        self.CertCloseStore = _Call(lambda *a: 1)
+        self.CertAddEncodedCertificateToStore = _Call(self._add)
+        self.CertCreateCertificateContext = _Call(self._context)
+        self.CertGetNameStringW = _Call(self._name)
+        self.CertDeleteCertificateFromStore = _Call(self._delete)
+        self.CertFreeCertificateContext = _Call(lambda ctx: 1)
+
+    def _context(self, _encoding: int, der: object, _size: int) -> dict[str, bytes]:
+        return {"der": bytes(der)}  # type: ignore[arg-type]
+
+    def _name(
+        self, ctx: dict[str, bytes], _flag: int, _flags: int, _para: object, buf: object, size: int
+    ) -> int:
+        name = self.names.get(ctx["der"], "")
+        if buf is not None and size > 1:
+            buf.value = name  # type: ignore[attr-defined]
+        return len(name) + 1
+
+    def _delete(self, ctx: dict[str, bytes]) -> int:
+        der = ctx["der"]
+        if der in self.store:
+            self.store.remove(der)
+            self.deleted.append(der)
+        return 1
+
+    def _add(
+        self, _store: object, _encoding: int, der: object, _size: int, _how: int, _out: object
+    ) -> int:
+        self.added.append(bytes(der))  # type: ignore[arg-type]
+        self.store.append(bytes(der))  # type: ignore[arg-type]
+        return 1
+
+
+class _Call:
+    """One fake crypt32 function: settable restype/argtypes, callable."""
+
+    restype: object = None
+    argtypes: object = None
+
+    def __init__(self, body: Any) -> None:
+        self.body = body
+
+    def __call__(self, *args: Any) -> Any:
+        return self.body(*args)
+
+
+def _import_ca_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: list[bytes],
+    names: dict[bytes, str],
+    stale: Sequence[str] = (),
+) -> tuple[list[str], _Crypt32, list[bytes]]:
+    """Run the generated import script against a fake crypt32; its argv, the fake, the new DER."""
+    import base64
+    import ctypes
+    import re
+    import ssl
+    import sys
+
+    pem = tmp_path / "ca.pem"
+    text = NARROW_CA.read_text(encoding="ascii")
+    pem.write_text(text, encoding="ascii")
+    found = re.search(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", text, re.S)
+    assert found is not None
+    new = base64.b64decode("".join(found.group(1).split()))
+    fake = _Crypt32(store, names)
+    report = tmp_path / "report.txt"
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: fake, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 0, raising=False)
+    monkeypatch.setattr(
+        ssl,
+        "enum_certificates",
+        lambda _s: [(der, "x509_asn", None) for der in fake.store],
+        raising=False,
+    )
+    argv = sys.argv
+    sys.argv = ["-I", str(pem), str(report), *stale]
+    try:
+        with pytest.raises(SystemExit) as ended:
+            exec(compile(forever_proton.IMPORT_CA, "import_ca.py", "exec"), {"__name__": "ca"})
+    finally:
+        sys.argv = argv
+    assert ended.value.code == 0
+    return report.read_text(encoding="utf-8").splitlines(), fake, [new]
+
+
+def test_the_prefix_import_deletes_every_superseded_ca_of_ours_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T888 item 8 (Gemini #5, Codex #9): Proton only ever added, so the old root stayed.
+
+    The generated script is run against a fake crypt32 holding three certificates: an old
+    CA of ours (by subject name), a CA named by a stale thumbprint, and an unrelated root.
+    The two of ours are deleted, the unrelated one is not, and the verified new CA is added
+    -- never deleted even though its subject carries the same name.
+    """
+    old_ours, stale_one, other = b"old-ours", b"stale-one", b"other-root"
+    import hashlib
+
+    stale_thumb = hashlib.sha1(stale_one).hexdigest().upper()  # noqa: S324
+    lines, fake, added = _import_ca_run(
+        tmp_path,
+        monkeypatch,
+        [old_ours, stale_one, other],
+        {old_ours: "Yulon WoW Forever Local CA", stale_one: "Something Else", other: "Other"},
+        stale=(stale_thumb,),
+    )
+    assert fake.deleted == [old_ours, stale_one]
+    assert fake.added == added
+    assert other in fake.store and old_ours not in fake.store
+    assert "removed 2 superseded certificate(s)" in lines
+    assert "CA in LocalMachine\\Root: yes" in lines
+
+
+def _linux_path(winpath: str) -> Path:
+    """The Linux path behind one of `winpath()`'s Z: paths."""
+    return Path(winpath[2:].replace("\\", "/"))
+
+
+def test_trust_ca_records_the_thumbprint_the_prefix_imported(tmp_path: Path) -> None:
+    """T888 item 8: the tile re-imports only when this record and the CA disagree.
+
+    The argv carries the thumbprints of every CA this install replaced, so the generated
+    script can delete them from the prefix's own Root store; after the report says the CA
+    is in place, the prefix records the thumbprint it imported.
+    """
+    server = _server(tmp_path)
+    prefix = server / "wowforever-offline-pfx-1"
+    python_dir = prefix / "pfx" / "drive_c" / "python313"
+    python_dir.mkdir(parents=True, exist_ok=True)
+    (python_dir / "python.exe").write_bytes(b"MZ")
+    runtime = forever_proton.Runtime(
+        slr=Path("/slr"), proton=Path("/proton"), prefix=prefix, compat={}, env={}
+    )
+    seen: list[list[str]] = []
+
+    def run(argv: list[str], **_kw: object) -> object:
+        seen.append(argv)
+        report = _linux_path(argv[-2]) if argv[-2].startswith("Z:") else _linux_path(argv[-1])
+        report.write_text(forever_proton.REPORT_TRUSTED + "\n", encoding="utf-8")
+        return object()
+
+    forever_proton.trust_ca(
+        runtime,
+        NARROW_CA,
+        server,
+        lambda _line: None,
+        ProtonSeams(run=run),  # type: ignore[arg-type]
+        stale=("ABC123",),
+    )
+    assert "ABC123" in seen[0], "the stale thumbprint reaches the script that deletes it"
+    assert (prefix / forever_proton.CA_THUMBPRINT_FILE).read_text().strip() == (
+        forever_trust.thumbprint(NARROW_CA)
+    )
+
+
+def test_linux_play_hands_the_prefix_the_replaced_cas(tmp_path: Path) -> None:
+    """T888 item 8: a remade CA is in the record's stale list, and Proton's import gets it."""
+    seen: list[Sequence[str]] = []
+    calls: list[str] = []
+
+    def prepare(
+        server: Path, client: Path, ca: Path, say: Any, *, stale: Sequence[str] = (), **_: Any
+    ) -> object:
+        seen.append(tuple(stale))
+        return "runtime"
+
+    seams = forever_play.PlaySeams(
+        **{
+            **_linux_seams(calls).__dict__,
+            "prepare_proton": prepare,  # type: ignore[arg-type]
+            "trust_record": forever_play.TrustRecord(stale=lambda: ("OLDT",)),
+        }
+    )
+    forever_play.play(FOREVER, _server(tmp_path), _client(tmp_path), os_name="linux", seams=seams)
+    assert seen == [("OLDT",)]
+
+
 def test_linux_play_checks_hosts_makes_the_account_and_starts_under_proton(tmp_path: Path) -> None:
     calls: list[str] = []
     client = _client(tmp_path)
