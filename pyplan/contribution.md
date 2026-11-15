@@ -121,6 +121,8 @@ black --check .     # formatting
 
 Run `black .` (without `--check`) to auto-format.
 
+What a test must be, and what a fix report carries: [testing.md](testing.md).
+
 ### Integration tests
 
 `tests/integration/` drives a real Docker daemon and is skipped automatically when none is
