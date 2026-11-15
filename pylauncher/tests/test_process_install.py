@@ -252,7 +252,9 @@ def test_a_fresh_install_runs_every_stage_in_order_and_records_them(
     assert [line[4:] for line in said if line.startswith("--- ")] == list(STAGE_NAMES)
     state = native.read_state(server, valid=STAGE_NAMES)
     assert state is not None and state.completed == STAGE_NAMES and state.family == "go"
-    assert (state.engine or "docker") == "docker", "item 4: without the switch the record reads docker"
+    assert (
+        state.engine or "docker"
+    ) == "docker", "item 4: without the switch the record reads docker"
     checkout = server / "src"
     assert (checkout / TARGET).read_text() == 'package catalog\n\nconst sha = "new"\n'
     assert json.loads((checkout / UNPACKED).read_text())["sha256"] == _sha(SOURCE_ZIP)
