@@ -22,7 +22,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -204,8 +204,13 @@ class WindowsMemory:
         return sorted(set(found))
 
 
-def pids_of(exe: Path) -> list[int]:
-    """Process ids whose image is exactly `exe` (Windows); [] elsewhere or if none."""
+def _image_pids(match: Callable[[str], bool]) -> list[int]:
+    """Process ids whose image path `match` accepts (Windows); [] elsewhere or if none.
+
+    One enumeration for both questions this module asks: "is THE game at this exact path
+    running" (`pids_of`) and "is any program under this client folder running"
+    (`pids_under`, which is what Play refuses on).
+    """
     if sys.platform != "win32":
         return []
     psapi = ctypes.WinDLL("psapi")  # type: ignore[attr-defined,unused-ignore]
@@ -215,7 +220,6 @@ def pids_of(exe: Path) -> list[int]:
     needed = ctypes.c_ulong()
     if not psapi.EnumProcesses(ids, ctypes.sizeof(ids), ctypes.byref(needed)):
         return []
-    want = os.path.normcase(str(exe.resolve()))
     found: list[int] = []
     buffer = ctypes.create_unicode_buffer(32768)
     for pid in ids[: needed.value // ctypes.sizeof(ctypes.c_ulong)]:
@@ -226,16 +230,36 @@ def pids_of(exe: Path) -> list[int]:
             continue
         try:
             size = ctypes.c_ulong(len(buffer))
-            if (
-                kernel32.QueryFullProcessImageNameW(
-                    ctypes.c_void_p(handle), 0, buffer, ctypes.byref(size)
-                )
-                and os.path.normcase(buffer.value) == want
-            ):
+            if kernel32.QueryFullProcessImageNameW(
+                ctypes.c_void_p(handle), 0, buffer, ctypes.byref(size)
+            ) and match(os.path.normcase(buffer.value)):
                 found.append(int(pid))
         finally:
             kernel32.CloseHandle(ctypes.c_void_p(handle))
     return found
+
+
+def pids_of(exe: Path) -> list[int]:
+    """Process ids whose image is exactly `exe` (Windows); [] elsewhere or if none."""
+    if sys.platform != "win32":
+        return []
+    want = os.path.normcase(str(exe.resolve()))
+    return _image_pids(lambda image: image == want)
+
+
+def pids_under(folder: Path) -> list[int]:
+    """Process ids whose image is inside `folder` (Windows); [] elsewhere or if none.
+
+    Play's "this client is already running" question. `client_dir` holds the game at
+    `_forever_/Wow.exe` and everything else the player put there, and a second copy of that
+    game under it is what two Play presses would make.
+    """
+    if sys.platform != "win32":
+        return []
+    root = os.path.normcase(os.path.abspath(str(folder)))
+    if not root.endswith(os.sep):
+        root += os.sep
+    return _image_pids(lambda image: image.startswith(root))
 
 
 @dataclass(frozen=True)
@@ -253,6 +277,7 @@ def watch(
     key: bytes,
     group: int,
     *,
+    before: Collection[int] = (),
     stop: threading.Event | None = None,
     say: Callable[[str], None] = logger.info,
     seams: KeySeams | None = None,
@@ -263,6 +288,11 @@ def watch(
     checks it every few seconds, writing it again if the client rebuilt its table.
     True once the key was applied at least once; False if the game never started or exited
     before it could be. It never gives up while the game runs (`NO_GIVE_UP`).
+
+    `before` is the set of process ids that matched `exe` BEFORE Play launched the game
+    (T888): an older copy of the game that is still running is not this launch, and writing
+    this server's key into it is the wrong game's memory. Only a pid that was not in
+    `before` is attached to.
     """
     if len(key) != 32 or not 1 <= group <= ENTRIES:
         raise ValueError("a login key is 32 bytes, for a region group of 1 to 12")
@@ -271,7 +301,7 @@ def watch(
     deadline = s.clock() + START_WAIT_SECONDS
     pids: Sequence[int] = ()
     while not halt.is_set():
-        pids = s.pids(exe)
+        pids = [pid for pid in s.pids(exe) if pid not in before]
         if pids or s.clock() >= deadline:
             break
         s.sleep(1.0)
@@ -320,21 +350,56 @@ def _write(memory: Memory, table: int, group: int, key: bytes) -> bool:
     return len(block) == BLOCK_SIZE and looks_like_table(block) and record_key(block, group) == key
 
 
+_WATCHES: dict[str, threading.Thread] = {}
+"""The login-key watch running for each game path this launch started (T888).
+
+One game, one watch: a second press of Play while the first watch still runs must not put
+two threads in the same process's memory, both rewriting the same table. The dict holds
+the thread under `os.path.normcase(str(exe))`; a finished thread is replaced.
+"""
+
+_WATCHES_LOCK = threading.Lock()
+
+
 def start_watch(
-    exe: Path, key: bytes, group: int, *, say: Callable[[str], None] = logger.info
+    exe: Path,
+    key: bytes,
+    group: int,
+    *,
+    before: Collection[int] = (),
+    say: Callable[[str], None] = logger.info,
 ) -> threading.Thread:
-    """`watch()` on a daemon thread, so Play returns while the key is kept in the game."""
-    thread = threading.Thread(
-        target=lambda: _logged_watch(exe, key, group, say),
-        name="forever-login-key",
-        daemon=True,
-    )
-    thread.start()
-    return thread
+    """`watch()` on a daemon thread, so Play returns while the key is kept in the game.
+
+    Never a second watch for the same game while one runs: the thread already watching is
+    returned instead.
+    """
+    key_path = os.path.normcase(str(exe))
+    with _WATCHES_LOCK:
+        live = _WATCHES.get(key_path)
+        if live is not None and live.is_alive():
+            logger.info(
+                f"the login key watch for {exe.name} is already running; not starting another"
+            )
+            return live
+        thread = threading.Thread(
+            target=lambda: _logged_watch(exe, key, group, before, say),
+            name="forever-login-key",
+            daemon=True,
+        )
+        _WATCHES[key_path] = thread
+        thread.start()
+        return thread
 
 
-def _logged_watch(exe: Path, key: bytes, group: int, say: Callable[[str], None]) -> None:
+def _logged_watch(
+    exe: Path,
+    key: bytes,
+    group: int,
+    before: Collection[int],
+    say: Callable[[str], None],
+) -> None:
     try:
-        watch(exe, key, group, say=say)
+        watch(exe, key, group, before=before, say=say)
     except OSError as exc:
         say(f"The login key could not be written into the game: {exc}")

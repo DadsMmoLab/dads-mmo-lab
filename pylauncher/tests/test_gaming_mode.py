@@ -13,8 +13,10 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -491,6 +493,32 @@ def test_the_client_scripts_key_watch_compiles_and_matches_the_catalog_and_forev
     assert f"GROUP = KEYS[{login.region_group} - 1]" in body
     keys = [k.hex() for k in forever_keywatch.KNOWN_REGION_KEYS]
     assert re.findall(r'"([0-9a-f]{64})"', body) == keys  # the server key is upper case
+
+
+def test_the_tile_watch_takes_this_client_folder_and_skips_a_game_that_was_already_running() -> (
+    None
+):
+    """T888 item 5: the Gaming Mode tile runs without Yu'lon, so its key watch is a copy --
+    and it must pick the pid this launch made, in this client's folder, as Play's does."""
+    text = (resources.installers_dir() / "wow-forever/gaming-mode/wowforever-client.sh").read_text(
+        encoding="utf-8"
+    )
+    body = text.split("<<'PY' &\n", 1)[1].split("\nPY\n", 1)[0]
+    head = body.split("\nmain()", 1)[0]
+    client = Path("/home/deck/Games/WoWForever-70888/World of Warcraft")
+    scope: dict[str, Any] = {}
+    argv = sys.argv
+    sys.argv = ["-", "8085", "1", str(client)]
+    try:
+        exec(compile(head, "keywatch", "exec"), scope)
+    finally:
+        sys.argv = argv
+    under = scope["under_client"]
+    assert under(b"Z:\\home\\deck\\Games\\WoWForever-70888\\World of Warcraft\\_forever_\\Wow.exe")
+    assert not under(b"Z:\\home\\deck\\Games\\Other\\_forever_\\Wow.exe")
+    scope["game_pids"] = lambda: [111, 222]
+    scope["BEFORE"] = {111}
+    assert scope["find_game"]() == 222, "the pid that was there before the launch is skipped"
 
 
 def test_wow_forever_before_its_first_play_says_press_play_and_writes_nothing(
