@@ -5469,7 +5469,7 @@ def refuse_engine_mismatch(state: InstallState | None) -> None:
     now = engine_seam.resolve()
     if was == now:
         return
-    raise InstallerError(forgetting.engine_mismatch(was.capitalize(), now.capitalize()))
+    raise InstallerError(forgetting.engine_mismatch_refusal(was.capitalize(), now.capitalize()))
 
 
 def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | None:

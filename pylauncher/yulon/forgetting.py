@@ -106,7 +106,7 @@ NETWORK_APPLY_WRITES_ALONE = (
 )
 
 
-def engine_mismatch(was: str, now: str) -> str:
+def engine_mismatch_refusal(was: str, now: str) -> str:
     """Why an install made under one container engine is refused under the other (T887).
 
     `was` and `now` are `"Docker"` or `"Podman"`: the engine the record names
