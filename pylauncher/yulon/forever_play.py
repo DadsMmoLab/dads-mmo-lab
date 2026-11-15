@@ -386,8 +386,9 @@ def remove_trust(
     install replaced and has not seen leave the store; `strip_hosts` is False while
     another WoW Forever install on this computer still needs the one tagged hosts line
     (T888), and then nothing prompts unless there is a certificate to delete. Nothing here
-    raises: the caller is dropping a record, and a refused prompt must not keep a server
-    the player asked to remove.
+    raises: the caller is dropping a record, and a refused prompt, a `certs/ca.pem` that
+    was already deleted or cannot be read (`TrustError`), or a command that cannot run
+    must not keep a server the player asked to remove.
     """
     login = login_of(entry)
     try:
@@ -398,7 +399,7 @@ def remove_trust(
             strip_hosts=strip_hosts,
             seams=seams,
         )
-    except OSError as exc:
+    except (OSError, forever_trust.TrustError) as exc:
         logger.warning(f"could not take {entry.name}'s trust off this computer: {exc}")
         return ()
 
