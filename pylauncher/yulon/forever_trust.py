@@ -16,14 +16,14 @@ Both need an administrator, so they go behind ONE UAC prompt
 (`platform.elevated_admin_batch()`), and only what is missing is done. Reading is
 unelevated and has no side effects.
 
-`remove()` is the other half, and it runs when the server is removed from Yu'lon or
-uninstalled: the CA out of `LocalMachine\\Root` by the thumbprint the install record keeps
-(T888), and the one tagged hosts line out, then a resolver flush. A CA left in the machine
-store is a CA this computer trusts forever, and the install folder it came from is gone
-with its key. On Linux (the Steam Deck) there is no machine store to touch — the CA is
-trusted inside the game's own Wine prefix, which is deleted with the server — so only the
-hosts line goes, through `sudo -n`; when that cannot run, the one command comes back for
-the player to run (Details).
+`remove()` is the other half, and it runs when the server is removed from Yu'lon
+("Remove from Yu'lon…", the tab's ×): the CA out of `LocalMachine\\Root` by the thumbprint
+the install record keeps, and the one tagged hosts line out, then a resolver flush. A CA
+left in the machine store is a CA this computer trusts forever, and the install folder it
+came from is gone with its key. On Linux (the Steam Deck) there is no machine store to
+touch — the CA is trusted inside the game's own Wine prefix, which is deleted with the
+server — so only the hosts line goes, through `sudo -n`; when that cannot run, the one
+command comes back for the player to run (Details).
 """
 
 from __future__ import annotations
