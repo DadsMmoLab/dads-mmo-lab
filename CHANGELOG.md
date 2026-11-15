@@ -28,6 +28,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - WoW Forever: **Play** makes its certificate again when it has to, and a failed attempt keeps the old one.
 - Removing a WoW Forever server no longer asks for an administrator when it has nothing to take off.
 - WoW Forever on a Steam Deck takes a remade certificate into the game's prefix, and drops the old one.
+- A server's saved passwords stay readable only by you, even after a restore from a backup.
 - WoW Forever: Holy Strike, Blessing of Light, Salvation, Mutilate and Revoke play their animations again.
 
 ### Changed
