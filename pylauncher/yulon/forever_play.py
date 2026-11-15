@@ -91,9 +91,11 @@ class PlaySeams:
     start_client: Callable[[play_launch.LaunchSpec], bool] = single_play.start
     watch: Callable[..., object] = forever_key.start_watch
     game_pids: Callable[[Path], Sequence[int]] = forever_key.pids_under
-    find_game: Callable[[Path], int | None] = lambda client: forever_keywatch.game_pid(
+    """Every Windows process image under a folder, for the before/after that binds the watch."""
+    linux_game_pids: Callable[[Path], Sequence[int]] = lambda client: forever_keywatch.game_pids(
         Path("/proc"), client
     )
+    """Every Linux pid of this client's game, the same question the watcher asks (T888)."""
     hosts_ready: Callable[[str], bool] = forever_proton.hosts_ready
     prepare_proton: Callable[..., forever_proton.Runtime] = forever_proton.prepare
     start_game: Callable[..., None] = forever_proton.start_game
@@ -111,6 +113,27 @@ def login_of(entry: SingleEntry) -> ForeverLogin:
 def world_port(entry: SingleEntry) -> int:
     """The world server's host port (`ports` role `world`): the key watch idles once on it."""
     return next((p.port for p in entry.ports if p.role == "world"), 8085)
+
+
+def _running(client_dir: Path, os_name: str, s: PlaySeams) -> tuple[int, ...]:
+    """The pids of this client's game that are running now, on this OS."""
+    found = s.game_pids(client_dir) if os_name == "windows" else s.linux_game_pids(client_dir)
+    return tuple(found)
+
+
+def _before_launch(client_dir: Path, os_name: str, s: PlaySeams) -> tuple[int, ...]:
+    """The pid snapshot taken immediately before the game is started (T888).
+
+    A game the player starts between the early refusal and this line would otherwise be
+    in `before` and the watch would skip the copy this Play started -- or, worse, attach
+    to the one that was already there. Taken where it is used, on both OSes, nothing can
+    appear between the snapshot and the launch but the launch itself; and a game that did
+    appear is refused, exactly as an early one is.
+    """
+    before = _running(client_dir, os_name, s)
+    if before:
+        raise single_play.PlayRefusal(ALREADY_RUNNING)
+    return before
 
 
 def write_config(game_dir: Path, login: ForeverLogin, account: str) -> Path:
@@ -277,13 +300,10 @@ def play(
     assert client_dir is not None and entry.play is not None
     exe = client_dir / entry.play.exe
     # One game per Play (T888): the key watch writes into a process's memory, and the game
-    # it must write into is the one this press starts, never the one already running.
-    before: tuple[int, ...] = ()
-    if os_name == "windows":
-        before = tuple(s.game_pids(client_dir))
-        if before:
-            raise single_play.PlayRefusal(ALREADY_RUNNING)
-    elif s.find_game(client_dir) is not None:
+    # it must write into is the one this press starts, never the one already running. The
+    # refuse-early check is here so nothing is trusted or made for a press that cannot
+    # start; the snapshot the watch actually uses is taken again right before the launch.
+    if _running(client_dir, os_name, s):
         raise single_play.PlayRefusal(ALREADY_RUNNING)
     world = forever_account.container_of(entry, forever_account.WORLD_SERVICE)
     if s.state_of(world).status != "running":
@@ -326,6 +346,7 @@ def play(
         spec = single_play.launch_spec(
             entry, client_dir, host="127.0.0.1", account="", server_dir=server_dir, os_name=os_name
         )
+        before = _before_launch(client_dir, os_name, s)
         s.start_client(spec)
         s.watch(exe, key, login.region_group, before=before)
     else:
@@ -338,6 +359,7 @@ def play(
                 portal=login.portal,
                 stale=s.trust_record.stale(),
             )
+            before = _before_launch(client_dir, os_name, s)
             s.start_game(runtime, exe, entry.play.args)
         except (forever_proton.ProtonError, forever_trust.TrustError) as exc:
             raise single_play.PlayRefusal(str(exc)) from exc

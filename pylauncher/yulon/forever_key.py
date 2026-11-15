@@ -256,7 +256,7 @@ def pids_under(folder: Path) -> list[int]:
     """
     if sys.platform != "win32":
         return []
-    root = os.path.normcase(os.path.abspath(str(folder)))
+    root = os.path.normcase(str(folder.resolve()))
     if not root.endswith(os.sep):
         root += os.sep
     return _image_pids(lambda image: image.startswith(root))
