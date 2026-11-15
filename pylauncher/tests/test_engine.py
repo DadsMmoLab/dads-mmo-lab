@@ -782,3 +782,97 @@ def test_engine_sentence_answers_none_when_the_record_cannot_be_read(
 
     monkeypatch.setattr(view.native, "read_state", denied)
     assert view._engine_sentence(tmp_path / "wow") is None
+
+
+# -- engine-guard completeness (T887 p1 r4 item 4) ---------------------------------
+
+
+def test_every_services_field_is_guarded_or_exempt() -> None:
+    """A new `ControllerServices` field lands in REPLACED or EXEMPT, with its reason."""
+    import dataclasses
+
+    from yulon.ui import controller_view as view
+
+    fields = {field.name for field in dataclasses.fields(view.ControllerServices)}
+    missing = fields - set(view.ENGINE_GUARD_REPLACED) - set(view.ENGINE_GUARD_EXEMPT)
+    assert not missing, f"unguarded engine seams: {sorted(missing)}"
+    stale = (set(view.ENGINE_GUARD_REPLACED) | set(view.ENGINE_GUARD_EXEMPT)) - fields
+    assert not stale, f"guard names no field has: {sorted(stale)}"
+
+
+def test_every_controller_method_is_overridden_or_exempt() -> None:
+    """A new public `Controller` method lands in GUARDED_METHODS or METHOD_EXEMPT."""
+    from yulon.controller import Controller
+    from yulon.ui import controller_view as view
+
+    public = {
+        name
+        for name, member in vars(Controller).items()
+        if not name.startswith("_") and callable(member)
+    }
+    subclasses: list[type[Controller]] = list(Controller.__subclasses__())
+    for child in list(subclasses):
+        public |= {
+            name
+            for name, member in vars(child).items()
+            if not name.startswith("_") and callable(member)
+        }
+        subclasses.extend(child.__subclasses__())
+    missing = public - set(view.ENGINE_GUARDED_METHODS) - set(view.ENGINE_GUARD_METHOD_EXEMPT)
+    assert not missing, f"unguarded controller methods: {sorted(missing)}"
+    stale = (set(view.ENGINE_GUARDED_METHODS) | set(view.ENGINE_GUARD_METHOD_EXEMPT)) - public
+    assert not stale, f"guard names no method has: {sorted(stale)}"
+
+
+def test_every_replaced_seam_refuses_under_a_mismatched_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every REPLACED field, built over a mismatched record, refuses (T887 p1 r4 item 4)."""
+    import dataclasses
+
+    from yulon import runner
+    from yulon.ui import controller_view as view
+    from yulon.ui.controller_view import ControllerServices, EngineMismatch
+
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id="wow-wotlk",
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family="azerothcore",
+            engine="docker",
+        ),
+    )
+
+    def never(cmd: list[str], *args: object, **kwargs: object) -> object:
+        raise AssertionError(f"docker ran under a refused engine: {cmd}")
+
+    monkeypatch.setattr(runner, "run", never)
+    monkeypatch.setattr(runner, "stream", never)
+    _podman(monkeypatch, tmp_path)
+    try:
+        services = ControllerServices.for_entry(_wotlk_entry(), server_dir)
+        fields = {field.name for field in dataclasses.fields(ControllerServices)}
+        assert set(view.ENGINE_GUARD_REPLACED) <= fields
+        for name in sorted(view.ENGINE_GUARD_REPLACED):
+            seam = getattr(services, name)
+            if seam is None:
+                continue
+            with pytest.raises(EngineMismatch, match="set up with Docker.*now using Podman"):
+                if name == "controller":
+                    seam.status()
+                elif name == "database_alone":
+                    with seam.bring_up("test"):
+                        pass
+                elif name == "move":
+                    raise AssertionError("a guarded move is None, never a seam")
+                elif name in ("hold_server", "plan_restore"):
+                    seam("test")
+                elif name in ("create_account", "restore"):
+                    seam("test", "test")
+                else:
+                    seam()
+    finally:
+        engine._reset_for_tests()

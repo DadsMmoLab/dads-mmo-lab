@@ -3574,6 +3574,143 @@ def _refusing_mysql(
     )
 
 
+ENGINE_GUARD_REPLACED: frozenset[str] = frozenset(
+    {
+        "controller",
+        "logs_source",
+        "send_console",
+        "network_plan",
+        "network_apply",
+        "create_account",
+        "backup",
+        "plan_restore",
+        "restore",
+        "hold_server",
+        "database_alone",
+        "realm_name_save",
+        "repair_database",
+        "rebuild",
+        "move",
+    }
+)
+"""`ControllerServices` fields `_with_the_engine_guard()` replaces on mismatch (T887).
+
+Read by `tests/test_engine.py`'s completeness guard: every field is either here
+or in `ENGINE_GUARD_EXEMPT`, so a new docker-touching seam cannot slip past the
+guard in silence. `move` is here though it is set to `None`, not a refusal: the
+Move panel draws nothing over `None`, and a refusing seam has no shape the
+panel could hold.
+"""
+ENGINE_GUARD_EXEMPT: dict[str, str] = {
+    "store": "the manifest store: reads files, touches no daemon",
+    "applier": "module installs are refused below this seam, in DockerSql and the hold",
+    "backups_dir": "path arithmetic under the server dir; writes nothing",
+    "interrupted_restore": "reads the interrupted-restore record; writes nothing",
+    "forget_interrupted": "Maintenance-box bookkeeping; the restore itself refuses",
+    "db_refusal": "a sentence, not a seam",
+    "realm_name_current": "the realm row's name, else the saved one; writes nothing",
+    "shelf": "the backups folder listing; the lease it takes refuses",
+    "docker_space": "frees Docker images and build cache, not this server's containers",
+    "dashboard": "reads a verdict; writes none of the server",
+    "log_snapshot": "a log file in the app's own folder",
+    "channel_setup": "the command channel's own state machine; sends through send_console",
+    "bots": "the Browse list; reads only",
+    "console_probe": "one command through the channel, which refuses with it",
+    "uninstall": "removal runs under the tab's hold, which refuses first",
+    "accounts": "account reads and writes under the shared assembly's hold",
+    "my_party": "the bridge ping; writes nothing until the channel answers",
+    "play": "character reads; writes go through the held SQL seams",
+    "bot_dashboard": "counts for the dashboard switch; reads only",
+    "bot_pool_rebuild": "rebuilds through the held applier",
+    "bot_rndbot_delete": "deletes through DockerSql, which refuses",
+    "steam": "Steam shortcuts, not the server",
+    "ready_after_start": "waits for the world after a Start; the Start itself refuses",
+    "module_sql": "reads the ledgers; the importer's writes refuse below",
+    "module_refresh": "the same counts as module_updates, in the background",
+    "module_updates": "what could be updated; reads only",
+    "module_notes": "one sentence per row; reads only",
+    "module_version": "a version; reads only",
+    "installed_modules": "a listing; reads only",
+    "unfinished_modules": "a listing; reads only",
+    "unknown_modules": "a listing; reads only",
+    "module_from_link": "derives a manifest; reads only",
+    "module_from_folder": "derives a manifest; reads only",
+    "module_install_custom": "an Applier install: the Applier holds",
+    "module_replacement_question": "a question; reads only",
+    "default_addons": "put in by Play and installs, which refuse below",
+    "module_forget": "forgets a record in the app's own state",
+    "rebuild_refusal": "a refusal sentence, not a seam",
+    "rebuild_note": "a heads-up sentence; reads only",
+    "script_built_rebuild": "the old script's own project; refusals live in its route",
+    "updates": "an engine press; the engine reserves and refuses",
+    "repair_compose": "an engine press; the engine reserves",
+    "repair_confs": "install_wiring reserves it with engine.reserved",
+    "lock_folder": "the folder's Windows ACL, not its data",
+    "kept_build": "an engine press; the engine reserves",
+    "corrections": "an engine press; the engine reserves",
+    "table_repair": "dumps and repairs through DockerMysql, which refuses",
+    "update_to_latest": "an engine press; the engine reserves",
+    "put_the_folders_back": "an engine press; the engine reserves",
+    "adopt": "an engine press; the engine reserves",
+    "client_dir": "the game client's folder",
+    "play_client_dir": "the game client's folder",
+    "time_zone": "writes under the server's hold, which refuses first",
+    "bot_population": "writes under the server's hold, which refuses first",
+    "reset_settings": "writes under the server's hold, which refuses first",
+    "set_client_dir": "the app's own state",
+    "set_play_client_dir": "the app's own state",
+    "other_server_dirs": "a listing",
+    "pathfinding": "its start runs under the server's hold, which refuses first",
+    "world_upkeep": "reextract and finish_world_reimport carry the engine's reserve",
+    "realm_switch": "the switch runs under the server's hold, which refuses first",
+    "characters_withheld": "a mapping of reasons; reads only",
+    "no_modules_note": "a sentence; reads only",
+    "client_addons": "an Applier install/remove: the tab's applier holds",
+    "custom_module_tips": "two tooltips; read only",
+}
+"""`ControllerServices` fields the engine guard deliberately leaves alone (T887).
+
+`tests/test_engine.py` fails on any field in neither this nor
+`ENGINE_GUARD_REPLACED`, with the reason naming why the seam needs no refusal.
+"""
+ENGINE_GUARDED_METHODS: frozenset[str] = frozenset(
+    {
+        "status",
+        "start",
+        "stop",
+        "stop_conflicting_and_start",
+        "restart",
+        "recreate",
+        "remove",
+        "repair_import",
+        "import_state",
+        "wait_db_healthy",
+        "wait_ready",
+        "host_ports",
+        "port_conflicts",
+        "refuse_start",
+        "refuse_before_a_stop",
+    }
+)
+"""`Controller` methods `_EngineGuarded` overrides to refuse (T887).
+
+Read by `tests/test_engine.py`: every public `Controller` method is either
+here or in `ENGINE_GUARD_METHOD_EXEMPT`, so a new docker-touching method
+cannot slip past the guarded controller in silence.
+"""
+ENGINE_GUARD_METHOD_EXEMPT: dict[str, str] = {
+    "refuse_a_taken_port": "raises the taken-port refusal from cached conflicts; no docker call",
+    "lock_seeded_accounts_if_up": "settles the lock only when the database is already up",
+    "refuse_an_old_compose": "reads the folder's compose file; runs no container",
+    "refuse_an_unfinished_install": "reads the folder's record; runs no container",
+    "refuse_an_ended_import": "reads the one-shot marker; runs no container",
+    "refuse_a_missing_image": "asks the daemon, but only to refuse what the guard refused",
+    "refuse_a_missing_database": "asks the daemon, but only to refuse what the guard refused",
+    "stop_conflicting": "lists and stops strangers; unreachable, the guarded start refuses first",
+    "skips_bot_saves": "reads the player's stop choice; writes nothing",
+}
+
+
 def _with_the_engine_guard(
     services: ControllerServices,
     entry: CatalogEntry,
