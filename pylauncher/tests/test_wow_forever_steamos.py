@@ -6,6 +6,7 @@ import hashlib
 import io
 import tarfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -511,38 +512,85 @@ def _linux_seams(calls: list[str], *, hosts: bool = True) -> forever_play.PlaySe
     )
 
 
-class _Crypt32:
-    """A fake crypt32: the prefix's Root store is a list of DER, and a context a handle."""
+@dataclass
+class _CertContext:
+    """One certificate context: its DER, and whether it was taken from the store."""
 
-    def __init__(self, store: list[bytes], names: dict[bytes, str]) -> None:
+    der: bytes
+    in_store: bool
+
+
+class _RootStore:
+    """The fake store handle: where the next enumeration of it starts."""
+
+    def __init__(self) -> None:
+        self.index = 0
+
+
+class _Crypt32:
+    """A fake crypt32: the prefix's Root store is a list of DER, and a context a handle.
+
+    Deletion changes the store only for a context that came FROM it. A context made from
+    mere bytes (`CertCreateCertificateContext`, what the old import deleted) belongs to no
+    store, so deleting it leaves Root exactly as it was -- which is what Windows does, and
+    why the old script's "removed N" was not a removal.
+    """
+
+    def __init__(
+        self, store: list[bytes], names: dict[bytes, str], *, delete_sticks: bool = True
+    ) -> None:
         self.store = list(store)
         self.names = names
+        self.delete_sticks = delete_sticks
         self.deleted: list[bytes] = []
         self.added: list[bytes] = []
-        self.CertOpenStore = _Call(lambda *a: 1)
+        self.CertOpenStore = _Call(lambda *a: _RootStore())
         self.CertCloseStore = _Call(lambda *a: 1)
         self.CertAddEncodedCertificateToStore = _Call(self._add)
         self.CertCreateCertificateContext = _Call(self._context)
+        self.CertEnumCertificatesInStore = _Call(self._enum)
+        self.CertDuplicateCertificateContext = _Call(self._duplicate)
         self.CertGetNameStringW = _Call(self._name)
+        self.CertGetCertificateContextProperty = _Call(self._property)
         self.CertDeleteCertificateFromStore = _Call(self._delete)
         self.CertFreeCertificateContext = _Call(lambda ctx: 1)
 
-    def _context(self, _encoding: int, der: object, _size: int) -> dict[str, bytes]:
-        return {"der": bytes(der)}  # type: ignore[arg-type]
+    def _context(self, _encoding: int, der: object, _size: int) -> _CertContext:
+        return _CertContext(bytes(der), False)  # type: ignore[arg-type]
+
+    def _enum(self, store: _RootStore, ctx: _CertContext | None) -> _CertContext | None:
+        store.index = 0 if ctx is None else store.index + 1
+        if store.index >= len(self.store):
+            return None
+        return _CertContext(self.store[store.index], True)
+
+    def _duplicate(self, ctx: _CertContext) -> _CertContext:
+        return _CertContext(ctx.der, ctx.in_store)
 
     def _name(
-        self, ctx: dict[str, bytes], _flag: int, _flags: int, _para: object, buf: object, size: int
+        self,
+        ctx: _CertContext,
+        _flag: int,
+        _flags: int,
+        _para: object,
+        buf: object,
+        size: int,
     ) -> int:
-        name = self.names.get(ctx["der"], "")
+        name = self.names.get(ctx.der, "")
         if buf is not None and size > 1:
             buf.value = name  # type: ignore[attr-defined]
         return len(name) + 1
 
-    def _delete(self, ctx: dict[str, bytes]) -> int:
-        der = ctx["der"]
-        if der in self.store:
-            self.store.remove(der)
-            self.deleted.append(der)
+    def _property(self, ctx: _CertContext, _prop: int, buf: Any, size: Any) -> int:
+        digest = hashlib.sha1(ctx.der).digest()  # noqa: S324 - Windows names certs by it
+        buf[: len(digest)] = digest
+        size._obj.value = len(digest)
+        return 1
+
+    def _delete(self, ctx: _CertContext) -> int:
+        if self.delete_sticks and ctx.in_store and ctx.der in self.store:
+            self.store.remove(ctx.der)
+            self.deleted.append(ctx.der)
         return 1
 
     def _add(
@@ -572,6 +620,8 @@ def _import_ca_run(
     store: list[bytes],
     names: dict[bytes, str],
     stale: Sequence[str] = (),
+    *,
+    delete_sticks: bool = True,
 ) -> tuple[list[str], _Crypt32, list[bytes]]:
     """Run the generated import script against a fake crypt32; its argv, the fake, the new DER."""
     import base64
@@ -586,7 +636,7 @@ def _import_ca_run(
     found = re.search(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", text, re.S)
     assert found is not None
     new = base64.b64decode("".join(found.group(1).split()))
-    fake = _Crypt32(store, names)
+    fake = _Crypt32(store, names, delete_sticks=delete_sticks)
     report = tmp_path / "report.txt"
     monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: fake, raising=False)
     monkeypatch.setattr(ctypes, "get_last_error", lambda: 0, raising=False)
@@ -615,7 +665,9 @@ def test_the_prefix_import_deletes_every_superseded_ca_of_ours_first(
     The generated script is run against a fake crypt32 holding three certificates: an old
     CA of ours (by subject name), a CA named by a stale thumbprint, and an unrelated root.
     The two of ours are deleted, the unrelated one is not, and the verified new CA is added
-    -- never deleted even though its subject carries the same name.
+    -- never deleted even though its subject carries the same name. The store is the only
+    thing deletion changes, so this fails for the old script: each context it deleted was
+    made from bytes and belonged to no store, while Root kept both old roots.
     """
     old_ours, stale_one, other = b"old-ours", b"stale-one", b"other-root"
     import hashlib
@@ -633,6 +685,29 @@ def test_the_prefix_import_deletes_every_superseded_ca_of_ours_first(
     assert other in fake.store and old_ours not in fake.store
     assert "removed 2 superseded certificate(s)" in lines
     assert "CA in LocalMachine\\Root: yes" in lines
+
+
+def test_a_reported_removal_is_one_the_store_actually_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T888 round 3 H2: a successful `CertDeleteCertificateFromStore` is only a request.
+
+    The fake store keeps the certificate while the delete answers success -- exactly what
+    the old import saw: it deleted a context made from bytes, which belongs to no store,
+    then counted it. The report must count only what a second walk confirms, and name the
+    one still there.
+    """
+    old = b"old-ours"
+    lines, fake, added = _import_ca_run(
+        tmp_path,
+        monkeypatch,
+        [old],
+        {old: "Yulon WoW Forever Local CA"},
+        delete_sticks=False,
+    )
+    assert fake.store == [old, *added]
+    assert "removed 0 superseded certificate(s)" in lines
+    assert any(line.startswith("could not delete") for line in lines)
 
 
 def _linux_path(winpath: str) -> Path:

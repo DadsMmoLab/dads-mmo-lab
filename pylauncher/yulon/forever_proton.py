@@ -95,12 +95,14 @@ re-import; a tile that finds a different thumbprint on `certs/ca.pem` imports th
 before the game starts, because a remade CA is a root the prefix does not have."""
 
 IMPORT_CA = r'''"""Written by Yu'lon: trust one CA in LocalMachine\\Root of THIS prefix only."""
-import base64, ctypes, hashlib, re, ssl, sys
+import base64, ctypes, hashlib, re, sys
 import ctypes.wintypes as wt
 
 CA_NAME = "Yulon WoW Forever Local CA"
-X509_ASN_ENCODING = 1
 CERT_SIMPLE_NAME = 4
+CERT_SHA1_HASH_PROP_ID = 3
+ROOT_STORE = ctypes.c_void_p(10)
+LOCAL_MACHINE = 2 << 16
 
 
 def main():
@@ -114,6 +116,7 @@ def main():
     if not m:
         say("no certificate in " + pem); return 2
     der = base64.b64decode("".join(m.group(1).split()))
+    new = hashlib.sha1(der).hexdigest().upper()
     c = ctypes.WinDLL("crypt32", use_last_error=True)
     c.CertOpenStore.restype = ctypes.c_void_p
     c.CertOpenStore.argtypes = [ctypes.c_void_p, wt.DWORD, ctypes.c_void_p, wt.DWORD,
@@ -121,48 +124,77 @@ def main():
     c.CertAddEncodedCertificateToStore.argtypes = [ctypes.c_void_p, wt.DWORD, ctypes.c_char_p,
                                                    wt.DWORD, wt.DWORD, ctypes.c_void_p]
     c.CertCloseStore.argtypes = [ctypes.c_void_p, wt.DWORD]
-    c.CertCreateCertificateContext.restype = ctypes.c_void_p
-    c.CertCreateCertificateContext.argtypes = [wt.DWORD, ctypes.c_char_p, wt.DWORD]
+    c.CertEnumCertificatesInStore.restype = ctypes.c_void_p
+    c.CertEnumCertificatesInStore.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    c.CertDuplicateCertificateContext.restype = ctypes.c_void_p
+    c.CertDuplicateCertificateContext.argtypes = [ctypes.c_void_p]
     c.CertGetNameStringW.restype = wt.DWORD
     c.CertGetNameStringW.argtypes = [ctypes.c_void_p, wt.DWORD, wt.DWORD, ctypes.c_void_p,
                                      ctypes.c_wchar_p, wt.DWORD]
+    c.CertGetCertificateContextProperty.argtypes = [ctypes.c_void_p, wt.DWORD, ctypes.c_void_p,
+                                                    ctypes.POINTER(wt.DWORD)]
     c.CertDeleteCertificateFromStore.argtypes = [ctypes.c_void_p]
     c.CertFreeCertificateContext.argtypes = [ctypes.c_void_p]
-    store = c.CertOpenStore(ctypes.c_void_p(10), 0, None, 2 << 16, ctypes.c_wchar_p("Root"))
+
+    def name_of(ctx):
+        size = c.CertGetNameStringW(ctx, CERT_SIMPLE_NAME, 0, None, None, 0)
+        if size <= 1:
+            return ""
+        buf = ctypes.create_unicode_buffer(size)
+        if c.CertGetNameStringW(ctx, CERT_SIMPLE_NAME, 0, None, buf, size):
+            return buf.value
+        return ""
+
+    def thumb_of(ctx):
+        buf = ctypes.create_string_buffer(20)
+        size = wt.DWORD(20)
+        ok = c.CertGetCertificateContextProperty(ctx, CERT_SHA1_HASH_PROP_ID, buf,
+                                                 ctypes.byref(size))
+        return buf.raw[:size.value].hex().upper() if ok else ""
+
+    def scan(store):
+        # Every certificate in the store this script opened. Each call frees the context
+        # the last one returned, so nothing keeps it past the next step.
+        found = []
+        ctx = c.CertEnumCertificatesInStore(store, None)
+        while ctx:
+            found.append((thumb_of(ctx), name_of(ctx)))
+            ctx = c.CertEnumCertificatesInStore(store, ctx)
+        return found
+
+    store = c.CertOpenStore(ROOT_STORE, 0, None, LOCAL_MACHINE, ctypes.c_wchar_p("Root"))
     if not store:
         say("CertOpenStore failed, error %d" % ctypes.get_last_error()); return 1
     # A remade CA is a DIFFERENT root: the old ones must leave, or this prefix keeps
-    # trusting a certificate whose key is gone (T888). Every certificate of ours goes --
-    # by its subject name, and by a thumbprint the install record calls stale -- except
-    # the one being installed.
-    removed = 0
-    for cert, enc, _ in list(ssl.enum_certificates("ROOT")):
-        if enc != "x509_asn" or cert == der:
-            continue
-        thumb = hashlib.sha1(cert).hexdigest().upper()
-        name = ""
-        ctx = c.CertCreateCertificateContext(X509_ASN_ENCODING, cert, len(cert))
-        if ctx:
-            size = c.CertGetNameStringW(ctx, CERT_SIMPLE_NAME, 0, None, None, 0)
-            if size > 1:
-                buf = ctypes.create_unicode_buffer(size)
-                if c.CertGetNameStringW(ctx, CERT_SIMPLE_NAME, 0, None, buf, size):
-                    name = buf.value
-        if name == CA_NAME or thumb in stale:
-            if ctx and c.CertDeleteCertificateFromStore(ctx):  # frees the context too
-                removed += 1
-                ctx = None
-                continue
+    # trusting a certificate whose key is gone (T888). Everything of ours goes -- by its
+    # subject name, and by a thumbprint the install record calls stale -- except the one
+    # being installed. Walk the store the ADD below uses: a context made from bytes is
+    # in no store at all, and deleting it deletes nothing.
+    doomed, targets = [], {}
+    ctx = c.CertEnumCertificatesInStore(store, None)
+    while ctx:
+        thumb, name = thumb_of(ctx), name_of(ctx)
+        if thumb and thumb != new and (name == CA_NAME or thumb in stale):
+            dup = c.CertDuplicateCertificateContext(ctx)  # the next call frees ctx
+            if dup:
+                doomed.append(dup)
+                targets[thumb] = name
+        ctx = c.CertEnumCertificatesInStore(store, ctx)
+    for dup in doomed:
+        c.CertDeleteCertificateFromStore(dup)  # frees the context too
+    # A delete only ASKED the store: a second walk says which ones are really gone, and
+    # only those are reported as removed.
+    left = {thumb for thumb, _ in scan(store)}
+    removed = sum(1 for thumb in targets if thumb not in left)
+    for thumb, name in targets.items():
+        if thumb in left:
             say("could not delete %s (%s)" % (name, thumb))
-        if ctx:
-            c.CertFreeCertificateContext(ctx)
     ok = c.CertAddEncodedCertificateToStore(store, 1, der, len(der), 3, None)
     err = ctypes.get_last_error()
+    present = new in {thumb for thumb, _ in scan(store)}
     c.CertCloseStore(store, 0)
     if not ok:
         say("CertAddEncodedCertificateToStore failed, error %d" % err); return 1
-    present = any(cert == der for cert, enc, _ in ssl.enum_certificates("ROOT")
-                  if enc == "x509_asn")
     say("removed %d superseded certificate(s)" % removed)
     say("CA in LocalMachine\\Root: " + ("yes" if present else "NO"))
     return 0 if present else 1
