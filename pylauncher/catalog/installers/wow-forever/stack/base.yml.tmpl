@@ -117,11 +117,12 @@ services:
   # by Play for an install whose CA is the image's, name-constrained too widely): the CA
   # is constrained to trinity.actual.battle.net alone, and its key stays in this
   # container's temporary folder, never in ./certs. Under the seed profile, so `up` never
-  # starts it.
+  # starts it. `compose run` replaces this whole command when one is given, so the forced
+  # remake repeats it from the same constant (`CERTIFICATES_COMMAND`).
   certificates:
     image: {{IMAGE_SERVER}}
     profiles: ["seed"]
-    command: ["bash", "/yulon-certs.sh"]
+    command: {{CERTIFICATES_COMMAND}}
     volumes:
       - ./certs:/srv/certs
       - ./certs-yulon.sh:/yulon-certs.sh:ro

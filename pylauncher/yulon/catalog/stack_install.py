@@ -25,6 +25,7 @@ Install on the same folder skips what finished, and says so.
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
 import threading
@@ -102,6 +103,15 @@ CERTIFICATES_SERVICE = "certificates"
 
 Under the seed profile, so `up` never starts it: `compose run --rm certificates` makes the
 files once and the container goes with its temporary folder, where the CA's key lives.
+"""
+
+CERTIFICATES_COMMAND = ("bash", "/yulon-certs.sh")
+"""The whole command the `certificates` service runs, rendered into its template and repeated.
+
+`docker compose run <service> <words...>` REPLACES the service's `command:` with those words
+(it does not append them to it), so the forced run cannot hand the script `--force` alone:
+that would make `--force` the command and never run `certs-yulon.sh`. One tuple feeds both
+the template's `{{CERTIFICATES_COMMAND}}` and `make_certificates()`'s forced run.
 """
 
 READY_POLL_SECONDS = 2.0
@@ -314,7 +324,13 @@ class StackInstaller:
 
     def tokens(self, server_dir: Path) -> dict[str, str]:
         """Every `{{TOKEN}}` the two templates may spend, for this install."""
-        values = {"PROJECT_NAME": self.project(server_dir), **self.entry.port_tokens()}
+        values = {
+            "PROJECT_NAME": self.project(server_dir),
+            **self.entry.port_tokens(),
+            # The certificates service's whole command, one list literal from the same tuple
+            # the forced run repeats (T888).
+            "CERTIFICATES_COMMAND": json.dumps(list(CERTIFICATES_COMMAND)),
+        }
         for image in self.stack.images:
             values[f"IMAGE_{token_name(image.role)}"] = image.ref
         for service in self.stack.services:
@@ -901,17 +917,20 @@ def make_certificates(server_dir: Path, *, force: bool = False) -> None:
     """Make a stack's own certificates now, in its image (`compose run --rm certificates`).
 
     The install's `certificates` stage and Play's remake of an existing install (T888)
-    both come through here, so the two cannot run different things. `force` hands the
-    script `--force`, which makes a new set even though a complete one is already there:
-    the script builds it in a staging folder inside the container, verifies it, and only
-    then swaps it in, so a failed run leaves the old files exactly as they were. Raises
-    `CertificatesError` with the run's last words when the script fails.
+    both come through here, so the two cannot run different things. `force` makes a new
+    set even though a complete one is already there -- the script builds it in a staging
+    folder inside the container, verifies it, and only then swaps it in, so a failed run
+    leaves the old files exactly as they were. `compose run` REPLACES the service's
+    `command:` with the words it is given, so even the forced run spells the whole command
+    (`CERTIFICATES_COMMAND`), with `--force` on the end. Raises `CertificatesError` with
+    the run's last words when the script fails.
     """
+    command = (*CERTIFICATES_COMMAND, "--force") if force else CERTIFICATES_COMMAND
     run = docker.compose_run_once(
         server_dir,
         CERTIFICATES_SERVICE,
         profiles=(SEED_PROFILE,),
-        command=("--force",) if force else (),
+        command=command,
     )
     if run.returncode != 0:
         raise CertificatesError(
