@@ -674,3 +674,95 @@ def test_a_docker_record_under_the_switch_refuses_server_cli_start(
     finally:
         engine._reset_for_tests()
     assert ran == []
+
+
+# -- platform.ensure_docker() under Podman (T887 p1 r4 item 1) --------------------
+
+
+class _PodmanBox:
+    """Records argv; `docker info` answers with `ready`, anything else with 0."""
+
+    def __init__(self, ready: bool = False) -> None:
+        self.calls: list[list[str]] = []
+        self.ready = ready
+
+    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(argv)
+        if argv[:2] == ["docker", "info"]:
+            return subprocess.CompletedProcess(
+                argv, 0 if self.ready else 1, "", "" if self.ready else "no such host"
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def _podman_linux(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Podman selected, on Linux, with docker_programs pinned to the plain CLI."""
+    _podman(monkeypatch, tmp_path)
+    monkeypatch.setattr(platform.sys, "platform", "linux")
+    monkeypatch.setattr(platform, "docker_programs", lambda: ("docker",))
+
+
+def test_ensure_docker_under_podman_starts_only_the_socket_then_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Unreachable socket: the user socket start is attempted, nothing Docker-shaped runs."""
+    _podman_linux(monkeypatch, tmp_path)
+    try:
+        box = _PodmanBox(ready=False)
+        with pytest.raises(docker.DockerRefusal, match="Podman is not answering"):
+            platform.ensure_docker(run=box, user="pk", wait_seconds=0.0)
+        assert ["systemctl", "--user", "start", "podman.socket"] in box.calls
+        assert not any(call[:1] == ["sudo"] for call in box.calls)
+        assert not any("usermod" in call for call in box.calls)
+        assert not any("apt-get" in call or "dnf" in call for call in box.calls)
+    finally:
+        engine._reset_for_tests()
+
+
+def test_ensure_docker_under_podman_proceeds_once_the_socket_answers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Socket up after the start: a ready report, and no Docker install steps."""
+    _podman_linux(monkeypatch, tmp_path)
+    try:
+        box = _PodmanBox(ready=False)
+
+        def start_then_answer(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            box.calls.append(argv)
+            if argv == ["systemctl", "--user", "start", "podman.socket"]:
+                box.ready = True
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:2] == ["docker", "info"]:
+                return subprocess.CompletedProcess(
+                    argv, 0 if box.ready else 1, "", "" if box.ready else "no such host"
+                )
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        report = platform.ensure_docker(run=start_then_answer, user="pk", wait_seconds=30.0)
+        assert report.docker_ready and report.ok
+        assert ["systemctl", "--user", "start", "podman.socket"] in box.calls
+        assert not any(call[:1] == ["sudo"] for call in box.calls)
+    finally:
+        engine._reset_for_tests()
+
+
+def test_ensure_docker_under_podman_never_enters_the_docker_linux_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutation: dropping the branch installs Docker; the branch must own this path."""
+    _podman_linux(monkeypatch, tmp_path)
+    try:
+        entered: list[str] = []
+        real = platform._ensure_docker_linux
+
+        def spy(*args: object, **kwargs: object) -> platform.ProvisionReport:
+            entered.append("linux")
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(platform, "_ensure_docker_linux", spy)
+        box = _PodmanBox(ready=False)
+        with pytest.raises(docker.DockerRefusal, match="Podman is not answering"):
+            platform.ensure_docker(run=box, user="pk", wait_seconds=0.0)
+        assert entered == []
+    finally:
+        engine._reset_for_tests()

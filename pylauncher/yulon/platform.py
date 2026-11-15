@@ -3075,6 +3075,13 @@ DOCKER_START_COMMANDS: list[list[str]] = [["systemctl", "start", "docker"]]
 DOCKER_SNAP_START_COMMANDS: list[list[str]] = [["snap", "start", "docker"]]
 DOCKER_DESKTOP_START_COMMAND = ["systemctl", "--user", "start", "docker-desktop"]
 DOCKER_ROOTLESS_START_COMMAND = ["systemctl", "--user", "start", "docker"]
+PODMAN_SOCKET_START_COMMAND = ["systemctl", "--user", "start", "podman.socket"]
+"""Waking rootless Podman's API socket: per-user, no root, installs nothing (T887)."""
+PODMAN_NOT_READY_SENTENCE = (
+    "Podman is not answering on this computer. Yu'lon tried to start it and could not. "
+    "Details says why."
+)
+"""The player line when the socket start leaves no answering daemon (T887)."""
 
 
 def _packages_in(commands: list[list[str]]) -> list[str]:
@@ -4223,6 +4230,10 @@ def ensure_docker(
     if docker_ready(do):
         logger.info("ensure_docker(): daemon already reachable")
         return ProvisionReport(current, done=("docker already running",), docker_ready=True)
+    from yulon import engine as engine_seam
+
+    if current == "linux" and engine_seam.is_podman():
+        return _ensure_podman(do, wait_seconds, cancel)
     if current == "linux":
         return _ensure_docker_linux(
             do, which, dry_run, _linux_user(user), wait_seconds, cancel, ask, run_input
@@ -4289,6 +4300,29 @@ def _linux_user(explicit: str | None) -> str:
     # `deck` last: it is the SteamOS default this project targets, and a wrong
     # guess here is a name in a question rather than an action.
     return os.environ.get("USER") or os.environ.get("USERNAME") or "deck"
+
+
+def _ensure_podman(
+    do: RunCmd,
+    wait_seconds: float,
+    cancel: threading.Event | None = None,
+) -> ProvisionReport:
+    """Wake rootless Podman's socket and wait for the daemon, installing nothing (T887).
+
+    Only under the `YULON_ENGINE=podman` switch: `ensure_docker()` answers
+    early when a daemon is already reachable, and this is what a Linux run
+    reaches otherwise. It never installs a package, joins a group, or runs
+    anything as root — waking the per-user socket is the whole of it — so a
+    box without Podman is refused in words rather than given Docker beside it.
+    """
+    from yulon import docker as docker_seam
+
+    started = do(list(PODMAN_SOCKET_START_COMMAND))
+    ready = _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0, cancel)
+    if ready:
+        return ProvisionReport("linux", done=("podman socket started",), docker_ready=True)
+    detail = (started.stdout.strip() + "\n" + started.stderr.strip()).strip()
+    raise docker_seam.DockerRefusal(PODMAN_NOT_READY_SENTENCE, detail=detail)
 
 
 def _ensure_docker_linux(
