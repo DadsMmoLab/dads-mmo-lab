@@ -23,6 +23,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Add to Steam Deck (Gaming Mode)…** on WoW Forever's tab adds its Server, game and Server Stop tiles to Steam.
 
 ### Fixed
+- **Play** on an FFXI server installed in **Program Files (x86)** can make the game's folders writable.
 - WoW Forever: Holy Strike, Blessing of Light, Salvation, Mutilate and Revoke play their animations again.
 
 ### Changed

@@ -18,7 +18,6 @@ from yulon.single_client import (
     GRANT,
     PROBE,
     FoundClient,
-    UnsafeClientFolder,
     client_version,
     describe,
     find_client,
@@ -138,7 +137,13 @@ def test_the_grant_makes_missing_folders_then_grants_modify_by_sid(tmp_path: Pat
     commands = grant_commands([client / "USER", client / "SYS"], SID)
     assert commands == [
         ["icacls", str(client / "USER"), "/grant", f"*{SID}:{GRANT}"],
-        ["cmd", "/c", "mkdir", str(client / "SYS")],
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "New-Item -ItemType Directory -Force -LiteralPath "
+            + platform.powershell_literal(str(client / "SYS")),
+        ],
         ["icacls", str(client / "SYS"), "/grant", f"*{SID}:{GRANT}"],
     ]
 
@@ -208,58 +213,98 @@ def test_a_batch_that_did_not_report_hands_the_player_the_commands(tmp_path: Pat
 
 
 @pytest.mark.parametrize("program", ["netsh", "powershell", "del"])
-def test_the_admin_batch_runs_only_icacls_and_certutil(program: str) -> None:
+def test_the_admin_batch_runs_only_its_own_programs(program: str) -> None:
     with pytest.raises(ValueError, match="runs only"):
         platform.elevated_admin_batch([[program, "x"]], is_admin=False)
 
 
-def test_cmd_runs_elevated_only_to_make_one_folder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """T888 item 4: a bare `cmd` entry let ANY `cmd /c ...` run as Administrator.
+def test_a_missing_folder_is_made_by_powershell_with_one_literal_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T888 item 1 (Claude #1, #5; Gemini #3): `Program Files (x86)` is grantable again.
 
-    `single_client`'s folder grant is the one caller that needs `cmd`, for the mkdir the
-    Program Files grant applies to. Its exact form passes; any other command line does
-    not. (The folder itself is refused one layer up, before the form is built:
-    `test_a_client_folder_cmd_would_reparse_is_refused_with_no_prompt`.)
+    `cmd /c mkdir` was the one elevated form, and it reparsed its argument, so a path with
+    a `cmd` metacharacter in it was refused one layer up -- `(x86)` included, which is
+    FFXI's default install. PowerShell's `-LiteralPath` takes the path whole and `''`
+    spells a quote, so the folder is one argument and the allowlist matches that form
+    alone.
     """
     monkeypatch.setattr(platform, "detect", lambda: "windows")
-    argv, results = platform.elevated_admin_batch(
-        [["cmd", "/c", "mkdir", "C:\\Program Files\\FFXI\\USER"]], is_admin=False
+    folder = Path(r"C:\Program Files (x86)\PlayOnline\SquareEnix\FINAL FANTASY XI\USER")
+    commands = grant_commands([folder], SID)
+    assert commands[0][:3] == ["powershell.exe", "-NoProfile", "-Command"]
+    assert commands[0][3] == (
+        "New-Item -ItemType Directory -Force -LiteralPath "
+        + platform.powershell_literal(str(folder))
     )
+    assert commands[1] == ["icacls", str(folder), "/grant", f"*{SID}:{GRANT}"]
+    argv, results = platform.elevated_admin_batch(commands, is_admin=False)
     results.unlink(missing_ok=True)
     assert argv[:2] == ["powershell.exe", "-NoProfile"]
-    for refused in (
-        ["cmd", "/c", "whoami"],
-        ["cmd", "/c", "mkdir", "C:\\a", "&&", "whoami"],
-        ["cmd", "/c", "del", "C:\\x"],
-        ["cmd", "/c", "ipconfig", "/all"],
-        ["cmd", "/c"],
-    ):
-        with pytest.raises(ValueError, match="exact forms"):
-            platform.elevated_admin_batch([refused], is_admin=False)
 
 
-def test_a_client_folder_cmd_would_reparse_is_refused_with_no_prompt(tmp_path: Path) -> None:
-    """T888 item 4: `C:\\a&b` became `mkdir C:\\a & b`, and `b` ran as Administrator."""
-    client = _client(tmp_path / "a&b")
+@pytest.mark.parametrize("tail", ["a&b", "o'brien", 'say "hi"'])
+def test_a_folder_with_a_cmd_metacharacter_is_one_literal_argument(tail: str) -> None:
+    """T888 item 1: the path is one argument, quotes doubled, never reparsed by `cmd`.
+
+    `C:\\a&b` became `mkdir C:\\a & b` under `cmd`, with `b` run as Administrator. A
+    PowerShell single-quoted literal holds `&`, `;` and `"` as themselves, and `''` is the
+    one way to spell `'` inside it.
+    """
+    folder = Path("C:/") / tail
+    command = grant_commands([folder], SID)[0]
+    assert len(command) == 4, "one -Command argument, no split path"
+    literal = command[3].split(" -LiteralPath ", 1)[1]
+    assert literal.startswith("'") and literal.endswith("'")
+    assert literal.count("'") % 2 == 0, "every inner quote is doubled"
+    assert str(folder).replace("'", "''") in literal
+
+
+def test_a_program_files_x86_client_is_granted(tmp_path: Path) -> None:
+    """T888 item 1 (Claude #1): the folder is no longer refused before the prompt is built.
+
+    `Program Files (x86)` was refused because `cmd.exe` would reparse the `(`, and that
+    is FFXI's default install folder: the player's first Play could never grant it.
+    """
+    client = _client(tmp_path / "Program Files (x86)")
     asked: list[list[list[str]]] = []
 
-    def ran(*_a: object) -> subprocess.CompletedProcess[str]:
-        raise AssertionError("nothing should run for a folder cmd.exe would reparse")
+    def batch(cmds: list[list[str]]) -> None:
+        asked.append([list(c) for c in cmds])
+        return None
 
-    report = grant(
+    grant(
         FFXI,
         client,
         os_name="windows",
         user_sid=lambda: SID,
-        batch=lambda cmds: asked.append(cmds),  # type: ignore[arg-type,return-value]
-        run=ran,  # type: ignore[arg-type]
+        batch=batch,
+        run=lambda argv: subprocess.CompletedProcess(argv, 1, "", ""),
     )
-    assert not report.ok and asked == []
-    assert "&" in report.problems[0] and "rename the client folder" in report.problems[0].lower()
-    with pytest.raises(UnsafeClientFolder, match="&"):
-        grant_commands([client / "USER"], SID)
+    assert asked, "the prompt was built"
+    first = asked[0][0]
+    assert first[:3] == ["powershell.exe", "-NoProfile", "-Command"]
+    assert "Program Files (x86)" in first[3]
 
 
-def test_the_admin_batch_wraps_nothing_for_an_administrator() -> None:
-    assert platform.elevated_admin_batch([["icacls", "C:\\x"]], is_admin=True) is None
-    assert platform.elevated_admin_batch([], is_admin=False) is None
+def test_the_admin_batch_refuses_a_powershell_command_that_is_not_the_folder_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T888 item 1: `powershell.exe` is in the list for ONE form, matched whole."""
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    for refused in (
+        ["powershell.exe", "-NoProfile", "-Command", "Remove-Item C:\\x"],
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "New-Item -ItemType Directory -Force -LiteralPath 'C:\\x'; Remove-Item C:\\y",
+        ],
+        ["powershell.exe", "-Command", "New-Item -ItemType Directory -Force -LiteralPath 'C:\\x'"],
+        ["cmd", "/c", "mkdir", "C:\\Program Files\\FFXI\\USER"],
+        ["cmd", "/c", "whoami"],
+        ["cmd", "/c", "del", "C:\\x"],
+        ["cmd", "/c", "ipconfig", "/all"],
+    ):
+        with pytest.raises(ValueError, match="exact "):
+            platform.elevated_admin_batch([refused], is_admin=False)
