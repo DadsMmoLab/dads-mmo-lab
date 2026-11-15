@@ -242,7 +242,7 @@ def _trust(
     commands = missing_commands(ca, portal, seams=s)
     if stale_live:
         commands[:0] = [["certutil", "-delstore", "Root", thumb] for thumb in stale_live]
-        if not any(command[:2] == ["ipconfig", "/flushdns"] for command in commands[1:]):
+        if ["cmd", "/c", "ipconfig", "/flushdns"] not in commands:
             commands.append(["cmd", "/c", "ipconfig", "/flushdns"])
     thumb = thumbprint(ca)
     if not commands:
