@@ -36,6 +36,7 @@ _TAG_OCTET_STRING = 0x04
 _TAG_SEQUENCE = 0x30
 _TAG_EXTENSIONS = 0xA3
 _TAG_PERMITTED = 0xA0
+_TAG_EXCLUDED = 0xA1
 _TAG_DNS_NAME = 0x82
 """`GeneralName`'s dNSName: context-specific tag 2, primitive."""
 
@@ -95,6 +96,20 @@ def _length(data: bytes, at: int) -> tuple[int, int]:
     return int.from_bytes(data[at : at + count], "big"), at + count
 
 
+def _only(data: bytes) -> Tlv:
+    """The one value `data` holds, whole: bytes after it are refused, not skipped.
+
+    DER's whole point is that a reader knows where every value ends. A certificate that
+    carries something after a value it names -- one more byte after the outer sequence, an
+    extra field after a name constraint -- is not the certificate this app read, and a
+    Windows client may well read the part this reader did not.
+    """
+    value, end = _read(data, 0)
+    if end != len(data):
+        raise CertificateError("it has bytes after a value")
+    return value
+
+
 def _items(body: bytes) -> tuple[Tlv, ...]:
     """Every value inside `body`, in order. Refuses a truncated or overlong one."""
     found: list[Tlv] = []
@@ -125,7 +140,7 @@ def extensions(der: bytes) -> dict[str, Extension]:
     Walks `Certificate` -> `TBSCertificate` and takes the `[3] extensions` element where it
     is; a certificate with none answers an empty mapping.
     """
-    certificate, _ = _read(der, 0)
+    certificate = _only(der)
     if certificate.tag != _TAG_SEQUENCE:
         raise CertificateError("it does not start with a certificate's sequence")
     parts = certificate.items()
@@ -135,11 +150,17 @@ def extensions(der: bytes) -> dict[str, Extension]:
     for field in parts[0].items():
         if field.tag != _TAG_EXTENSIONS:
             continue
-        wrapper, _ = _read(field.body, 0)
+        wrapper = _only(field.body)
         if wrapper.tag != _TAG_SEQUENCE:
             raise CertificateError("its extensions are not a sequence")
         for entry in wrapper.items():
-            found[_extension(entry).oid] = _extension(entry)
+            extension = _extension(entry)
+            if extension.oid in found:
+                raise CertificateError(
+                    f"it repeats the extension {extension.oid}: a client may read the first "
+                    "one where this app would read the second"
+                )
+            found[extension.oid] = extension
     return found
 
 
@@ -164,7 +185,7 @@ def _extension(entry: Tlv) -> Extension:
 
 def is_certificate_authority(extension: Extension) -> bool:
     """`basicConstraints`'s `cA` flag: True only when it is present and not FALSE."""
-    sequence, _ = _read(extension.value, 0)
+    sequence = _only(extension.value)
     if sequence.tag != _TAG_SEQUENCE:
         raise CertificateError("basicConstraints is not a sequence")
     parts = sequence.items()
@@ -172,24 +193,35 @@ def is_certificate_authority(extension: Extension) -> bool:
 
 
 def permitted_dns_names(extension: Extension) -> tuple[str, ...]:
-    """Every `dNSName` under `nameConstraints`'s permittedSubtrees, in the order given.
+    """The `dNSName`s `nameConstraints` permits; every other shape is refused.
 
-    `minimum`/`maximum` distances are ignored: this app only asks which names the CA may
-    vouch for, and a subtree with a distance bound is still a subtree over that name.
+    Exactly one `[0] permittedSubtrees` (no `[1] excludedSubtrees`, nothing beside it),
+    holding only `dNSName` subtrees with no `minimum`/`maximum` distance. Refused rather
+    than ignored: RFC 5280 says a name constraint this reader does not understand must
+    fail closed, and this CA is trusted BECAUSE of this extension (T888). A subtree with a
+    distance bound, or a permitted IP/URI/other name, is a wider CA than the one sentence
+    this app promises the player.
     """
-    sequence, _ = _read(extension.value, 0)
+    sequence = _only(extension.value)
     if sequence.tag != _TAG_SEQUENCE:
         raise CertificateError("nameConstraints is not a sequence")
+    fields = sequence.items()
+    if any(field.tag == _TAG_EXCLUDED for field in fields):
+        raise CertificateError("it excludes names as well as permitting them")
+    if len(fields) != 1 or fields[0].tag != _TAG_PERMITTED:
+        raise CertificateError("its name constraint is not one permittedSubtrees")
     names: list[str] = []
-    for field in sequence.items():
-        if field.tag != _TAG_PERMITTED:
-            continue
-        # `[0]` is IMPLICIT (RFC 5280's module): its contents ARE GeneralSubtrees, so the
-        # values in it are the `GeneralSubtree` sequences, each holding its `base` first.
-        for subtree in _items(field.body):
-            parts = subtree.items()
-            if parts and parts[0].tag == _TAG_DNS_NAME:
-                names.append(parts[0].body.decode("ascii", "replace"))
+    # `[0]` is IMPLICIT (RFC 5280's module): its contents ARE GeneralSubtrees, so the
+    # values in it are the `GeneralSubtree` sequences, each holding its `base` first.
+    for subtree in _items(fields[0].body):
+        if subtree.tag != _TAG_SEQUENCE:
+            raise CertificateError("a permitted subtree is not a sequence")
+        parts = subtree.items()
+        if not parts or parts[0].tag != _TAG_DNS_NAME:
+            raise CertificateError("it permits a name that is not a DNS name")
+        if len(parts) != 1:
+            raise CertificateError("a permitted subtree carries a distance field")
+        names.append(parts[0].body.decode("ascii", "replace"))
     return tuple(names)
 
 
