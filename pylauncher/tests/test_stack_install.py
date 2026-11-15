@@ -9,6 +9,8 @@ ready wait over several containers.
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -267,6 +269,18 @@ def test_the_passwords_are_generated_once_and_never_rewritten(tmp_path: Path) ->
         assert value is not None and len(value) == 48
     _run(_engine(daemon), server_dir)
     assert (server_dir / ".env").read_text(encoding="utf-8") == first
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the POSIX mode is a no-op on Windows")
+def test_the_env_holding_the_passwords_is_owner_only(tmp_path: Path) -> None:
+    """The stack's `.env` carries the database passwords, so it is written private (T127's rule)."""
+    server_dir = tmp_path / "ffxi"
+    old = os.umask(0o022)
+    try:
+        _run(_engine(Daemon()), server_dir)
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((server_dir / ".env").stat().st_mode) == 0o600
 
 
 def test_a_dotenv_missing_one_password_gets_it_added_and_keeps_its_lines(tmp_path: Path) -> None:
