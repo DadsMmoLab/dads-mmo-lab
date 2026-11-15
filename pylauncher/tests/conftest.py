@@ -636,7 +636,9 @@ def _each_test_starts_with_no_unread_container_on_file(monkeypatch: pytest.Monke
 
 
 @pytest.fixture(autouse=True)
-def _engine_switch_never_leaks_between_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+def _engine_switch_never_leaks_between_tests(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A developer shell with `YULON_ENGINE=podman` must not redden golden tests (T887r2).
 
     Clears the switch and any ambient `DOCKER_HOST` and resets the cached answer
@@ -645,11 +647,14 @@ def _engine_switch_never_leaks_between_tests(monkeypatch: pytest.MonkeyPatch) ->
     `monkeypatch` tracking, so without the `DOCKER_HOST` clear one test's socket
     export would answer `resolve()` for every later test. `monkeypatch` restores
     the shell's values afterwards; `_reset_for_tests` forgets the cache on both sides.
+    Integration tests reach the real daemon through `DOCKER_HOST`, so it is left
+    alone for them (T887r3).
     """
     from yulon import engine
 
     monkeypatch.delenv("YULON_ENGINE", raising=False)
-    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    if request.node.get_closest_marker("integration") is None:
+        monkeypatch.delenv("DOCKER_HOST", raising=False)
     engine._reset_for_tests()
 
 
