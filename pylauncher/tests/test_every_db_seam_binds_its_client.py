@@ -67,7 +67,7 @@ over somebody's populated server, and the original audit did not look at it.
 
 PACKAGE = Path(__file__).resolve().parent.parent / "yulon"
 
-EXPECTED_SITES = 22
+EXPECTED_SITES = 23
 """Exactly how many seam constructions exist today.
 
 19 since T179 Task 5: `controller_wow_centurion.accounts.sql_for` and
@@ -79,6 +79,8 @@ which passes the entry's client like `import_gate_for()` beside it.
 21 since T755 round 2: `catalog.installer.install_import_state`, the `MarkerGate` Start asks
 whether a CMaNGOS or Centurion install whose record lacks `import` was imported, passing
 `install.native.db.client` like the install's own import stage.
+23 since T887: `ui.controller_view._refusing_mysql`, the engine guard's refusing copy of a
+remembered server's `DockerMysql`, which passes the original's own client.
 
 A floor would let a site vanish without a word -- which is the failure this
 whole file is about. If you add or remove a seam, this number moves in the same
