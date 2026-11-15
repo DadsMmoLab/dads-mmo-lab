@@ -24,6 +24,7 @@ from yulon.catalog import composegen, native, stack_install
 from yulon.catalog.catalog import SingleEntry, load_catalog
 from yulon.catalog.installer import InstallerError, InstallOptions, InstallStopped
 from yulon.catalog.stack_install import (
+    CERTIFICATES_COMMAND,
     CERTIFICATES_SERVICE,
     SEED_PROFILE,
     STACK_TEMPLATES,
@@ -373,11 +374,41 @@ def test_remaking_a_pre_t888_install_renders_the_certificates_service_first(
     monkeypatch.setattr(docker, "compose_run_once", run_once)
     stack_install.remake_certificates(FOREVER, server_dir)
     assert ran == [
-        (server_dir, CERTIFICATES_SERVICE, ("--force",), True)
+        (server_dir, CERTIFICATES_SERVICE, (*CERTIFICATES_COMMAND, "--force"), True)
     ], "the service is in the compose file before the run that names it"
     base = (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8")
     assert "certificates:" in base and "./certs-yulon.sh:/yulon-certs.sh:ro" in base
     assert (server_dir / "certs-yulon.sh").is_file(), "the script the service runs is copied"
+
+
+def test_the_forced_certificate_run_repeats_the_commands_whole_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T888 round 3 H1: `compose run` REPLACES the service's command, it does not append.
+
+    Passing `--force` alone made the container's command `--force`, so `certs-yulon.sh`
+    never ran and every remake failed. The forced run has to spell the command the
+    template rendered, with the flag on the end.
+    """
+    import yaml
+
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    StackInstaller(FOREVER).write_compose(server_dir)
+    base = yaml.safe_load((server_dir / composegen.BASE_FILE).read_text(encoding="utf-8"))
+    command = base["services"][CERTIFICATES_SERVICE]["command"]
+    assert isinstance(command, list) and command, "the service names a command to repeat"
+    ran: list[tuple[str, ...]] = []
+
+    def run_once(
+        _where: Path, _service: str, *, command: Sequence[str] = (), **_: Any
+    ) -> docker.AttachedRun:
+        ran.append(tuple(command))
+        return docker.AttachedRun(0)
+
+    monkeypatch.setattr(docker, "compose_run_once", run_once)
+    stack_install.make_certificates(server_dir, force=True)
+    assert ran == [(*command, "--force")], "the forced run repeats the whole command"
 
 
 def test_a_compose_file_someone_else_wrote_is_left_alone(tmp_path: Path) -> None:
