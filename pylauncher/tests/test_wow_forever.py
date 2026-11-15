@@ -67,7 +67,7 @@ def test_wow_forever_is_a_forevercore_stack_with_its_tdb_its_client_extract_and_
     assert FOREVER.host_ports() == (1119, 8082, 8085)
 
 
-def test_forever_runs_the_two_extra_stages_and_ffxi_does_not() -> None:
+def test_forever_runs_its_extra_stages_and_ffxi_does_not() -> None:
     assert stages_of(STACK) == (
         "fetch-loader",
         "fetch-downloads",
@@ -76,11 +76,13 @@ def test_forever_runs_the_two_extra_stages_and_ffxi_does_not() -> None:
         "pull-images",
         "seed-volumes",
         "extract-client",
+        "certificates",
         "up",
         "ready",
     )
     ffxi = stack_of(CATALOG.get_single("ffxi"))
-    assert "fetch-downloads" not in stages_of(ffxi) and "extract-client" not in stages_of(ffxi)
+    for stage in ("fetch-downloads", "extract-client", "certificates"):
+        assert stage not in stages_of(ffxi)
 
 
 def _play(**changes: Any) -> dict[str, Any]:
@@ -228,7 +230,9 @@ def test_an_install_fetches_the_tdb_and_extracts_from_the_client_read_only(
         stages_of(STACK)
     )
     assert (server_dir / "downloads" / "TDB_full_forever_2026_10_14.7z").read_bytes() == TDB
-    assert daemon.runs == [("extract", ("seed",), (f"{client}:/client:ro",))]
+    assert [run for run in daemon.runs if run[0] == "extract"] == [
+        ("extract", ("seed",), (f"{client}:/client:ro",))
+    ]
     for name, _template in STACK_TEMPLATES:
         text = (server_dir / name).read_text(encoding="utf-8")
         assert "{{" not in text
@@ -236,6 +240,25 @@ def test_an_install_fetches_the_tdb_and_extracts_from_the_client_read_only(
     base = (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8")
     assert (server_dir / "sql" / HOTFIX_UPDATE).read_bytes() == SHIPPED_UPDATE.read_bytes()
     assert f"./sql/{HOTFIX_UPDATE}:/opt/forever/src/sql/custom/hotfixes/{HOTFIX_UPDATE}:ro" in base
+
+
+def test_the_install_makes_yu_lons_own_certificates_before_the_first_start(
+    tmp_path: Path,
+) -> None:
+    """T888 item 1a: the CA is constrained to the login name alone, and its key never lands
+    in the player's certs folder. The engine runs Yu'lon's script in the stack's image."""
+    daemon = Daemon()
+    server_dir = tmp_path / "forever"
+    out = _install(daemon, server_dir, _client(tmp_path))
+    assert ("certificates", ("seed",), ()) in daemon.runs
+    steps = [line.rsplit(": ", 1)[-1] for line in out if line.startswith("Step ")]
+    assert steps.index("certificates") == steps.index("up") - 1
+    base = (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8")
+    assert "./certs:/srv/certs" in base and "./certs-yulon.sh:/yulon-certs.sh:ro" in base
+    script = (server_dir / "certs-yulon.sh").read_text(encoding="utf-8")
+    assert "nameConstraints = critical,permitted;DNS:trinity.actual.battle.net" in script
+    assert 'cp "$T/ca.key"' not in script, "the CA key never reaches the player's folder"
+    assert '"$T/ca.pem" "$T/server.pem" "$T/chain.pem" "$C/"' in script
 
 
 HOTFIX_UPDATE = "2026_11_14_00_hotfixes_yulon_spell_x_spell_visual.sql"
@@ -410,6 +433,25 @@ def test_the_watch_gives_up_when_the_game_never_starts() -> None:
 # -- forever_trust -------------------------------------------------------------------
 
 
+NARROW_CA = Path(__file__).parent / "data" / "forever-certs" / "narrow-critical.pem"
+BROAD_CA = Path(__file__).parent / "data" / "forever-certs" / "broad.pem"
+
+
+def _server_with_certs(tmp_path: Path) -> Path:
+    """A server folder whose install already made the CA Yu'lon's own script makes."""
+    server = tmp_path / "server"
+    (server / "certs").mkdir(parents=True)
+    (server / "certs" / "ca.pem").write_bytes(NARROW_CA.read_bytes())
+    return server
+
+
+def _narrow_ca(tmp_path: Path) -> Path:
+    """The CA Yu'lon's own script makes: CA:TRUE, critical name constraint, one dNSName."""
+    path = tmp_path / "ca.pem"
+    path.write_bytes(NARROW_CA.read_bytes())
+    return path
+
+
 def _ca(tmp_path: Path, der: bytes = b"pretend certificate") -> Path:
     path = tmp_path / "ca.pem"
     body = base64.b64encode(der).decode()
@@ -459,10 +501,12 @@ def test_nothing_is_asked_when_the_ca_is_trusted_and_hosts_maps_the_portal(
         tmp_path, trusted=True, hosts_text="127.0.0.1 trinity.actual.battle.net\n"
     )
     assert (
-        forever_trust.missing_commands(_ca(tmp_path), "trinity.actual.battle.net", seams=seams)
+        forever_trust.missing_commands(
+            _narrow_ca(tmp_path), "trinity.actual.battle.net", seams=seams
+        )
         == []
     )
-    assert not forever_trust.ensure(_ca(tmp_path), "trinity.actual.battle.net", seams=seams)
+    assert not forever_trust.ensure(_narrow_ca(tmp_path), "trinity.actual.battle.net", seams=seams)
     assert all(argv[:2] == ["certutil", "-store"] for argv in ran)
 
 
@@ -479,7 +523,55 @@ def test_what_is_missing_goes_behind_one_prompt_and_no_says_so(tmp_path: Path) -
         tmp_path, trusted=False, hosts_text="", batch=batch, rc=platform.UAC_DECLINED
     )
     with pytest.raises(forever_trust.TrustError, match="said No"):
-        forever_trust.ensure(_ca(tmp_path), "trinity.actual.battle.net", seams=seams)
+        forever_trust.ensure(_narrow_ca(tmp_path), "trinity.actual.battle.net", seams=seams)
+
+
+def test_a_ca_wider_than_this_server_is_refused_before_a_prompt(tmp_path: Path) -> None:
+    """T888 item 1b: the old `actual.battle.net` CA also covers Blizzard's real login hosts."""
+    batched: list[list[list[str]]] = []
+    seams, ran = _trust_seams(
+        tmp_path,
+        trusted=False,
+        hosts_text="",
+        batch=lambda commands: batched.append(commands),  # type: ignore[arg-type,return-value]
+    )
+    ca = tmp_path / "ca.pem"
+    ca.write_bytes(BROAD_CA.read_bytes())
+    with pytest.raises(forever_trust.TrustError) as raised:
+        forever_trust.ensure(ca, "trinity.actual.battle.net", seams=seams)
+    assert str(raised.value) == forever_trust.UNCHECKED
+    assert batched == [] and ran == [], "nothing runs, and no prompt is raised"
+    with pytest.raises(forever_trust.TrustError, match="could not be checked"):
+        forever_trust.verified_ca(_ca(tmp_path), "trinity.actual.battle.net")
+
+
+def test_the_trust_step_installs_the_checked_copy_not_the_players_file(tmp_path: Path) -> None:
+    """T888 item 1b: ca.pem is in a writable folder and can be swapped while UAC is open."""
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 trinity.actual.battle.net # yulon-wow-forever\n")
+    installed: list[str] = []
+    trusted = [False]
+
+    def batch(commands: list[list[str]]) -> tuple[list[str], Path]:
+        installed.extend(c[4] for c in commands if c[:2] == ["certutil", "-addstore"])
+        trusted[0] = True  # what the elevated `certutil -addstore` does to the store
+        results = tmp_path / "results.json"
+        results.write_text('[{"rc": 0, "out": ""}, {"rc": 0, "out": ""}]')
+        return (["powershell.exe", "elevated"], results)
+
+    def run(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["certutil", "-store"]:
+            return subprocess.CompletedProcess(argv, 0 if trusted[0] else 1, "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    seams = forever_trust.TrustSeams(
+        run=run, batch=batch, hosts=lambda: hosts, os_name=lambda: "windows"
+    )
+    ca = _narrow_ca(tmp_path)
+    forever_trust.ensure(ca, "trinity.actual.battle.net", seams=seams)
+    assert len(installed) == 1
+    assert installed[0] != str(ca) and Path(installed[0]).name.startswith("yulon-ca-")
+    assert not Path(installed[0]).exists(), "the checked copy is gone once it is trusted"
 
 
 def test_the_hosts_append_quotes_the_file_and_the_removal_survives_an_empty_one() -> None:
@@ -717,8 +809,14 @@ def test_the_config_sets_the_portal_and_account_and_keeps_the_players_lines(
 
 
 def _play_seams(calls: list[str], *, world: str = "running") -> forever_play.PlaySeams:
-    def trust(ca: Path, portal: str, *, record: Callable[[str], None] | None = None) -> bool:
-        calls.append(f"trust {ca.name} {portal}")
+    def trust(
+        ca: Path,
+        portal: str,
+        *,
+        record: Callable[[str], None] | None = None,
+        stale: str | None = None,
+    ) -> bool:
+        calls.append(f"trust {ca.name} {portal}" + (f" after {stale}" if stale else ""))
         if record is not None:
             record("AB12CD34")
         return True
@@ -737,6 +835,7 @@ def _play_seams(calls: list[str], *, world: str = "running") -> forever_play.Pla
         account=account,
         start_client=start,
         watch=lambda exe, key, group: calls.append(f"watch {exe.name} {group}"),
+        restart_service=lambda _where, service, **_kw: calls.append(f"restart {service}"),
     )
 
 
@@ -746,7 +845,7 @@ def test_play_trusts_makes_the_account_writes_the_config_starts_and_watches(
     calls: list[str] = []
     client = _client(tmp_path)
     played = forever_play.play(
-        FOREVER, tmp_path / "server", client, os_name="windows", seams=_play_seams(calls)
+        FOREVER, _server_with_certs(tmp_path), client, os_name="windows", seams=_play_seams(calls)
     )
     assert calls == [
         "trust ca.pem trinity.actual.battle.net",
@@ -770,7 +869,7 @@ def test_windows_play_records_the_thumbprint_of_the_ca_it_trusted(tmp_path: Path
         }
     )
     forever_play.play(
-        FOREVER, tmp_path / "server", _client(tmp_path), os_name="windows", seams=seams
+        FOREVER, _server_with_certs(tmp_path), _client(tmp_path), os_name="windows", seams=seams
     )
     assert recorded == ["AB12CD34"]
     assert calls[0] == "trust ca.pem trinity.actual.battle.net"
@@ -797,6 +896,100 @@ def test_removing_a_forever_server_takes_its_trust_with_it(tmp_path: Path) -> No
         == ()
     )
     assert batched[0][0] == ["certutil", "-delstore", "Root", "AB12CD34"]
+
+
+def test_play_remakes_the_image_ca_and_the_key_it_left_before_it_trusts(
+    tmp_path: Path,
+) -> None:
+    """T888 item 1c: the old broad CA and `certs/ca.key` are replaced in place, before trust.
+
+    The image's `certs.sh` constrained its CA to all of `actual.battle.net` and left the CA
+    key in the install folder. Play deletes all five files, makes them again with Yu'lon's
+    script, restarts the login and world services that were running, and hands the old
+    thumbprint to the trust step so the old root leaves the store in the same prompt.
+    """
+    server = tmp_path / "server"
+    (server / "certs").mkdir(parents=True)
+    (server / "certs" / "ca.key").write_bytes(b"the image's key")
+    (server / "certs" / "ca.pem").write_bytes(BROAD_CA.read_bytes())
+    old = forever_trust.thumbprint(server / "certs" / "ca.pem")
+    calls: list[str] = []
+    made: list[Path] = []
+
+    def remake(where: Path) -> None:
+        made.append(where)
+        (where / "certs" / "ca.pem").write_bytes(NARROW_CA.read_bytes())
+
+    def restart(where: Path, service: str, **_kw: Any) -> None:
+        calls.append(f"restart {service}")
+
+    seams = forever_play.PlaySeams(
+        **{
+            **_play_seams(calls).__dict__,
+            "remake_certificates": remake,
+            "restart_service": restart,
+        }
+    )
+    forever_play.play(FOREVER, server, _client(tmp_path), os_name="windows", seams=seams)
+    assert made == [server]
+    assert not (server / "certs" / "ca.key").exists()
+    assert sorted((server / "certs").iterdir()) == [server / "certs" / "ca.pem"]
+    assert calls[:3] == [
+        "restart bnet",
+        "restart world",
+        f"trust ca.pem trinity.actual.battle.net after {old}",
+    ]
+
+
+def test_play_remakes_a_broad_ca_but_restarts_nothing_that_was_stopped(
+    tmp_path: Path,
+) -> None:
+    """Only a service that was running is restarted: a stopped stack stays stopped."""
+    server = tmp_path / "server"
+    (server / "certs").mkdir(parents=True)
+    (server / "certs" / "ca.pem").write_bytes(BROAD_CA.read_bytes())
+    calls: list[str] = []
+
+    def remake(where: Path) -> None:
+        (where / "certs" / "ca.pem").write_bytes(NARROW_CA.read_bytes())
+
+    def state_of(container: str) -> docker.ContainerState:
+        running = container.endswith("-world")
+        return docker.ContainerState(status="running" if running else "exited")
+
+    seams = forever_play.PlaySeams(
+        **{
+            **_play_seams(calls).__dict__,
+            "state_of": state_of,
+            "remake_certificates": remake,
+            "restart_service": lambda _where, service, **_kw: calls.append(f"restart {service}"),
+        }
+    )
+    forever_play.play(FOREVER, server, _client(tmp_path), os_name="windows", seams=seams)
+    assert [c for c in calls if c.startswith("restart")] == ["restart world"]
+
+
+def test_a_ca_the_key_it_left_beside_it_is_remade_even_when_it_passes_the_check(
+    tmp_path: Path,
+) -> None:
+    """T888 item 1c: `certs/ca.key` alone is reason enough -- a CA key anyone can read.
+
+    The certificate itself is the narrow one Yu'lon would make, so nothing but the key's
+    presence can be the reason; removing that rule leaves this file's CA trusted as it is.
+    """
+    server = _server_with_certs(tmp_path)
+    (server / "certs" / "ca.key").write_bytes(b"the image's key")
+    calls: list[str] = []
+    made: list[Path] = []
+
+    def remake(where: Path) -> None:
+        made.append(where)
+        (where / "certs" / "ca.pem").write_bytes(NARROW_CA.read_bytes())
+
+    seams = forever_play.PlaySeams(**{**_play_seams(calls).__dict__, "remake_certificates": remake})
+    forever_play.play(FOREVER, server, _client(tmp_path), os_name="windows", seams=seams)
+    assert made == [server]
+    assert not (server / "certs" / "ca.key").exists()
 
 
 def test_play_refuses_a_stopped_server_another_os_and_another_client(tmp_path: Path) -> None:

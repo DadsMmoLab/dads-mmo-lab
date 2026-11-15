@@ -305,9 +305,16 @@ def prepare(
     client_dir: Path,
     ca: Path,
     say: Callable[[str], None],
+    *,
+    portal: str,
     seams: ProtonSeams | None = None,
 ) -> Runtime:
-    """Runtime, Proton, prefix, Windows Python and the trusted CA. Raises ProtonError."""
+    """Runtime, Proton, prefix, Windows Python and the trusted CA. Raises ProtonError.
+
+    The CA is checked first (`forever_trust.verified_ca`): a prefix is a trust store too,
+    and a CA that may vouch for any name must not go into one. Raises `TrustError` for
+    that, before anything is written into the prefix.
+    """
     s = seams if seams is not None else ProtonSeams()
     home = s.home()
     slr = find_slr(home)
@@ -323,7 +330,11 @@ def prepare(
         _run(runtime, "C:\\windows\\system32\\cmd.exe", ["/c", "exit", "0"], s, timeout=600)
         if not (prefix / "pfx" / "drive_c" / "windows").is_dir():
             raise ProtonError(f"Proton did not make its prefix in {prefix}.")
-    trust_ca(runtime, ca, server_dir, say, s)
+    checked = forever_trust.verified_ca(ca, portal)
+    try:
+        trust_ca(runtime, checked, server_dir, say, s)
+    finally:
+        checked.unlink(missing_ok=True)
     return runtime
 
 
