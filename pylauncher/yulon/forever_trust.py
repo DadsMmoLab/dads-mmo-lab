@@ -146,7 +146,12 @@ def thumbprint(ca: Path) -> str:
     found = _PEM.search(text)
     if found is None:
         raise TrustError(f"{ca} holds no certificate. Start the server once: it makes it.")
-    der = base64.b64decode("".join(found.group(1).split()))
+    try:
+        der = base64.b64decode("".join(found.group(1).split()), validate=True)
+    except ValueError as exc:
+        raise TrustError(
+            f"{ca} holds no readable certificate ({exc}). Start the server once: it makes it."
+        ) from exc
     return hashlib.sha1(der).hexdigest().upper()  # noqa: S324 - Windows names certificates by it
 
 

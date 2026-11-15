@@ -1346,3 +1346,28 @@ def test_the_catalog_json_keeps_wow_forever_last() -> None:
         )
     )
     assert [e["id"] for e in raw["single"]][-1] == "wow-forever"
+
+
+def test_a_certificate_whose_body_is_not_base64_raises_rather_than_guessing(
+    tmp_path: Path,
+) -> None:
+    """T888 item 6 (Gemini #2): a PEM with junk in it is not a certificate, and says so.
+
+    `base64.b64decode` without `validate` silently drops every character outside its
+    alphabet, so `!!!` became a thumbprint of the empty string and Play then asked the
+    store to delete -- or add -- a root no certificate ever had.
+    """
+    ca = tmp_path / "ca.pem"
+    for body in ("!!! not base64 !!!", "AAAA?", "AAAA===="):
+        ca.write_text(
+            f"-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----\n", encoding="ascii"
+        )
+        with pytest.raises(forever_trust.TrustError, match="no readable certificate"):
+            forever_trust.thumbprint(ca)
+
+
+def test_a_thumbprint_of_a_sound_pem_is_the_sha1_of_its_der(tmp_path: Path) -> None:
+    ca = _ca(tmp_path)
+    assert (
+        forever_trust.thumbprint(ca) == hashlib.sha1(b"pretend certificate").hexdigest().upper()
+    )  # noqa: S324
