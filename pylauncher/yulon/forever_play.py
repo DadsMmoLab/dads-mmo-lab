@@ -58,6 +58,8 @@ class PlaySeams:
 
     state_of: Callable[[str], docker.ContainerState] = docker.container_state
     trust: Callable[..., bool] = forever_trust.ensure
+    remember_trust: Callable[[str], None] | None = None
+    """Where the trusted CA's thumbprint is recorded (`state.KnownInstall`), for removal."""
     account: Callable[..., tuple[str, str]] = forever_account.ensure
     start_client: Callable[[play_launch.LaunchSpec], bool] = single_play.start
     watch: Callable[..., object] = forever_key.start_watch
@@ -141,7 +143,7 @@ def play(
         )
     if os_name == "windows":
         try:
-            asked = s.trust(server_dir / login.ca, login.portal)
+            asked = s.trust(server_dir / login.ca, login.portal, record=s.remember_trust)
         except forever_trust.TrustError as exc:
             raise single_play.PlayRefusal(str(exc)) from exc
     else:
@@ -176,6 +178,29 @@ def play(
         s.keywatch(key, login.region_group, world_port(entry))
     logger.info(f"started {exe} for {account}")
     return Played(account=forever_account.typed_name(login), password=password, asked_admin=asked)
+
+
+def remove_trust(
+    entry: SingleEntry,
+    server_dir: Path,
+    *,
+    thumbprint: str | None = None,
+    seams: forever_trust.TrustSeams | None = None,
+) -> tuple[str, ...]:
+    """Take this install's login trust off the computer; the comments left for Details.
+
+    The CA's thumbprint comes from the install record when there is one, so this works
+    after the certs folder (and the certificate) is gone; `certs/ca.pem` is the fallback
+    for an install recorded before the thumbprint was kept. Nothing here raises: the
+    caller is dropping a record, and a refused prompt must not keep a server the player
+    asked to remove.
+    """
+    login = login_of(entry)
+    try:
+        return forever_trust.remove(ca=server_dir / login.ca, thumb=thumbprint, seams=seams)
+    except OSError as exc:
+        logger.warning(f"could not take {entry.name}'s trust off this computer: {exc}")
+        return ()
 
 
 def login_text(entry: SingleEntry, played: Played) -> str:
