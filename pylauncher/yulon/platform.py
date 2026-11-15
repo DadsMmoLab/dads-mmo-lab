@@ -570,15 +570,77 @@ def elevated_batch(
     return _elevated_script(commands, "yulon-netsh-")
 
 
-ADMIN_BATCH_PROGRAMS: tuple[str, ...] = ("icacls", "cmd", "certutil")
+ADMIN_BATCH_PROGRAMS: tuple[str, ...] = ("icacls", "certutil")
 """The programs `elevated_admin_batch()` will run behind its one prompt, and no others.
 
-`icacls` grants a folder to the player; `cmd` is there for `cmd /c mkdir`, which makes
-a folder under Program Files the grant then applies to, and for WoW Forever's hosts line;
-`certutil -addstore Root` trusts a WoW Forever install's own name-constrained CA
-(`forever_trust.py`). A short list on purpose: an elevated batch is a place where a
-wrong argv does the most harm.
+`icacls` grants a folder to the player; `certutil -addstore Root` trusts a WoW Forever
+install's own name-constrained CA and `-delstore` takes it out again (`forever_trust.py`).
+A short list on purpose: an elevated batch is a place where a wrong argv does the most
+harm.
+
+`cmd` is deliberately NOT in it. It was, "for `cmd /c mkdir` and the hosts line", and a
+bare entry means ANY `cmd /c …` runs elevated: a client folder named `C:\\a&b` became
+`mkdir C:\\a & b`, with `b` run as Administrator. Its few exact forms Yu'lon itself
+writes are matched whole instead (`_cmd_form_allowed()`), and every variable part of them
+is refused if it holds a character `cmd.exe` reparses.
 """
+
+SHELL_METACHARACTERS = '&|<>^%!()"'
+"""The characters `cmd.exe` reads as more than themselves: `&` splits commands, `>` writes files."""
+
+
+def shell_metacharacter(text: str) -> str | None:
+    """The first character of `text` that `cmd.exe` would reparse, or None.
+
+    A path or a host name that holds one is not one argument to `cmd.exe`, whatever
+    quoting was used above it: `cmd /c` joins its arguments back into a command line and
+    parses that again.
+    """
+    for char in SHELL_METACHARACTERS:
+        if char in text:
+            return char
+    return None
+
+
+_CMD_HOSTS_APPEND = re.compile(
+    r'^\(echo\.& echo 127\.0\.0\.1 [A-Za-z0-9.-]+ #[A-Za-z0-9_-]+\)>>"[^"&|<>^%!()]+"$'
+)
+r"""`forever_trust.missing_commands()`'s hosts append: the loopback line, then the quoted file."""
+
+_CMD_HOSTS_STRIP = re.compile(
+    r'^\(findstr /v /c:"[^"&|<>^%!()]+" "[^"&|<>^%!()]+" > "'
+    r'[^"&|<>^%!()]+\.yulon" \|\| type nul > "[^"&|<>^%!()]+\.yulon"\) && move /y "'
+    r'[^"&|<>^%!()]+\.yulon" "[^"&|<>^%!()]+"$'
+)
+r"""`forever_trust.remove_commands()`'s tagged-line removal, empty hosts file included."""
+
+_CMD_FLUSH_DNS: tuple[str, ...] = ("ipconfig", "/flushdns")
+"""The one other command: Windows' own resolver flush after a hosts edit."""
+
+
+def _cmd_form_allowed(argv: Sequence[str]) -> bool:
+    """Whether this `cmd` argv is one of the exact forms Yu'lon itself writes, whole.
+
+    Three of them, each matched in full rather than by its program:
+
+    * `cmd /c mkdir <one folder>` — `single_client.grant_commands()`, which refuses a
+      folder with a `cmd` metacharacter in it before it builds this (`shell_metacharacter`);
+    * the hosts append and the tagged-line strip `forever_trust` builds, whose only
+      variable parts are one host name, one tag and one file path;
+    * `cmd /c ipconfig /flushdns`.
+
+    Anything else is refused, so the elevated prompt cannot be handed a command line
+    somebody else composed (`cmd /c whoami`, a path that closes the quote and appends).
+    """
+    if argv[:2] != ["cmd", "/c"]:
+        return False
+    if len(argv) == 4 and argv[2] == "mkdir":
+        return bool(argv[3])
+    if tuple(argv[2:]) == _CMD_FLUSH_DNS:
+        return len(argv) == 4
+    if len(argv) != 3:
+        return False
+    return bool(_CMD_HOSTS_APPEND.match(argv[2]) or _CMD_HOSTS_STRIP.match(argv[2]))
 
 
 def elevated_admin_batch(
@@ -587,13 +649,18 @@ def elevated_admin_batch(
     """`elevated_batch()` for commands other than netsh: one UAC prompt, every verdict read back.
 
     The same script and the same `read_batch_results()` contract, for the folder
-    grant a client under Program Files needs (`single_client.grant_commands()`). None
-    when nothing needs wrapping (not Windows, already admin, or no commands), and
-    refused (`ValueError`) for a program outside `ADMIN_BATCH_PROGRAMS`.
+    grant a client under Program Files needs (`single_client.grant_commands()`) and for
+    WoW Forever's trust (`forever_trust.py`). None when nothing needs wrapping (not
+    Windows, already admin, or no commands). Refused (`ValueError`) for a program
+    outside `ADMIN_BATCH_PROGRAMS`, and for a `cmd` argv that is not one of the exact
+    forms `_cmd_form_allowed()` names.
     """
     commands = [list(c) for c in cmds]
     for cmd in commands:
-        if cmd[:1] not in ([p] for p in ADMIN_BATCH_PROGRAMS):
+        if cmd[:1] == ["cmd"]:
+            if not _cmd_form_allowed(cmd):
+                raise ValueError(f"an elevated batch runs cmd only in its exact forms, got {cmd}")
+        elif cmd[:1] not in ([p] for p in ADMIN_BATCH_PROGRAMS):
             raise ValueError(f"an elevated batch runs only {ADMIN_BATCH_PROGRAMS}, got {cmd[:1]}")
     if not commands:
         return None

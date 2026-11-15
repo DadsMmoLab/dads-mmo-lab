@@ -18,6 +18,7 @@ from yulon.single_client import (
     GRANT,
     PROBE,
     FoundClient,
+    UnsafeClientFolder,
     client_version,
     describe,
     find_client,
@@ -207,9 +208,56 @@ def test_a_batch_that_did_not_report_hands_the_player_the_commands(tmp_path: Pat
 
 
 @pytest.mark.parametrize("program", ["netsh", "powershell", "del"])
-def test_the_admin_batch_runs_only_icacls_and_cmd(program: str) -> None:
+def test_the_admin_batch_runs_only_icacls_and_certutil(program: str) -> None:
     with pytest.raises(ValueError, match="runs only"):
         platform.elevated_admin_batch([[program, "x"]], is_admin=False)
+
+
+def test_cmd_runs_elevated_only_to_make_one_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T888 item 4: a bare `cmd` entry let ANY `cmd /c ...` run as Administrator.
+
+    `single_client`'s folder grant is the one caller that needs `cmd`, for the mkdir the
+    Program Files grant applies to. Its exact form passes; any other command line does
+    not. (The folder itself is refused one layer up, before the form is built:
+    `test_a_client_folder_cmd_would_reparse_is_refused_with_no_prompt`.)
+    """
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    argv, results = platform.elevated_admin_batch(
+        [["cmd", "/c", "mkdir", "C:\\Program Files\\FFXI\\USER"]], is_admin=False
+    )
+    results.unlink(missing_ok=True)
+    assert argv[:2] == ["powershell.exe", "-NoProfile"]
+    for refused in (
+        ["cmd", "/c", "whoami"],
+        ["cmd", "/c", "mkdir", "C:\\a", "&&", "whoami"],
+        ["cmd", "/c", "del", "C:\\x"],
+        ["cmd", "/c", "ipconfig", "/all"],
+        ["cmd", "/c"],
+    ):
+        with pytest.raises(ValueError, match="exact forms"):
+            platform.elevated_admin_batch([refused], is_admin=False)
+
+
+def test_a_client_folder_cmd_would_reparse_is_refused_with_no_prompt(tmp_path: Path) -> None:
+    """T888 item 4: `C:\\a&b` became `mkdir C:\\a & b`, and `b` ran as Administrator."""
+    client = _client(tmp_path / "a&b")
+    asked: list[list[list[str]]] = []
+
+    def ran(*_a: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("nothing should run for a folder cmd.exe would reparse")
+
+    report = grant(
+        FFXI,
+        client,
+        os_name="windows",
+        user_sid=lambda: SID,
+        batch=lambda cmds: asked.append(cmds),  # type: ignore[arg-type,return-value]
+        run=ran,  # type: ignore[arg-type]
+    )
+    assert not report.ok and asked == []
+    assert "&" in report.problems[0] and "rename the client folder" in report.problems[0].lower()
+    with pytest.raises(UnsafeClientFolder, match="&"):
+        grant_commands([client / "USER"], SID)
 
 
 def test_the_admin_batch_wraps_nothing_for_an_administrator() -> None:
