@@ -33,7 +33,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from yulon import docker, platform, resources, runner
+from yulon import docker, platform, resources, runner, winacl
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import (
     CLIENT_MOUNT,
@@ -640,8 +640,13 @@ class StackInstaller:
                 "the database was created with them."
             )
         lines += [f"{name}='{self._seams.token(SECRET_BYTES)}'" for name in missing]
+        # The database root password is in these lines, so they land the way the other
+        # secret writers land theirs (T127): atomically, 0600 from the first byte, and
+        # under this folder's owner-only DACL on Windows, where the mode is a no-op
+        # (T151/T174). The DACL is applied before the file exists, so it is inherited.
+        winacl.secure_folder(server_dir)
         try:
-            env.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+            platform.write_private_atomically(env, ("\n".join(lines) + "\n").encode("utf-8"))
         except OSError as exc:
             raise InstallerError(f"{env} could not be written: {exc}") from exc
         yield f"Generated {', '.join(missing)} in {composegen.DOTENV_FILE}."
