@@ -112,7 +112,7 @@ wraps the output (AppImage / zip / dmg). PyInstaller cannot cross-compile — ne
 
 ```bash
 pytest              # tests (unit + live-Docker integration; the latter self-skips without a daemon)
-pytest -m "not integration"   # quick loop: mocked unit tests only
+pytest -m "not integration and not slow"   # quick loop: mocked unit tests, slow ones left out
 pytest -m integration tests/integration   # live suite only (needs a reachable Docker daemon)
 mypy yulon main.py  # static types
 ruff check .        # lint
@@ -120,6 +120,8 @@ black --check .     # formatting
 ```
 
 Run `black .` (without `--check`) to auto-format.
+
+What a test must be, and what a fix report carries: [testing.md](testing.md).
 
 ### Integration tests
 
