@@ -766,3 +766,16 @@ def test_ensure_docker_under_podman_never_enters_the_docker_linux_path(
         assert entered == []
     finally:
         engine._reset_for_tests()
+
+
+def test_engine_sentence_answers_none_when_the_record_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unreadable record (a `PermissionError` on the read) never refuses (T887 p1 r4 item 2)."""
+    from yulon.ui import controller_view as view
+
+    def denied(_server: Path, **kwargs: object) -> object:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(view.native, "read_state", denied)
+    assert view._engine_sentence(tmp_path / "wow") is None

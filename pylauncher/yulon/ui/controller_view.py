@@ -327,7 +327,10 @@ def _engine_sentence(server_dir: Path, *, wsl_distro: str | None = None) -> str 
     """
     if wsl_distro is not None:
         return None
-    record = native.read_state(server_dir, valid=())
+    try:
+        record = native.read_state(server_dir, valid=())
+    except OSError:
+        return None
     if record is None:
         return None
     was = record.engine or "docker"
