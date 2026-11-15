@@ -612,8 +612,17 @@ def container_user(platform_id: Callable[[], str] = platform.detect) -> str:
     breaks the reason `env/dist/etc` is bound out in the first place: the module
     system and the user edit those files. Windows pays no such price because 9p
     maps ownership back to the Windows account regardless of the writing uid.
+
+    Under Podman (T887, developer switch only) this is also `user: "0:0"`, the
+    Windows branch's shape: in rootless Podman container root IS the host user,
+    so uid 1000 (acore) maps to a subuid whose files the player can neither edit
+    nor delete (spike Q4). The `:z` logic is untouched.
     """
     if platform_id() == "windows":
+        return 'user: "0:0"'
+    from yulon import engine as engine_seam
+
+    if engine_seam.is_podman():
         return 'user: "0:0"'
     return "# user: left to the image (acore) - see composegen.container_user()"
 

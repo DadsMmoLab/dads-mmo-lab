@@ -142,10 +142,29 @@ def test_a_fresh_install_runs_every_stage_in_order_and_records_them(
     assert state.completed == STAGE_NAMES
     assert state.game_id == "ddon" and state.family == "arrowgene"
     assert state.last_error == ""
+    assert (state.engine or "docker") == "docker"
     assert daemon.built == [(server, composegen.COMPOSE_FILES)]
     assert daemon.started == [(server, "ddon-server")]
     (spec,) = daemon.cloned
     assert spec.dest == server / "src" and spec.rev == DDON.emulator.sources[0].rev
+
+
+def test_a_fresh_single_install_records_podman_under_the_switch(
+    tmp_path: Path, daemon: Daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 4: the single-container fresh record comes from `engine.resolve()`."""
+    from yulon import engine
+
+    monkeypatch.setenv("YULON_ENGINE", "podman")
+    monkeypatch.setattr(engine, "_on_supported_platform", lambda *_a, **_k: True)
+    engine._reset_for_tests()
+    try:
+        server = tmp_path / "yulon-ddon"
+        _run(SingleInstaller(DDON, seams=daemon.seams()), server)
+        state = native.read_state(server, valid=STAGE_NAMES)
+        assert state is not None and state.engine == "podman"
+    finally:
+        engine._reset_for_tests()
 
 
 def test_the_rendered_files_carry_this_install_s_identity(tmp_path: Path, daemon: Daemon) -> None:
@@ -440,3 +459,37 @@ def test_use_existing_refuses_another_game_and_a_copied_record(tmp_path: Path) -
     _record(copy, STAGE_NAMES, install_id="0000000000")
     with pytest.raises(InstallerError, match="copied from another folder"):
         existing_install(DDON, copy, platform_id=_linux)
+
+
+def test_a_podman_record_under_the_docker_switch_refuses_before_any_command(
+    tmp_path: Path, daemon: Daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 3: the single path's run/install entry refuses the other engine's record."""
+    from yulon import engine as engine_seam
+    from yulon import forgetting
+
+    server = tmp_path / "s"
+    engine = SingleInstaller(DDON, seams=daemon.seams())
+    native.write_state(
+        server,
+        native.InstallState(
+            game_id="ddon",
+            install_id=engine.install_id(server),
+            family="arrowgene",
+            engine="podman",
+            completed=STAGE_NAMES,
+        ),
+    )
+    before = (server / native.STATE_FILE).read_bytes()
+    monkeypatch.delenv("YULON_ENGINE", raising=False)
+    engine_seam._reset_for_tests()
+    try:
+        with pytest.raises(
+            InstallerError, match="set up with Podman.*Switch back to Podman"
+        ) as caught:
+            _run(engine, server)
+        assert str(caught.value) == forgetting.engine_mismatch_refusal("Podman", "Docker")
+    finally:
+        engine_seam._reset_for_tests()
+    assert daemon.built == [] and daemon.started == [] and daemon.cloned == []
+    assert (server / native.STATE_FILE).read_bytes() == before

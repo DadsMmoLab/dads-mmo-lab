@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 from yulon import docker, module_moves, platform, server_build_presses, table_repair, wsl
+from yulon import engine as engine_seam
 from yulon.after_stop import TrueAfterStop, stop_took_effect
 from yulon.catalog import script_built, upstream
 
@@ -1498,6 +1499,7 @@ def main(argv: list[str] | None = None) -> int:
     # written 2026-09-05 after a review pointed out that moving this call up
     # three lines as a tidy would have broken it in silence.
     configure(config_dir=platform.config_dir(), stderr_level=logging.WARNING)
+    engine_seam.apply_docker_host()
     logger.info(
         "install harness: game=%s server_dir=%s client_dir=%s",
         args.game,
