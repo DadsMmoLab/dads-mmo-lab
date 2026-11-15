@@ -184,7 +184,5 @@ def test_bytes_after_a_value_are_refused_at_every_level() -> None:
         _extension(x509_names.NAME_CONSTRAINTS, _tlv(0x30, _permitted(_dns(PORTAL))) + b"\x05"),
     )
     with pytest.raises(CertificateError, match="bytes after a value"):
-        x509_names.permitted_dns_names(
-            x509_names.extensions(padded)[x509_names.NAME_CONSTRAINTS]
-        )
+        x509_names.permitted_dns_names(x509_names.extensions(padded)[x509_names.NAME_CONSTRAINTS])
     assert "bytes after a value" in (problem(padded, PORTAL) or "")
