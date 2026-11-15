@@ -24,7 +24,7 @@ import os
 import shutil
 import tarfile
 import zipfile
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,12 +87,25 @@ HOSTS_MISSING = (
 
 REPORT_TRUSTED = "CA in LocalMachine\\Root: yes"
 
-IMPORT_CA = r'''"""Written by Yu'lon: trust one CA in LocalMachine\Root of THIS Wine prefix only."""
-import base64, ctypes, re, ssl, sys
+CA_THUMBPRINT_FILE = ".yulon-ca-thumbprint"
+"""In the prefix: the CA's thumbprint as the prefix last imported it (T888).
+
+Play writes it after a verified import, and the Gaming Mode tile writes it after its own
+re-import; a tile that finds a different thumbprint on `certs/ca.pem` imports the new CA
+before the game starts, because a remade CA is a root the prefix does not have."""
+
+IMPORT_CA = r'''"""Written by Yu'lon: trust one CA in LocalMachine\\Root of THIS prefix only."""
+import base64, ctypes, hashlib, re, ssl, sys
 import ctypes.wintypes as wt
+
+CA_NAME = "Yulon WoW Forever Local CA"
+X509_ASN_ENCODING = 1
+CERT_SIMPLE_NAME = 4
+
 
 def main():
     pem, report = sys.argv[1], sys.argv[2]
+    stale = {t.upper() for t in sys.argv[3:]}
     def say(line):
         with open(report, "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -108,9 +121,41 @@ def main():
     c.CertAddEncodedCertificateToStore.argtypes = [ctypes.c_void_p, wt.DWORD, ctypes.c_char_p,
                                                    wt.DWORD, wt.DWORD, ctypes.c_void_p]
     c.CertCloseStore.argtypes = [ctypes.c_void_p, wt.DWORD]
+    c.CertCreateCertificateContext.restype = ctypes.c_void_p
+    c.CertCreateCertificateContext.argtypes = [wt.DWORD, ctypes.c_char_p, wt.DWORD]
+    c.CertGetNameStringW.restype = wt.DWORD
+    c.CertGetNameStringW.argtypes = [ctypes.c_void_p, wt.DWORD, wt.DWORD, ctypes.c_void_p,
+                                     ctypes.c_wchar_p, wt.DWORD]
+    c.CertDeleteCertificateFromStore.argtypes = [ctypes.c_void_p]
+    c.CertFreeCertificateContext.argtypes = [ctypes.c_void_p]
     store = c.CertOpenStore(ctypes.c_void_p(10), 0, None, 2 << 16, ctypes.c_wchar_p("Root"))
     if not store:
         say("CertOpenStore failed, error %d" % ctypes.get_last_error()); return 1
+    # A remade CA is a DIFFERENT root: the old ones must leave, or this prefix keeps
+    # trusting a certificate whose key is gone (T888). Every certificate of ours goes --
+    # by its subject name, and by a thumbprint the install record calls stale -- except
+    # the one being installed.
+    removed = 0
+    for cert, enc, _ in list(ssl.enum_certificates("ROOT")):
+        if enc != "x509_asn" or cert == der:
+            continue
+        thumb = hashlib.sha1(cert).hexdigest().upper()
+        name = ""
+        ctx = c.CertCreateCertificateContext(X509_ASN_ENCODING, cert, len(cert))
+        if ctx:
+            size = c.CertGetNameStringW(ctx, CERT_SIMPLE_NAME, 0, None, None, 0)
+            if size > 1:
+                buf = ctypes.create_unicode_buffer(size)
+                if c.CertGetNameStringW(ctx, CERT_SIMPLE_NAME, 0, None, buf, size):
+                    name = buf.value
+        if name == CA_NAME or thumb in stale:
+            if ctx and c.CertDeleteCertificateFromStore(ctx):  # frees the context too
+                removed += 1
+                ctx = None
+                continue
+            say("could not delete %s (%s)" % (name, thumb))
+        if ctx:
+            c.CertFreeCertificateContext(ctx)
     ok = c.CertAddEncodedCertificateToStore(store, 1, der, len(der), 3, None)
     err = ctypes.get_last_error()
     c.CertCloseStore(store, 0)
@@ -118,6 +163,7 @@ def main():
         say("CertAddEncodedCertificateToStore failed, error %d" % err); return 1
     present = any(cert == der for cert, enc, _ in ssl.enum_certificates("ROOT")
                   if enc == "x509_asn")
+    say("removed %d superseded certificate(s)" % removed)
     say("CA in LocalMachine\\Root: " + ("yes" if present else "NO"))
     return 0 if present else 1
 
@@ -307,6 +353,7 @@ def prepare(
     say: Callable[[str], None],
     *,
     portal: str,
+    stale: Sequence[str] = (),
     seams: ProtonSeams | None = None,
 ) -> Runtime:
     """Runtime, Proton, prefix, Windows Python and the trusted CA. Raises ProtonError.
@@ -332,7 +379,7 @@ def prepare(
             raise ProtonError(f"Proton did not make its prefix in {prefix}.")
     checked = forever_trust.verified_ca(ca, portal)
     try:
-        trust_ca(runtime, checked, server_dir, say, s)
+        trust_ca(runtime, checked, server_dir, say, s, stale=stale)
     finally:
         checked.unlink(missing_ok=True)
     return runtime
@@ -347,9 +394,21 @@ def _run(runtime: Runtime, program: str, args: list[str], s: ProtonSeams, timeou
 
 
 def trust_ca(
-    runtime: Runtime, ca: Path, server_dir: Path, say: Callable[[str], None], s: ProtonSeams
+    runtime: Runtime,
+    ca: Path,
+    server_dir: Path,
+    say: Callable[[str], None],
+    s: ProtonSeams,
+    *,
+    stale: Sequence[str] = (),
 ) -> None:
-    """The install's CA in the prefix's `LocalMachine\\Root`, checked by its report. Every Play."""
+    """The install's CA in the prefix's `LocalMachine\\Root`, checked by its report. Every Play.
+
+    The script deletes every superseded CA of ours from that store first (its subject name,
+    or a thumbprint `stale` names), so a remade CA does not leave the old root -- whose key
+    is gone -- trusted inside the game's prefix (T888). Its argv carries the certificate,
+    the report, and those thumbprints; the prefix records the thumbprint it imported.
+    """
     python_dir = runtime.prefix / "pfx" / "drive_c" / "python313"
     if not (python_dir / "python.exe").is_file():
         zipped = fetch(WINDOWS_PYTHON, server_dir / "downloads" / WINDOWS_PYTHON.name, say, s)
@@ -362,7 +421,7 @@ def trust_ca(
     _run(
         runtime,
         str(python_dir / "python.exe"),
-        ["-I", winpath(script), winpath(ca), winpath(report)],
+        ["-I", winpath(script), winpath(ca), winpath(report), *stale],
         s,
         timeout=300,
     )
@@ -372,6 +431,12 @@ def trust_ca(
             "The game's prefix did not take the install's certificate"
             + (f": {said.strip()}" if said.strip() else " (no report was written).")
         )
+    try:
+        (runtime.prefix / CA_THUMBPRINT_FILE).write_text(
+            forever_trust.thumbprint(ca) + "\n", encoding="ascii"
+        )
+    except OSError as exc:
+        logger.warning(f"could not record the prefix's CA thumbprint: {exc}")
 
 
 def hosts_ready(portal: str, s: ProtonSeams | None = None) -> bool:
