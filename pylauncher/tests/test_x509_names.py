@@ -30,6 +30,64 @@ PORTAL = "trinity.actual.battle.net"
 _PEM = re.compile(r"-----BEGIN CERTIFICATE-----\s*(.+?)\s*-----END CERTIFICATE-----", re.DOTALL)
 
 
+def _len(n: int) -> bytes:
+    """A DER length: short form under 128, else the minimal long form."""
+    if n < 0x80:
+        return bytes([n])
+    body = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(body)]) + body
+
+
+def _tlv(tag: int, body: bytes) -> bytes:
+    """One DER tag-length-value."""
+    return bytes([tag]) + _len(len(body)) + body
+
+
+def _oid(dotted: str) -> bytes:
+    """An OBJECT IDENTIFIER's DER body and tag, from its dotted form."""
+    first, *rest = (int(part) for part in dotted.split("."))
+    body = bytearray([first * 40 + rest[0]])
+    for value in rest[1:]:
+        chunk = [value & 0x7F]
+        value >>= 7
+        while value:
+            chunk.append(0x80 | (value & 0x7F))
+            value >>= 7
+        body.extend(reversed(chunk))
+    return _tlv(0x06, bytes(body))
+
+
+def _extension(oid: str, value: bytes, *, critical: bool = True) -> bytes:
+    """One `Extension` sequence, DER."""
+    body = _oid(oid) + (_tlv(0x01, b"\xff") if critical else b"") + _tlv(0x04, value)
+    return _tlv(0x30, body)
+
+
+def _certificate(*extensions: bytes) -> bytes:
+    """A certificate-shaped DER holding exactly `extensions` (nothing is signed)."""
+    wrapper = _tlv(0x30, b"".join(extensions))
+    tbs = _tlv(0x30, _tlv(0xA3, wrapper))
+    return _tlv(0x30, tbs)
+
+
+BASIC = _extension(x509_names.BASIC_CONSTRAINTS, _tlv(0x30, _tlv(0x01, b"\xff")))
+
+
+def _constraints(*fields: bytes) -> bytes:
+    """A `nameConstraints` extension over `fields` (the `[0]`/`[1]` wrappers given)."""
+    return _extension(x509_names.NAME_CONSTRAINTS, _tlv(0x30, b"".join(fields)))
+
+
+def _permitted(*subtrees: bytes) -> bytes:
+    """One `[0] permittedSubtrees` holding `subtrees`, each a GeneralSubtree sequence."""
+    return _tlv(0xA0, b"".join(subtrees))
+
+
+def _dns(name: str) -> bytes:
+    """One `GeneralSubtree` whose base is `dNSName` `name`."""
+    return _tlv(0x30, _tlv(0x82, name.encode("ascii")))
+
+
 def _der(name: str) -> bytes:
     text = (DATA / name).read_text(encoding="ascii")
     found = _PEM.search(text)
@@ -72,3 +130,61 @@ def test_bytes_that_are_not_a_certificate_are_refused_not_guessed_at() -> None:
         assert refused is not None and refused.startswith("it is not a certificate")
     with pytest.raises(CertificateError):
         x509_names.extensions(b"\x30\x03\x02\x01\x00")
+
+
+# -- strict DER (T888 item 5) ---------------------------------------------------------
+
+
+def test_a_hand_built_certificate_with_the_right_shape_is_read() -> None:
+    """The builder above makes what the reader accepts: one CA, one name, nothing else."""
+    der = _certificate(BASIC, _constraints(_permitted(_dns(PORTAL))))
+    assert problem(der, PORTAL) is None
+    assert x509_names.permitted_dns_names(
+        x509_names.extensions(der)[x509_names.NAME_CONSTRAINTS]
+    ) == (PORTAL,)
+
+
+def test_a_repeated_extension_oid_is_refused() -> None:
+    """T888 item 5 (Claude #4): last-wins let a client read the first, this reader the second."""
+    der = _certificate(BASIC, _constraints(_permitted(_dns(PORTAL))), BASIC)
+    with pytest.raises(CertificateError, match="repeats"):
+        x509_names.extensions(der)
+    assert (problem(der, PORTAL) or "").startswith("it is not a certificate")
+
+
+def test_excluded_subtrees_are_refused() -> None:
+    """T888 item 5: a CA that permits one name and excludes another is not this CA."""
+    excluded = _tlv(0xA1, _dns("us.actual.battle.net"))
+    der = _certificate(BASIC, _constraints(_permitted(_dns(PORTAL)), excluded))
+    assert "excludes names" in (problem(der, PORTAL) or "")
+
+
+def test_a_permitted_subtree_that_is_not_a_dns_name_is_refused() -> None:
+    """T888 item 5: an IP or URI subtree is a name this app's one sentence does not cover."""
+    other = _tlv(0x30, _tlv(0x87, bytes(4)))  # iPAddress
+    der = _certificate(BASIC, _constraints(_permitted(_dns(PORTAL), other)))
+    assert "not a DNS name" in (problem(der, PORTAL) or "")
+
+
+def test_a_permitted_subtree_with_a_distance_field_is_refused() -> None:
+    """T888 item 5: `minimum`/`maximum` narrow a subtree; reading it as plain is not reading."""
+    distant = _tlv(0x30, _tlv(0x82, PORTAL.encode("ascii")) + _tlv(0x02, b"\x80"))
+    der = _certificate(BASIC, _constraints(_permitted(distant)))
+    assert "distance field" in (problem(der, PORTAL) or "")
+
+
+def test_bytes_after_a_value_are_refused_at_every_level() -> None:
+    """T888 item 5 (Codex #3): a trailing byte is a value this reader did not see."""
+    good = _certificate(BASIC, _constraints(_permitted(_dns(PORTAL))))
+    with pytest.raises(CertificateError, match="bytes after a value"):
+        x509_names.extensions(good + b"\x00")
+    assert "bytes after a value" in (problem(good + b"\x00", PORTAL) or "")
+    padded = _certificate(
+        BASIC,
+        _extension(x509_names.NAME_CONSTRAINTS, _tlv(0x30, _permitted(_dns(PORTAL))) + b"\x05"),
+    )
+    with pytest.raises(CertificateError, match="bytes after a value"):
+        x509_names.permitted_dns_names(
+            x509_names.extensions(padded)[x509_names.NAME_CONSTRAINTS]
+        )
+    assert "bytes after a value" in (problem(padded, PORTAL) or "")
