@@ -23,7 +23,8 @@ from yulon.log import configure, file_log_problem, get_logger, use_utf8_streams
 if TYPE_CHECKING:  # `yulon.state` pulls in pydantic; `--provision` must not pay for it.
     from PySide6.QtWidgets import QMainWindow, QSplitter, QTabWidget
 
-    from yulon.state import AppState
+    from yulon import forever_play
+    from yulon.state import AppState, KnownInstall
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.ui.widgets.update_bar import UpdateBar
@@ -1143,21 +1144,60 @@ def build_window() -> object:
 
         return set_client_dir
 
-    def _remember_trust_live(game: str, server_dir: Path) -> Callable[[str], None]:
-        """`state.remember()` over the window's own live `AppState`, for the trusted CA (T888).
+    def _trust_record_live(game: str, server_dir: Path) -> forever_play.TrustRecord:
+        """The install record's trust half, over the window's own live `AppState` (T888).
 
-        Play hands this the thumbprint of the CA it put in this computer's trust store, so
-        removing the server can take that CA out again after its folder is gone. A failed
-        save is a warning, never a failed Play: the trust itself is already in place, and
-        the CA can still be taken out from the certificate manager by hand.
+        `remember_stale` RAISES on a failed save, unlike the other two writers: Play calls
+        it before a certificate remake replaces the CA it names, and a thumbprint that was
+        not written down is a root this computer keeps trusting with no record of it. The
+        two that follow a successful prompt stay warnings: the trust itself is in place,
+        and the CA can still be taken out from the certificate manager by hand.
         """
         from yulon.state import save_state
 
-        def set_trusted_thumbprint(thumbprint: str) -> None:
-            install = state.find(game, server_dir)
-            if install is None or install.trusted_ca_thumbprint == thumbprint:
+        def install() -> KnownInstall | None:
+            return state.find(game, server_dir)
+
+        def stale() -> tuple[str, ...]:
+            found = install()
+            return tuple(found.stale_ca_thumbprints) if found is not None else ()
+
+        def remember_stale(thumbprint: str) -> None:
+            found = install()
+            if found is None or thumbprint in found.stale_ca_thumbprints:
                 return
-            state.remember(install.model_copy(update={"trusted_ca_thumbprint": thumbprint}))
+            state.remember(
+                found.model_copy(
+                    update={"stale_ca_thumbprints": [*found.stale_ca_thumbprints, thumbprint]}
+                )
+            )
+            save_state(state)
+
+        def forget_stale(thumbprint: str) -> None:
+            found = install()
+            if found is None or thumbprint not in found.stale_ca_thumbprints:
+                return
+            state.remember(
+                found.model_copy(
+                    update={
+                        "stale_ca_thumbprints": [
+                            t for t in found.stale_ca_thumbprints if t != thumbprint
+                        ]
+                    }
+                )
+            )
+            try:
+                save_state(state)
+            except OSError as exc:
+                logger.warning(
+                    f"could not forget the replaced certificate for {game} at {server_dir}: {exc}"
+                )
+
+        def trusted(thumbprint: str) -> None:
+            found = install()
+            if found is None or found.trusted_ca_thumbprint == thumbprint:
+                return
+            state.remember(found.model_copy(update={"trusted_ca_thumbprint": thumbprint}))
             try:
                 save_state(state)
             except OSError as exc:
@@ -1166,7 +1206,12 @@ def build_window() -> object:
                     f"{exc}"
                 )
 
-        return set_trusted_thumbprint
+        return forever_play.TrustRecord(
+            stale=stale,
+            remember_stale=remember_stale,
+            forget_stale=forget_stale,
+            trusted=trusted,
+        )
 
     def _remember_play_client_live(game: str, server_dir: Path) -> Callable[[Path | None], None]:
         """`_remember_client_live()` for the ready-to-play client (T181), same shape and reasons.
@@ -1690,7 +1735,7 @@ def build_window() -> object:
             # same live writer (T36); the account name beside it in `ui.json`.
             client_dir=known.client_dir if known else None,
             remember_client_dir=_remember_client_live(game, server_dir),
-            remember_trust=_remember_trust_live(game, server_dir),
+            trust_record=_trust_record_live(game, server_dir),
             account=ui_settings.launcher_place(game, server_dir).account,
             remember_account=remember_account,
             # Add to Steam Deck (Gaming Mode)…: a seam on Linux only, None elsewhere.
