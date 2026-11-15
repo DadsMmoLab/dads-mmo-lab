@@ -8107,9 +8107,11 @@ def compose_run_once(
     project's volumes. `--no-deps` because a seed needs nothing else running. `volumes`
     are extra `-v` mounts for this run only (a client extract's read-only client folder,
     which the compose file must not name: it is the player's, and may move). `command` is
-    appended after the service name, which compose hands to the service's own entrypoint
-    (the certificate remake's `--force`, T888). The exit status is returned, never raised
-    (`run_attached()`).
+    the command this run uses: `docker compose run` REPLACES the service's own `command:`
+    with the words after the service name, it does not append them to it, so a caller
+    that wants the service's command plus an argument must pass the whole thing (the
+    certificate remake's `CERTIFICATES_COMMAND` + `--force`, T888). The exit status is
+    returned, never raised (`run_attached()`).
     """
     argv = ["compose", *(a for p in profiles for a in ("--profile", p))]
     mounts = [a for v in volumes for a in ("-v", v)]
