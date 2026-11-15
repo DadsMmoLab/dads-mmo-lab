@@ -285,6 +285,32 @@ def test_the_env_holding_the_passwords_is_owner_only(tmp_path: Path) -> None:
     assert stat.S_IMODE((server_dir / ".env").stat().st_mode) == 0o600
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the POSIX mode is a no-op on Windows")
+def test_a_complete_env_is_tightened_to_owner_only_without_changing_a_byte(
+    tmp_path: Path,
+) -> None:
+    """T888 item 10 (Claude #9, Gemini #8): the early return left a loose `.env` loose.
+
+    A record that already holds every secret used to return before the tightening, so a
+    0644 `.env` -- written by an older build, or restored from a backup -- stayed readable
+    by every account on the machine. Its bytes are the database's passwords and must not
+    change: only the mode does.
+    """
+    server_dir = tmp_path / "ffxi"
+    _run(_engine(Daemon()), server_dir)
+    env = server_dir / composegen.DOTENV_FILE
+    before = env.read_bytes()
+    env.chmod(0o644)
+    engine = _engine(Daemon())
+    state = native.InstallState(
+        game_id="ffxi", install_id=engine.install_id(server_dir), family="landsandboat"
+    )
+    lines = list(engine._write_secrets(server_dir, state, None))
+    assert lines == [f"{composegen.DOTENV_FILE} already holds this server's passwords; leaving it."]
+    assert stat.S_IMODE(env.stat().st_mode) == 0o600
+    assert env.read_bytes() == before, "the passwords themselves are untouched"
+
+
 def test_a_dotenv_missing_one_password_gets_it_added_and_keeps_its_lines(tmp_path: Path) -> None:
     server_dir = tmp_path / "ffxi"
     server_dir.mkdir()
@@ -346,9 +372,9 @@ def test_remaking_a_pre_t888_install_renders_the_certificates_service_first(
 
     monkeypatch.setattr(docker, "compose_run_once", run_once)
     stack_install.remake_certificates(FOREVER, server_dir)
-    assert ran == [(server_dir, CERTIFICATES_SERVICE, ("--force",), True)], (
-        "the service is in the compose file before the run that names it"
-    )
+    assert ran == [
+        (server_dir, CERTIFICATES_SERVICE, ("--force",), True)
+    ], "the service is in the compose file before the run that names it"
     base = (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8")
     assert "certificates:" in base and "./certs-yulon.sh:/yulon-certs.sh:ro" in base
     assert (server_dir / "certs-yulon.sh").is_file(), "the script the service runs is copied"

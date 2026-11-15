@@ -637,6 +637,18 @@ class StackInstaller:
             name for name in self.stack.secrets if composegen.dotenv_value(server_dir, name) is None
         ]
         if not missing:
+            # Nothing is generated, but the file is still the one file this folder holds a
+            # password in: an install made when the mode was looser (or a copy from a
+            # backup) comes back owner-only, without its bytes changing (T888).
+            winacl.secure_folder(server_dir)
+            if env.is_file():
+                try:
+                    platform.write_private_atomically(env, env.read_bytes())
+                except OSError as exc:
+                    raise InstallerError(
+                        f"{env} already holds this server's passwords but could not be made "
+                        f"owner-only: {exc}"
+                    ) from exc
             yield f"{composegen.DOTENV_FILE} already holds this server's passwords; leaving it."
             return
         try:
