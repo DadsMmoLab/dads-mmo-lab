@@ -1789,6 +1789,22 @@ def the_compose_project_is_not_pinned(monkeypatch: pytest.MonkeyPatch) -> list[P
 
 
 @pytest.fixture(autouse=True)
+def _no_login_key_watch_survives_a_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A watch one test started is never "still running" for the next (T888, testing.md 6).
+
+    `forever_key` and `forever_keywatch` keep their started watches in a module-level dict
+    keyed by the client folder. A watch a test starts is its own business; one it leaves in
+    that dict makes the next Play on the same folder believe its watch is live and skip
+    starting one, and the thread behind the entry is not real. Replaced rather than
+    cleared, so a test that keeps its own copy still sees what it put there.
+    """
+    from yulon import forever_key, forever_keywatch
+
+    monkeypatch.setattr(forever_key, "_WATCHES", {})
+    monkeypatch.setattr(forever_keywatch, "_WATCHES", {})
+
+
+@pytest.fixture(autouse=True)
 def _no_save_wait_runs_on_the_real_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stop's wait for a saving world never sleeps, and its clock moves 2 s a look (T384).
 
