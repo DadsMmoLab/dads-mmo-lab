@@ -729,9 +729,9 @@ def test_every_hosts_command_passes_the_elevated_allowlist(
     assert argv[:2] == ["powershell.exe", "-NoProfile"]
 
 
-def test_only_certutil_and_icacls_run_elevated_and_cmd_only_in_its_own_forms() -> None:
+def test_only_named_programs_run_elevated_and_cmd_only_in_its_own_forms() -> None:
     """T888 item 4: `cmd` left the list, so a bare `cmd /c ...` cannot reach the prompt."""
-    assert platform.ADMIN_BATCH_PROGRAMS == ("icacls", "certutil")
+    assert platform.ADMIN_BATCH_PROGRAMS == ("icacls", "certutil", "powershell.exe")
     with pytest.raises(ValueError):
         platform.elevated_admin_batch([["powershell", "-c", "x"]], is_admin=False)
     with pytest.raises(ValueError, match="exact forms"):
