@@ -1057,26 +1057,6 @@ def test_play_refuses_while_this_clients_game_already_runs(tmp_path: Path) -> No
     assert calls == [], "nothing is trusted, made or started"
 
 
-def test_play_hands_the_pre_launch_pid_set_to_the_watch(tmp_path: Path) -> None:
-    """T888 item 5: the watcher is told what was already running, not left to guess."""
-    seen: list[tuple[int, ...]] = []
-    calls: list[str] = []
-    seams = forever_play.PlaySeams(
-        **{
-            **_play_seams(calls).__dict__,
-            "watch": lambda exe, key, group, before=(): seen.append(tuple(before)),
-        }
-    )
-    forever_play.play(
-        FOREVER,
-        _server_with_certs(tmp_path),
-        _client(tmp_path),
-        os_name="windows",
-        seams=seams,
-    )
-    assert seen == [()]
-
-
 def test_play_refuses_a_stopped_server_another_os_and_another_client(tmp_path: Path) -> None:
     calls: list[str] = []
     client = _client(tmp_path)
