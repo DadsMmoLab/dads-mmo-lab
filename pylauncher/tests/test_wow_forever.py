@@ -20,7 +20,7 @@ import pytest
 from pydantic import ValidationError
 
 from yulon import docker, forever_account, forever_key, forever_play, forever_trust, platform
-from yulon.catalog import composegen
+from yulon.catalog import composegen, stack_install
 from yulon.catalog.catalog import ForeverLogin, SingleEntry, SinglePlay, load_catalog
 from yulon.catalog.installer import InstallerError, InstallOptions
 from yulon.catalog.stack_install import (
@@ -258,7 +258,12 @@ def test_the_install_makes_yu_lons_own_certificates_before_the_first_start(
     script = (server_dir / "certs-yulon.sh").read_text(encoding="utf-8")
     assert "nameConstraints = critical,permitted;DNS:trinity.actual.battle.net" in script
     assert 'cp "$T/ca.key"' not in script, "the CA key never reaches the player's folder"
-    assert '"$T/ca.pem" "$T/server.pem" "$T/chain.pem" "$C/"' in script
+    assert (
+        'cp "$T/ca.pem" "$T/server.pem" "$T/chain.pem" "$T/server.key" "$S/"' in script
+    ), "the whole set is staged before it is swapped"
+    assert script.index('openssl verify -CAfile "$T/ca.pem" "$T/server.pem"') < script.index(
+        'mv -f "$S/ca.pem"'
+    ), "nothing in certs/ changes until openssl has verified the new set"
 
 
 HOTFIX_UPDATE = "2026_11_14_00_hotfixes_yulon_spell_x_spell_visual.sql"
@@ -965,6 +970,8 @@ def _play_seams(
         game_pids=lambda _client: (),
         find_game=lambda _client: None,
         restart_service=lambda _where, service, **_kw: calls.append(f"restart {service}"),
+        container_project=lambda _c: "project",
+        compose_project=lambda _e, _d: "project",
     )
 
 
@@ -1080,7 +1087,7 @@ def test_play_remembers_the_ca_it_replaces_before_anything_deletes_it(tmp_path: 
             return subprocess.CompletedProcess(argv, 0, "", "")  # the old root is installed
         return subprocess.CompletedProcess(argv, platform.UAC_DECLINED, "", "")
 
-    def remake(where: Path) -> None:
+    def remake(_entry: SingleEntry, where: Path) -> None:
         (where / "certs" / "ca.pem").write_bytes(NARROW_CA.read_bytes())
 
     trust_seams = forever_trust.TrustSeams(
@@ -1158,15 +1165,17 @@ def test_removing_a_forever_server_takes_its_trust_with_it(tmp_path: Path) -> No
     assert batched[0][0] == ["certutil", "-delstore", "Root", "AB12CD34"]
 
 
-def test_play_remakes_the_image_ca_and_the_key_it_left_before_it_trusts(
+def test_play_remakes_the_ca_in_the_container_and_restarts_only_the_login(
     tmp_path: Path,
 ) -> None:
-    """T888 item 1c: the old broad CA and `certs/ca.key` are replaced in place, before trust.
+    """T888 item 4 (Claude #3, Gemini #1): the container swaps the set; Play restarts bnet.
 
     The image's `certs.sh` constrained its CA to all of `actual.battle.net` and left the CA
-    key in the install folder. Play deletes all five files, makes them again with Yu'lon's
-    script, restarts the login and world services that were running, and hands the old
-    thumbprint to the trust step so the old root leaves the store in the same prompt.
+    key in the install folder. Play hands the remake to the stack's own script, which makes
+    and verifies the new set in a staging folder inside the container and swaps it in; Play
+    itself deletes nothing in `certs/` (the folder may be root's), restarts only the login
+    server, and hands the old thumbprint to the trust step so the old root leaves the store
+    in the same prompt.
     """
     server = tmp_path / "server"
     (server / "certs").mkdir(parents=True)
@@ -1174,31 +1183,53 @@ def test_play_remakes_the_image_ca_and_the_key_it_left_before_it_trusts(
     (server / "certs" / "ca.pem").write_bytes(BROAD_CA.read_bytes())
     old = forever_trust.thumbprint(server / "certs" / "ca.pem")
     calls: list[str] = []
-    made: list[Path] = []
+    made: list[tuple[SingleEntry, Path]] = []
 
-    def remake(where: Path) -> None:
-        made.append(where)
+    def remake(entry: SingleEntry, where: Path) -> None:
+        made.append((entry, where))
         (where / "certs" / "ca.pem").write_bytes(NARROW_CA.read_bytes())
-
-    def restart(where: Path, service: str, **_kw: Any) -> None:
-        calls.append(f"restart {service}")
 
     seams = forever_play.PlaySeams(
         **{
             **_play_seams(calls).__dict__,
             "remake_certificates": remake,
-            "restart_service": restart,
+            "container_project": lambda _c: "same-project",
+            "compose_project": lambda _e, _d: "same-project",
+            "restart_service": lambda _where, service, **_kw: calls.append(f"restart {service}"),
         }
     )
     forever_play.play(FOREVER, server, _client(tmp_path), os_name="windows", seams=seams)
-    assert made == [server]
-    assert not (server / "certs" / "ca.key").exists()
-    assert sorted((server / "certs").iterdir()) == [server / "certs" / "ca.pem"]
-    assert calls[:3] == [
+    assert made == [(FOREVER, server)], "the installer's own render plus the script, once"
+    assert (server / "certs" / "ca.key").exists(), "Python deletes nothing in certs/"
+    assert (server / "certs" / "ca.pem").read_bytes() == NARROW_CA.read_bytes()
+    assert calls[:2] == [
         "restart bnet",
-        "restart world",
         f"trust ca.pem trinity.actual.battle.net after {old}",
     ]
+    assert "restart world" not in calls, "the world server does not read the certificate"
+
+
+def test_a_login_server_of_another_compose_project_is_not_restarted(tmp_path: Path) -> None:
+    """T888 item 4 (Codex #1, Gemini #6): a fixed container name is not proof of ownership."""
+    server = tmp_path / "server"
+    (server / "certs").mkdir(parents=True)
+    (server / "certs" / "ca.pem").write_bytes(BROAD_CA.read_bytes())
+    calls: list[str] = []
+
+    def remake(_entry: SingleEntry, where: Path) -> None:
+        (where / "certs" / "ca.pem").write_bytes(NARROW_CA.read_bytes())
+
+    seams = forever_play.PlaySeams(
+        **{
+            **_play_seams(calls).__dict__,
+            "remake_certificates": remake,
+            "container_project": lambda _c: "somebody-elses-project",
+            "compose_project": lambda _e, _d: "this-install",
+            "restart_service": lambda _where, service, **_kw: calls.append(f"restart {service}"),
+        }
+    )
+    forever_play.play(FOREVER, server, _client(tmp_path), os_name="windows", seams=seams)
+    assert [c for c in calls if c.startswith("restart")] == []
 
 
 def test_play_remakes_a_broad_ca_but_restarts_nothing_that_was_stopped(
@@ -1210,7 +1241,7 @@ def test_play_remakes_a_broad_ca_but_restarts_nothing_that_was_stopped(
     (server / "certs" / "ca.pem").write_bytes(BROAD_CA.read_bytes())
     calls: list[str] = []
 
-    def remake(where: Path) -> None:
+    def remake(_entry: SingleEntry, where: Path) -> None:
         (where / "certs" / "ca.pem").write_bytes(NARROW_CA.read_bytes())
 
     def state_of(container: str) -> docker.ContainerState:
@@ -1226,7 +1257,32 @@ def test_play_remakes_a_broad_ca_but_restarts_nothing_that_was_stopped(
         }
     )
     forever_play.play(FOREVER, server, _client(tmp_path), os_name="windows", seams=seams)
-    assert [c for c in calls if c.startswith("restart")] == ["restart world"]
+    assert [c for c in calls if c.startswith("restart")] == []
+
+
+def test_a_failed_remake_leaves_the_old_certificates_and_play_refuses(tmp_path: Path) -> None:
+    """T888 item 4 (Gemini #1): a failed one-shot changes nothing, and Play says why.
+
+    The script builds the new set in a staging folder inside the container and only swaps
+    it in after `openssl verify`, so a run that fails leaves the old files exactly where
+    they were; Play itself never unlinks one. The sentence is the one the install uses.
+    """
+    server = tmp_path / "server"
+    (server / "certs").mkdir(parents=True)
+    (server / "certs" / "ca.key").write_bytes(b"the image's key")
+    (server / "certs" / "ca.pem").write_bytes(BROAD_CA.read_bytes())
+    before = {p.name: p.read_bytes() for p in (server / "certs").iterdir()}
+
+    def remake(_entry: SingleEntry, _where: Path) -> None:
+        raise stack_install.CertificatesError(
+            "The server's certificate could not be made (exit 1). openssl verify failed"
+        )
+
+    seams = forever_play.PlaySeams(**{**_play_seams([]).__dict__, "remake_certificates": remake})
+    with pytest.raises(PlayRefusal) as raised:
+        forever_play.play(FOREVER, server, _client(tmp_path), os_name="windows", seams=seams)
+    assert "The server's certificate could not be made" in str(raised.value)
+    assert {p.name: p.read_bytes() for p in (server / "certs").iterdir()} == before
 
 
 def test_a_ca_the_key_it_left_beside_it_is_remade_even_when_it_passes_the_check(
@@ -1242,14 +1298,12 @@ def test_a_ca_the_key_it_left_beside_it_is_remade_even_when_it_passes_the_check(
     calls: list[str] = []
     made: list[Path] = []
 
-    def remake(where: Path) -> None:
+    def remake(_entry: SingleEntry, where: Path) -> None:
         made.append(where)
-        (where / "certs" / "ca.pem").write_bytes(NARROW_CA.read_bytes())
 
     seams = forever_play.PlaySeams(**{**_play_seams(calls).__dict__, "remake_certificates": remake})
     forever_play.play(FOREVER, server, _client(tmp_path), os_name="windows", seams=seams)
     assert made == [server]
-    assert not (server / "certs" / "ca.key").exists()
 
 
 def test_play_refuses_while_this_clients_game_already_runs(tmp_path: Path) -> None:

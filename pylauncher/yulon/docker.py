@@ -8096,6 +8096,7 @@ def compose_run_once(
     *,
     profiles: Sequence[str] = (),
     volumes: Sequence[str] = (),
+    command: Sequence[str] = (),
     wsl_distro: str | None = None,
     sink: OutputSink | None = None,
     cancel: threading.Event | None = None,
@@ -8105,13 +8106,15 @@ def compose_run_once(
     For a stack's seed: a service whose command copies an image's data into the
     project's volumes. `--no-deps` because a seed needs nothing else running. `volumes`
     are extra `-v` mounts for this run only (a client extract's read-only client folder,
-    which the compose file must not name: it is the player's, and may move). The exit
-    status is returned, never raised (`run_attached()`).
+    which the compose file must not name: it is the player's, and may move). `command` is
+    appended after the service name, which compose hands to the service's own entrypoint
+    (the certificate remake's `--force`, T888). The exit status is returned, never raised
+    (`run_attached()`).
     """
     argv = ["compose", *(a for p in profiles for a in ("--profile", p))]
     mounts = [a for v in volumes for a in ("-v", v)]
     return run_attached(
-        [*argv, "run", "--rm", "--no-deps", *mounts, service],
+        [*argv, "run", "--rm", "--no-deps", *mounts, service, *command],
         server_dir,
         wsl_distro=wsl_distro,
         sink=sink,
