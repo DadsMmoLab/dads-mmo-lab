@@ -6,6 +6,7 @@ real Linux (not WSL). Without it every seam below answers exactly as Docker did.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from collections.abc import Callable
@@ -562,4 +563,114 @@ def test_a_docker_record_without_the_switch_proceeds(tmp_path: Path) -> None:
     engine._reset_for_tests()
     server_dir = tmp_path / "wow"
     server_dir.mkdir()
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id="wow-wotlk",
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family="azerothcore",
+            engine="docker",
+        ),
+    )
     assert (_fresh_state(Recorder(), server_dir).engine or "docker") == "docker"
+
+
+def test_a_docker_record_under_the_switch_refuses_a_gui_start_and_runs_no_docker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Item 1: GUI-path services built over a docker record under the switch refuse start.
+
+    `for_entry()` is the ONE seam both startup paths build through, so the refusal
+    lives there: every container operation raises one new `EngineMismatch` carrying
+    forgetting's sentence, BEFORE any docker command (the fake runner records nothing).
+    """
+    from yulon import runner
+    from yulon.ui.controller_view import ControllerServices, EngineMismatch
+
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id="wow-wotlk",
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family="azerothcore",
+            engine="docker",
+        ),
+    )
+    ran: list[list[str]] = []
+
+    def never(cmd: list[str], *args: object, **kwargs: object) -> object:
+        ran.append(cmd)
+        raise AssertionError(f"docker ran under a refused engine: {cmd}")
+
+    monkeypatch.setattr(runner, "run", never)
+    monkeypatch.setattr(runner, "stream", never)
+    _podman(monkeypatch, tmp_path)
+    try:
+        services = ControllerServices.for_entry(_wotlk_entry(), server_dir)
+        with pytest.raises(EngineMismatch, match="set up with Docker.*now using Podman"):
+            services.controller.start()
+        with pytest.raises(EngineMismatch, match="set up with Docker.*now using Podman"):
+            services.controller.status()
+        with pytest.raises(EngineMismatch, match="set up with Docker.*now using Podman"):
+            services.backup()
+    finally:
+        engine._reset_for_tests()
+    assert ran == []
+
+
+def test_a_docker_record_under_the_switch_refuses_server_cli_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Item 1: `--server` builds the same services, so it prints the sentence, exit non-zero."""
+    from yulon import runner, server_cli
+    from yulon.ui.controller_view import ControllerServices
+
+    config = tmp_path / "config"
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id="wow-wotlk",
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family="azerothcore",
+            engine="docker",
+        ),
+    )
+    config.mkdir()
+    (config / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "installs": [
+                    {"game": "wow-wotlk", "server_dir": str(server_dir), "client_dir": None}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    ran: list[list[str]] = []
+
+    def never(cmd: list[str], *args: object, **kwargs: object) -> object:
+        ran.append(cmd)
+        raise AssertionError(f"docker ran under a refused engine: {cmd}")
+
+    monkeypatch.setattr(runner, "run", never)
+    monkeypatch.setattr(runner, "stream", never)
+    _podman(monkeypatch, tmp_path)
+    try:
+        said: list[str] = []
+        code = server_cli.run(
+            ["start", "wow-wotlk"],
+            say=said.append,
+            config_dir=config,
+            services_for=ControllerServices.for_entry,
+            tick=0.01,
+        )
+        assert code == server_cli.EXIT_REFUSED
+        assert any("set up with Docker" in line and "Podman" in line for line in said), said
+    finally:
+        engine._reset_for_tests()
+    assert ran == []

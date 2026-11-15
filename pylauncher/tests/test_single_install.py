@@ -459,3 +459,37 @@ def test_use_existing_refuses_another_game_and_a_copied_record(tmp_path: Path) -
     _record(copy, STAGE_NAMES, install_id="0000000000")
     with pytest.raises(InstallerError, match="copied from another folder"):
         existing_install(DDON, copy, platform_id=_linux)
+
+
+def test_a_podman_record_under_the_docker_switch_refuses_before_any_command(
+    tmp_path: Path, daemon: Daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 3: the single path's run/install entry refuses the other engine's record."""
+    from yulon import engine as engine_seam
+    from yulon import forgetting
+
+    server = tmp_path / "s"
+    engine = SingleInstaller(DDON, seams=daemon.seams())
+    native.write_state(
+        server,
+        native.InstallState(
+            game_id="ddon",
+            install_id=engine.install_id(server),
+            family="arrowgene",
+            engine="podman",
+            completed=STAGE_NAMES,
+        ),
+    )
+    before = (server / native.STATE_FILE).read_bytes()
+    monkeypatch.delenv("YULON_ENGINE", raising=False)
+    engine_seam._reset_for_tests()
+    try:
+        with pytest.raises(
+            InstallerError, match="set up with Podman.*Switch back to Podman"
+        ) as caught:
+            _run(engine, server)
+        assert str(caught.value) == forgetting.engine_mismatch_refusal("Podman", "Docker")
+    finally:
+        engine_seam._reset_for_tests()
+    assert daemon.built == [] and daemon.started == [] and daemon.cloned == []
+    assert (server / native.STATE_FILE).read_bytes() == before
