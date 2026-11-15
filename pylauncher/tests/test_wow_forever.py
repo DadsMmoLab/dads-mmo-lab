@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import shlex
 import subprocess
 import threading
 from collections.abc import Callable, Sequence
@@ -262,8 +263,58 @@ def test_the_install_makes_yu_lons_own_certificates_before_the_first_start(
         'cp "$T/ca.pem" "$T/server.pem" "$T/chain.pem" "$T/server.key" "$S/"' in script
     ), "the whole set is staged before it is swapped"
     assert script.index('openssl verify -CAfile "$T/ca.pem" "$T/server.pem"') < script.index(
-        'mv -f "$S/ca.pem"'
+        'swap_in "$C" "$S"'
     ), "nothing in certs/ changes until openssl has verified the new set"
+
+
+def test_a_failed_certificate_swap_puts_every_old_file_back(tmp_path: Path) -> None:
+    """T888 round 3 M2: four files moved one `mv` at a time left a half-new set on failure.
+
+    The script keeps the set being replaced in .previous inside the certs folder, so a
+    move that fails after the first one is undone: every old file is back, byte for byte,
+    and the run exits non-zero. A clean swap still replaces all four.
+    """
+    script = Path(__file__).parent.parent / (
+        "catalog/installers/wow-forever/stack/files/certs-yulon.sh"
+    )
+    live = tmp_path / "certs"
+    staged = tmp_path / "staging"
+    live.mkdir()
+    staged.mkdir()
+    names = ("ca.pem", "server.pem", "chain.pem", "server.key")
+    old = {name: f"old {name}".encode() for name in names}
+    for name in names:
+        (live / name).write_bytes(old[name])
+    # Every file but server.pem is staged: ca.pem moves first, then server.pem cannot.
+    for name in ("ca.pem", "chain.pem", "server.key"):
+        (staged / name).write_bytes(f"new {name}".encode())
+
+    def swap() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"source {shlex.quote(str(script))}; "
+                f"swap_in {shlex.quote(str(live))} {shlex.quote(str(staged))}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    failed = swap()
+    assert failed.returncode != 0, failed.stderr
+    assert {name: (live / name).read_bytes() for name in names} == old
+    assert not (live / ".previous").exists(), "the backup goes once the set is back"
+
+    for name in names:
+        (staged / name).write_bytes(f"new {name}".encode())
+    swapped = swap()
+    assert swapped.returncode == 0, swapped.stderr
+    assert {name: (live / name).read_bytes() for name in names} == {
+        name: f"new {name}".encode() for name in names
+    }
+    assert not (live / ".previous").exists()
 
 
 HOTFIX_UPDATE = "2026_11_14_00_hotfixes_yulon_spell_x_spell_visual.sql"
