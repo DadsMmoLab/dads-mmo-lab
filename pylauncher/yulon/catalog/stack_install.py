@@ -68,6 +68,7 @@ STAGE_NAMES: tuple[str, ...] = (
     "pull-images",
     "seed-volumes",
     "extract-client",
+    "certificates",
     "up",
     "ready",
 )
@@ -81,6 +82,7 @@ seven stages it was recorded with.
 OPTIONAL_STAGES: dict[str, Callable[[SingleStack], bool]] = {
     "fetch-downloads": lambda stack: bool(stack.downloads),
     "extract-client": lambda stack: stack.client_extract is not None,
+    "certificates": lambda stack: stack.certificates,
 }
 """The stages a stack runs only when its entry asks for them."""
 
@@ -94,6 +96,13 @@ def stages_of(stack: SingleStack) -> tuple[str, ...]:
 
 SEED_PROFILE = "seed"
 """The compose profile the templates put the seed service under, which `up` never starts."""
+
+CERTIFICATES_SERVICE = "certificates"
+"""The one-shot service that runs the entry's own certificate script (`stack.certificates`).
+
+Under the seed profile, so `up` never starts it: `compose run --rm certificates` makes the
+files once and the container goes with its temporary folder, where the CA's key lives.
+"""
 
 READY_POLL_SECONDS = 2.0
 """How often the ready wait reads the containers' current-run logs."""
@@ -361,6 +370,7 @@ class StackInstaller:
             "pull-images": self._pull_images,
             "seed-volumes": self._seed_volumes,
             "extract-client": lambda d, s, c: self._extract_client(d, s, c, client_dir),
+            "certificates": self._certificates,
             "up": self._up,
             "ready": self._ready,
         }
@@ -700,6 +710,37 @@ class StackInstaller:
                 raise InstallerError(f"{target} could not be written: {exc}") from exc
             yield f"Wrote {target.relative_to(server_dir).as_posix()}"
 
+    def _certificates(
+        self, server_dir: Path, state: native.InstallState, cancel: threading.Event | None
+    ) -> Iterator[str]:
+        """Make the stack's own TLS certificates, in its own image, before the first start.
+
+        Yu'lon's script, not the image's (`certs-yulon.sh`): the CA is constrained to the
+        one name this stack's login server answers for, and its key stays in the one-shot
+        container's temporary folder. It writes `certs/` only, and a second run leaves the
+        files it finds.
+        """
+        if not self.stack.certificates:
+            yield "This server makes no certificate of its own."
+            return
+        yield (
+            "Making this server's own certificate: the login name it answers for, and the "
+            "CA a computer trusts for that name alone."
+        )
+        run = yield from native.pump_lines(
+            lambda sink: self._seams.run_once(
+                server_dir,
+                CERTIFICATES_SERVICE,
+                profiles=(SEED_PROFILE,),
+                sink=sink,
+                cancel=cancel,
+            ),
+            cancel=cancel,
+            stage="certificates",
+        )
+        self._check_run(run, server_dir, "The server's certificate could not be made")
+        yield "The server's certificate is in certs/."
+
     def _pull_images(
         self, server_dir: Path, state: native.InstallState, cancel: threading.Event | None
     ) -> Iterator[str]:
@@ -823,6 +864,25 @@ def _file_matches(path: Path, file: VerifiedFile) -> bool:
         return path.stat().st_size == file.size and sha256_of(path) == file.sha256
     except OSError:
         return False
+
+
+class CertificatesError(RuntimeError):
+    """The stack's certificate script did not finish; the message says why."""
+
+
+def make_certificates(server_dir: Path) -> None:
+    """Make a stack's own certificates now, in its image (`compose run --rm certificates`).
+
+    The install's `certificates` stage and Play's remake of an existing install (T888)
+    both come through here, so the two cannot run different things. Raises
+    `CertificatesError` with the run's last words when the script fails.
+    """
+    run = docker.compose_run_once(server_dir, CERTIFICATES_SERVICE, profiles=(SEED_PROFILE,))
+    if run.returncode != 0:
+        raise CertificatesError(
+            f"The server's certificate could not be made (exit {run.returncode}). "
+            + docker.last_words(run.tail)
+        )
 
 
 def listener_containers(entry: SingleEntry) -> Sequence[str]:

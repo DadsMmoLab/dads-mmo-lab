@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from yulon import docker, forever_keywatch, forever_play, forever_proton
+from yulon import docker, forever_keywatch, forever_play, forever_proton, forever_trust
 from yulon.catalog.catalog import load_catalog
 from yulon.forever_keywatch import (
     KNOWN_REGION_KEYS,
@@ -30,6 +30,7 @@ from yulon.single_play import PlayRefusal
 FOREVER = load_catalog().get_single("wow-forever")
 SERVER_KEY = bytes.fromhex("02596F0D0C061A8B30745988FD72C59E29EC367FB0F341F28E0F08D037BAFC69")
 GROUP8 = KNOWN_REGION_KEYS[7]
+PORTAL = FOREVER.play.forever.portal  # type: ignore[union-attr]
 
 
 # -- the key watch ------------------------------------------------------------------------
@@ -325,13 +326,16 @@ class FakeProton:
         return object()
 
 
+NARROW_CA = Path(__file__).parent / "data" / "forever-certs" / "narrow-critical.pem"
+
+
 def _server(tmp_path: Path) -> Path:
     server = tmp_path / "srv"
     python = server / forever_proton.PREFIX_NAME / "pfx" / "drive_c" / "python313"
     python.mkdir(parents=True)
     (python / "python.exe").write_bytes(b"MZ")
     (server / "certs").mkdir()
-    (server / "certs" / "ca.pem").write_text("-----BEGIN CERTIFICATE-----\n")
+    (server / "certs" / "ca.pem").write_bytes(NARROW_CA.read_bytes())
     return server
 
 
@@ -339,19 +343,23 @@ def test_prepare_makes_the_prefix_once_and_trusts_the_ca_in_it_every_play(tmp_pa
     home, server, proton = _home(tmp_path), _server(tmp_path), FakeProton()
     seams = ProtonSeams(home=lambda: home, run=proton.run)
     client = tmp_path / "client"
-    runtime = forever_proton.prepare(server, client, server / "certs/ca.pem", print, seams)
+    runtime = forever_proton.prepare(
+        server, client, server / "certs/ca.pem", print, portal=PORTAL, seams=seams
+    )
     assert runtime.prefix == server / forever_proton.PREFIX_NAME
     assert runtime.compat["STEAM_COMPAT_INSTALL_PATH"] == str(client)
     assert [r[5].rsplit("\\", 1)[-1].rsplit("/", 1)[-1] for r in proton.runs] == [
         "cmd.exe",
         "python.exe",
     ]
-    assert proton.runs[1][6:9] == [
-        "-I",
-        forever_proton.winpath(runtime.prefix / "import_ca.py"),
-        forever_proton.winpath(server / "certs/ca.pem"),
-    ]
-    forever_proton.prepare(server, client, server / "certs/ca.pem", print, seams)
+    assert proton.runs[1][6:8] == ["-I", forever_proton.winpath(runtime.prefix / "import_ca.py")]
+    # The CA the prefix is given is the CHECKED COPY, not the file in the player's folder:
+    # that folder is writable, and the prefix trusts whatever it is handed (T888).
+    imported = Path(proton.runs[1][8].removeprefix("Z:").replace("\\", "/"))
+    assert imported.name.startswith("yulon-ca-") and not imported.exists()
+    forever_proton.prepare(
+        server, client, server / "certs/ca.pem", print, portal=PORTAL, seams=seams
+    )
     assert len(proton.runs) == 3  # no second prefix; the CA is checked again
 
 
@@ -360,10 +368,20 @@ def test_prepare_says_how_to_get_the_runtime_and_refuses_an_untrusted_ca(tmp_pat
     bare, full = _home(tmp_path / "a", slr=False), _home(tmp_path / "b")
     no_runtime = ProtonSeams(home=lambda: bare, run=FakeProton().run)
     with pytest.raises(ProtonError, match="Steam Linux Runtime 4.0 is not installed"):
-        forever_proton.prepare(server, tmp_path, server / "certs/ca.pem", print, no_runtime)
+        forever_proton.prepare(
+            server, tmp_path, server / "certs/ca.pem", print, portal=PORTAL, seams=no_runtime
+        )
     refusing = ProtonSeams(home=lambda: full, run=FakeProton(trusted=False).run)
     with pytest.raises(ProtonError, match="did not take the install's certificate"):
-        forever_proton.prepare(server, tmp_path, server / "certs/ca.pem", print, refusing)
+        forever_proton.prepare(
+            server, tmp_path, server / "certs/ca.pem", print, portal=PORTAL, seams=refusing
+        )
+    broad = tmp_path / "broad.pem"
+    broad.write_bytes(Path(__file__).parent.joinpath("data/forever-certs/broad.pem").read_bytes())
+    with pytest.raises(forever_trust.TrustError, match="could not be checked"):
+        forever_proton.prepare(
+            server, tmp_path, broad, print, portal=PORTAL, seams=ProtonSeams(home=lambda: full)
+        )
 
 
 def test_the_hosts_line_is_kept_added_with_sudo_n_or_reported_missing() -> None:
@@ -400,7 +418,7 @@ def _client(tmp_path: Path) -> Path:
 
 
 def _linux_seams(calls: list[str], *, hosts: bool = True) -> forever_play.PlaySeams:
-    def prepare(server: Path, client: Path, ca: Path, say: Any) -> object:
+    def prepare(server: Path, client: Path, ca: Path, say: Any, **_: Any) -> object:
         calls.append(f"prepare {ca.name}")
         return "runtime"
 
@@ -418,9 +436,8 @@ def _linux_seams(calls: list[str], *, hosts: bool = True) -> forever_play.PlaySe
 def test_linux_play_checks_hosts_makes_the_account_and_starts_under_proton(tmp_path: Path) -> None:
     calls: list[str] = []
     client = _client(tmp_path)
-    played = forever_play.play(
-        FOREVER, tmp_path / "srv", client, os_name="linux", seams=_linux_seams(calls)
-    )
+    server = _server(tmp_path)
+    played = forever_play.play(FOREVER, server, client, os_name="linux", seams=_linux_seams(calls))
     assert calls == [
         "hosts trinity.actual.battle.net",
         "account",
@@ -437,7 +454,7 @@ def test_linux_play_without_the_hosts_line_names_the_one_command(tmp_path: Path)
     with pytest.raises(PlayRefusal, match=r"sudo tee -a /etc/hosts"):
         forever_play.play(
             FOREVER,
-            tmp_path / "srv",
+            _server(tmp_path),
             _client(tmp_path),
             os_name="linux",
             seams=_linux_seams(calls, hosts=False),

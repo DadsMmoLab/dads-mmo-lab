@@ -2,9 +2,12 @@
 
 The 70707 client dials the Battle.net name in its config's portal over TLS and checks the
 certificate against the computer's trusted roots. A WoW Forever install makes its own CA
-on first start (/opt/forever/yulon/certs.sh in the server image), name-constrained to
-`actual.battle.net`, so trusting it lets it vouch for those names and no others, and its
-key never leaves the install's certs/ folder. Play therefore needs, once per computer:
+before its first start (Yu'lon's `certs-yulon.sh`, from the install's stack files): its
+`nameConstraints` allow exactly `trinity.actual.battle.net` and nothing else, and its key
+lives in the one-shot container's temporary folder, never in the install folder. That
+constraint is the whole of what makes the CA safe to put in a machine's trust store, so
+this module CHECKS it (`x509_names`) instead of taking the file's word for it, and it
+checks the bytes it then installs. Play therefore needs, once per computer:
 
 * the CA in `LocalMachine\\Root` (`certutil -addstore Root`), and
 * `127.0.0.1 <portal>` in the hosts file, so the name reaches this computer's server.
@@ -31,11 +34,12 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import platform, runner
+from yulon import platform, runner, x509_names
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -48,6 +52,79 @@ _PEM = re.compile(r"-----BEGIN CERTIFICATE-----\s*(.+?)\s*-----END CERTIFICATE--
 
 class TrustError(RuntimeError):
     """The computer could not be made to trust the server; the message says what to do."""
+
+
+UNCHECKED = (
+    "This server's certificate could not be checked, so Yu'lon did not trust it. "
+    "Details says why."
+)
+"""What a player reads when the CA does not pass `x509_names`: no commands, no prompt."""
+
+
+def _pem(der: bytes) -> bytes:
+    """`der` as a PEM certificate, in the one spelling `certutil` and `trust_ca` read."""
+    body = base64.encodebytes(der).decode("ascii")
+    return f"-----BEGIN CERTIFICATE-----\n{body}-----END CERTIFICATE-----\n".encode("ascii")
+
+
+def _certificate_der(ca: Path) -> bytes:
+    """`ca`'s one certificate's DER. Raises `TrustError(UNCHECKED)` when it holds none."""
+    try:
+        text = ca.read_text(encoding="ascii", errors="replace")
+    except OSError as exc:
+        logger.warning(f"{ca} could not be read: {exc}")
+        raise TrustError(UNCHECKED) from exc
+    found = _PEM.search(text)
+    if found is None:
+        logger.warning(f"{ca} holds no certificate")
+        raise TrustError(UNCHECKED)
+    try:
+        return base64.b64decode("".join(found.group(1).split()), validate=True)
+    except ValueError as exc:
+        logger.warning(f"{ca} holds no readable certificate: {exc}")
+        raise TrustError(UNCHECKED) from exc
+
+
+def certificate_problem(ca: Path, portal: str) -> str | None:
+    """Why `ca` must not be trusted for `portal`, or None when it may. Never raises.
+
+    Without the copy `verified_ca()` makes: for a caller deciding whether the files must be
+    made again (`forever_play`), where a refused certificate is the answer, not an error.
+    """
+    try:
+        der = _certificate_der(ca)
+    except TrustError:
+        return f"{ca} could not be read as a certificate"
+    return x509_names.problem(der, portal)
+
+
+def verified_ca(ca: Path, portal: str) -> Path:
+    """`ca` copied to a private temp file and checked; the copy's path. The caller deletes it.
+
+    THE file the trust step then uses -- for its thumbprint and for `certutil -addstore` --
+    because `ca.pem` sits in a folder the player (and every other account) can write to:
+    it can be swapped between the check and the elevated command, and the elevated command
+    runs seconds later, behind a prompt the player may leave open. The temp is created
+    `mkstemp`'s own, 0600, and holds the bytes that were checked, so what is verified is
+    what is installed.
+
+    Raises `TrustError(UNCHECKED)` when the file is not this server's own CA: the reason
+    (`x509_names.problem()`) is logged, which is what Details shows.
+    """
+    der = _certificate_der(ca)
+    why = x509_names.problem(der, portal)
+    if why is not None:
+        logger.warning(f"refused {ca} as this computer's trust for {portal}: {why}")
+        raise TrustError(UNCHECKED)
+    handle, name = tempfile.mkstemp(prefix="yulon-ca-", suffix=".pem")
+    verified = Path(name)
+    try:
+        with os.fdopen(handle, "wb") as fh:
+            fh.write(_pem(der))
+    except BaseException:
+        verified.unlink(missing_ok=True)
+        raise
+    return verified
 
 
 def hosts_path() -> Path:
@@ -117,15 +194,45 @@ def ensure(
     *,
     seams: TrustSeams | None = None,
     record: Callable[[str], None] | None = None,
+    stale: str | None = None,
 ) -> bool:
     """Make this computer trust `ca` and map `portal`; True if an administrator prompt was shown.
 
     `record` is handed the thumbprint once the CA is trusted (or was already), so the
-    install's record can take it out again later (`remove`). Raises `TrustError` when the
-    player says No or a command fails, with what to do.
+    install's record can take it out again later (`remove`). `stale` is the thumbprint of
+    the CA this install trusted before (see `_trust`). Raises `TrustError` when the player
+    says No or a command fails, with what to do.
     """
     s = seams if seams is not None else TrustSeams()
+    verified = verified_ca(ca, portal)
+    try:
+        return _trust(verified, portal, s, record, stale)
+    finally:
+        try:
+            verified.unlink()
+        except OSError as exc:
+            logger.warning(f"could not remove the checked certificate copy {verified}: {exc}")
+
+
+def _trust(
+    ca: Path, portal: str, s: TrustSeams, record: Callable[[str], None] | None, stale: str | None
+) -> bool:
+    """`ensure()` over the checked copy `ca`: what is missing, behind one prompt.
+
+    `stale` is the thumbprint of a CA this install trusted before (the one Play replaced):
+    its `certutil -delstore` goes first, in the same batch, so the old root leaves the
+    store in the same prompt that adds the new one.
+    """
     commands = missing_commands(ca, portal, seams=s)
+    if stale is not None:
+        try:
+            installed = s.run(["certutil", "-store", "Root", stale]).returncode == 0
+        except OSError:
+            installed = False
+        if installed:
+            commands.insert(0, ["certutil", "-delstore", "Root", stale])
+            if ["cmd", "/c", "ipconfig", "/flushdns"] not in commands:
+                commands.append(["cmd", "/c", "ipconfig", "/flushdns"])
     thumb = thumbprint(ca)
     if record is not None:
         try:

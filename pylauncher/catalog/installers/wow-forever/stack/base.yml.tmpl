@@ -18,8 +18,9 @@
 # here) and downloads/ (the world database release the install fetched). The game data made from the
 # player's client and the unpacked world database live in volumes, where the servers read them fast.
 #
-# THE START ORDER: the database must be healthy; "prepare" then runs to completion (certificates once,
-# the configuration, the world database release unpacked once, the database user and the bots' shared
+# THE START ORDER: the database must be healthy; "prepare" then runs to completion (the image's own
+# certs.sh, which sees the certificates Yu'lon's `certificates` stage made and skips, the
+# configuration, the world database release unpacked once, the database user and the bots' shared
 # database); then both servers start. bnetserver exits until worldserver has built the login tables on
 # the very first start, so it restarts until it stays up. The first start imports the world database:
 # about 15 minutes before worldserver prints its ready line.
@@ -110,6 +111,20 @@ services:
     command: ["/opt/forever/yulon/extract.sh"]
     volumes:
       - data:/srv/data
+    restart: "no"
+
+  # Yu'lon's own certificate script, run once by the install's "certificates" stage (and
+  # by Play for an install whose CA is the image's, name-constrained too widely): the CA
+  # is constrained to trinity.actual.battle.net alone, and its key stays in this
+  # container's temporary folder, never in ./certs. Under the seed profile, so `up` never
+  # starts it.
+  certificates:
+    image: {{IMAGE_SERVER}}
+    profiles: ["seed"]
+    command: ["bash", "/yulon-certs.sh"]
+    volumes:
+      - ./certs:/srv/certs
+      - ./certs-yulon.sh:/yulon-certs.sh:ro
     restart: "no"
 
 volumes:

@@ -5437,6 +5437,15 @@ class SingleStack(_Strict):
         default=None,
         description="Game data made from the player's own client at install; asks for its folder.",
     )
+    certificates: bool = Field(
+        default=False,
+        description=(
+            "The stack makes its own TLS certificates with a script of Yu'lon's in its "
+            "`stack/files`, run once in the stack's own image before the first `up` "
+            "(WoW Forever: a CA for its login name alone, whose key never lands in the "
+            "install folder)."
+        ),
+    )
     secrets: tuple[str, ...] = Field(
         default=(),
         description=(
