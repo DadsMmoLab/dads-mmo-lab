@@ -583,7 +583,8 @@ argv does the most harm.
 bare entry means ANY `cmd /c …` runs elevated: a client folder named `C:\\a&b` became
 `mkdir C:\\a & b`, with `b` run as Administrator. The one exact form Yu'lon itself still
 writes is matched whole instead (`_cmd_form_allowed()`), and `powershell.exe`'s forms are
-too: a folder is made by a single-quoted `-LiteralPath`, which `cmd.exe` never sees.
+too: a folder is made from a single-quoted literal by .NET `CreateDirectory`, which
+`cmd.exe` never sees.
 """
 
 SHELL_METACHARACTERS = '&|<>^%!()"'
@@ -608,7 +609,7 @@ _PS_LITERAL = r"'(?:[^']|'')*'"
 """`powershell_literal()`'s output: one single-quoted string with inner quotes doubled."""
 
 _PS_NEW_FOLDER = re.compile(
-    r"^New-Item -ItemType Directory -Force -LiteralPath " + _PS_LITERAL + r"$"
+    r"^\[System\.IO\.Directory\]::CreateDirectory\(" + _PS_LITERAL + r"\) \| Out-Null$"
 )
 r"""`single_client.grant_commands()`'s folder: one literal path, `''` spelling a quote."""
 
@@ -637,8 +638,9 @@ def _cmd_form_allowed(argv: Sequence[str]) -> bool:
     and appends a second command):
 
     * `cmd /c ipconfig /flushdns` — the resolver flush after a hosts edit;
-    * `powershell.exe -NoProfile -Command New-Item -ItemType Directory -Force
-      -LiteralPath '<one path>'` — `single_client.grant_commands()`, the folder a
+    * `powershell.exe -NoProfile -Command [System.IO.Directory]::CreateDirectory('<one path>')
+      | Out-Null` (Windows PowerShell 5.1's `New-Item` has no `-LiteralPath`) —
+      `single_client.grant_commands()`, the folder a
       Program Files grant finds missing (T888);
     * `powershell.exe -NoProfile -Command` with `forever_trust.append_command()`'s or
       `strip_command()`'s text exactly: `-LiteralPath` only, one host name and one path

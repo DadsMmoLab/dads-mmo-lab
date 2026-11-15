@@ -214,8 +214,8 @@ def grant_commands(folders: Sequence[Path], user_sid: str) -> list[list[str]]:
 
     Named by SID (`*S-1-5-21-...`), which `icacls` reads the same in every locale.
 
-    A folder that is missing is made by PowerShell, one `-LiteralPath` argument and no
-    `cmd.exe` in the way (T888): `cmd /c mkdir` rejoined its arguments into a command line
+    A folder that is missing is made by .NET `CreateDirectory` in PowerShell, one literal
+    argument and no `cmd.exe` in the way (T888): `cmd /c mkdir` rejoined its arguments into a command line
     it parsed again, so `C:\\a&b` ran `b` as Administrator; refusing every path that holds
     a `cmd` metacharacter refused `C:\\Program Files (x86)`, FFXI's default. Inside a
     single-quoted PowerShell literal nothing is parsed, `''` spells one `'`, so the path
@@ -229,8 +229,9 @@ def grant_commands(folders: Sequence[Path], user_sid: str) -> list[list[str]]:
                     "powershell.exe",
                     "-NoProfile",
                     "-Command",
-                    "New-Item -ItemType Directory -Force -LiteralPath "
-                    + platform.powershell_literal(str(folder)),
+                    "[System.IO.Directory]::CreateDirectory("
+                    + platform.powershell_literal(str(folder))
+                    + ") | Out-Null",
                 ]
             )
         commands.append(["icacls", str(folder), "/grant", f"*{user_sid}:{GRANT}"])
