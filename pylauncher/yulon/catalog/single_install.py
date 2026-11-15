@@ -160,6 +160,7 @@ def _read_record(
             f"{server_dir} was installed as a {state.family} server, not {family}. "
             "Pick a different folder. Nothing was written."
         )
+    native.refuse_engine_mismatch(state)
     return state
 
 
