@@ -1428,10 +1428,15 @@ def build_window() -> object:
         if entry.install.stack is None or entry.play is None or entry.play.forever is None:
             return
         install = state.find(game, folder)
+        # The tagged hosts line is shared by every WoW Forever install (one portal, one
+        # 127.0.0.1): it goes only with the last of them (T888).
+        shared = any(other.game == game and other.server_dir != folder for other in state.installs)
         left = forever_play.remove_trust(
             entry,
             folder,
             thumbprint=install.trusted_ca_thumbprint if install is not None else None,
+            stale=install.stale_ca_thumbprints if install is not None else (),
+            strip_hosts=not shared,
         )
         for line in left:
             logger.warning(
