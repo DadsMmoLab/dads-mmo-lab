@@ -841,6 +841,17 @@ def test_removal_survives_a_ca_file_that_is_gone(tmp_path: Path) -> None:
     assert forever_play.remove_trust(FOREVER, tmp_path / "gone", seams=seams) == ()
 
 
+def test_a_missing_fallback_ca_still_removes_the_tagged_hosts_line(tmp_path: Path) -> None:
+    """T888 final review: an unreadable ca.pem must not stop the hosts line coming out."""
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 trinity.actual.battle.net # yulon-wow-forever\n")
+    commands = forever_trust.remove_commands(
+        thumb=None, ca=tmp_path / "gone" / "ca.pem", hosts=hosts
+    )
+    assert commands, "the tagged line is still removed"
+    assert all(c[0] != "certutil" for c in commands), "no CA to delete"
+
+
 def test_the_shared_hosts_line_stays_while_another_install_uses_it(tmp_path: Path) -> None:
     """T888 item 7 (Codex #7): one tagged line serves every WoW Forever install on the box."""
     hosts = tmp_path / "hosts"
