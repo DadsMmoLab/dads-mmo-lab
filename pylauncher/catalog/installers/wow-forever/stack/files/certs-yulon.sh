@@ -20,28 +20,68 @@
 # fails at openssl leaves the old set exactly where it was.
 set -euo pipefail
 
-C=/srv/certs
 NAME=trinity.actual.battle.net
-FORCE=0
-[ "${1:-}" = "--force" ] && FORCE=1
-mkdir -p "$C"
+SET_FILES=(ca.pem server.pem chain.pem server.key)
+T=
+S=
 
-if [ "$FORCE" = 0 ] \
-    && [ -f "$C/chain.pem" ] && [ -f "$C/server.key" ] && [ -f "$C/server.pem" ] \
-    && [ -f "$C/ca.pem" ]; then
-    # Even when the certificates are already there: a key from the image's script is a
-    # key that must not stay in the player's folder.
-    rm -f "$C/ca.key"
-    echo "certificates ready"
-    exit 0
-fi
+cleanup() {
+    # T and S are globals because this trap runs after main() has returned, when main's
+    # locals are gone. The container is one-shot, so this only matters for a run that
+    # dies part way through.
+    rm -rf "$T" "$S" 2>/dev/null || true
+}
 
-umask 077
-T=$(mktemp -d)
-S="$C/.staging"
-rm -rf "$S"
-mkdir -p "$S"
-trap 'rm -rf "$T" "$S"' EXIT
+swap_in() {
+    # Put the staged set in $2 into the live folder $1. Four `mv`s are four chances to
+    # fail after the set is already half replaced, so the old set is copied to .previous
+    # first: any failed move puts every old file back and returns non-zero, leaving the
+    # player the whole old set rather than three new files and one old one.
+    local live=$1 staged=$2 name
+    local prev="$live/.previous"
+    local all_back=0
+    rm -rf "$prev"
+    mkdir -p "$prev"
+    for name in "${SET_FILES[@]}"; do
+        [ -e "$live/$name" ] && cp -p "$live/$name" "$prev/$name"
+    done
+    for name in "${SET_FILES[@]}"; do
+        if ! mv -f "$staged/$name" "$live/$name"; then
+            for name in "${SET_FILES[@]}"; do
+                if [ -e "$prev/$name" ]; then
+                    mv -f "$prev/$name" "$live/$name" || all_back=1
+                fi
+            done
+            [ "$all_back" = 0 ] && rm -rf "$prev"
+            echo "certs-yulon: could not swap in the new set; the old set is back" >&2
+            return 1
+        fi
+    done
+    rm -rf "$prev"
+}
+
+main() {
+    local C=/srv/certs
+    local FORCE=0
+    [ "${1:-}" = "--force" ] && FORCE=1
+    mkdir -p "$C"
+
+    if [ "$FORCE" = 0 ] \
+        && [ -f "$C/chain.pem" ] && [ -f "$C/server.key" ] && [ -f "$C/server.pem" ] \
+        && [ -f "$C/ca.pem" ]; then
+        # Even when the certificates are already there: a key from the image's script is a
+        # key that must not stay in the player's folder.
+        rm -f "$C/ca.key"
+        echo "certificates ready"
+        exit 0
+    fi
+
+    umask 077
+    T=$(mktemp -d)
+    S="$C/.staging"
+    rm -rf "$S"
+    mkdir -p "$S"
+    trap cleanup EXIT
 
 cat > "$T/ca.cnf" <<'EOF'
 [req]
@@ -85,9 +125,14 @@ openssl verify -CAfile "$T/ca.pem" "$T/server.pem"
 cp "$T/ca.pem" "$T/server.pem" "$T/chain.pem" "$T/server.key" "$S/"
 chmod 644 "$S/ca.pem" "$S/server.pem" "$S/chain.pem"
 chmod 600 "$S/server.key"
-mv -f "$S/ca.pem" "$S/server.pem" "$S/chain.pem" "$S/server.key" "$C/"
+swap_in "$C" "$S"
 # What no set writes any more: the image's CA key, and any file the old script left that
 # this one does not (the CSR, the serial, the staging folder itself).
 rm -f "$C/ca.key" "$C/server.csr" "$C/ca.srl" "$C/.staging/ca.key"
 rm -rf "$S"
 echo "certificates ready for $NAME"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi
