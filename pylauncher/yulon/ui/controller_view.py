@@ -3492,6 +3492,12 @@ def _engine_guarded(
         def port_conflicts(self, *args: object, **kwargs: object) -> NoReturn:
             self._refuse()
 
+        def refuse_start(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
+        def refuse_before_a_stop(self, *args: object, **kwargs: object) -> NoReturn:
+            self._refuse()
+
     guarded = _EngineGuarded.__new__(_EngineGuarded)
     Controller.__init__(
         guarded,
@@ -3610,6 +3616,7 @@ def _with_the_engine_guard(
         realm_name_save=refuse if services.realm_name_save is not None else None,
         repair_database=refuse if services.repair_database is not None else None,
         rebuild=refuse if services.rebuild is not None else None,
+        move=None,
     )
 
 

@@ -614,7 +614,10 @@ def test_a_docker_record_under_the_switch_refuses_a_gui_start_and_runs_no_docker
         with pytest.raises(EngineMismatch, match="set up with Docker.*now using Podman"):
             services.controller.status()
         with pytest.raises(EngineMismatch, match="set up with Docker.*now using Podman"):
+            services.controller.refuse_before_a_stop()
+        with pytest.raises(EngineMismatch, match="set up with Docker.*now using Podman"):
             services.backup()
+        assert services.move is None
     finally:
         engine._reset_for_tests()
     assert ran == []
