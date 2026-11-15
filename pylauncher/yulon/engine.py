@@ -58,17 +58,22 @@ def resolve(
 
     Podman only when the developer switch says so AND this is real Linux, not
     WSL: `sys.platform` must be `"linux"` and `platform.in_wsl()` False. Every
-    other machine is Docker, switch or no switch. The seams exist so a test
-    pins each rule without running on that machine.
+    other machine is Docker, switch or no switch. Under the switch a `DOCKER_HOST`
+    the user set to anything but the Podman socket names real Docker instead:
+    the process's commands reach whichever engine that variable points at. The
+    seams exist so a test pins each rule without running on that machine.
     """
     global _resolved
     if _resolved is not None:
         return _resolved
-    engine: Engine = (
-        "podman"
-        if _switch_says_podman(environ) and _on_supported_platform(sys_platform, wsl=wsl)
-        else "docker"
-    )
+    engine: Engine = "docker"
+    if _switch_says_podman(environ) and _on_supported_platform(sys_platform, wsl=wsl):
+        env = environ if environ is not None else os.environ
+        host = env.get("DOCKER_HOST")
+        if not host or host == f"unix://{podman_socket()}":
+            engine = "podman"
+        else:
+            logger.info(f"DOCKER_HOST names {host}, not the Podman socket; using Docker")
     _resolved = engine
     return engine
 
