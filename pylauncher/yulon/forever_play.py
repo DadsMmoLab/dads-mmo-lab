@@ -38,6 +38,7 @@ from yulon import (
 )
 from yulon.catalog import stack_install
 from yulon.catalog.catalog import ForeverLogin, SingleEntry
+from yulon.catalog.installer import InstallerError
 from yulon.catalog.stack_install import CertificatesError, client_problem
 from yulon.log import get_logger
 
@@ -232,7 +233,7 @@ def remake_certificates(
             ) from exc
     try:
         seams.remake_certificates(entry, server_dir)
-    except (CertificatesError, docker.DockerCommandError) as exc:
+    except (CertificatesError, docker.DockerCommandError, InstallerError) as exc:
         raise single_play.PlayRefusal(str(exc)) from exc
     restart = _restart_login(entry, server_dir, seams)
     logger.info(
