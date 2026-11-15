@@ -28,7 +28,7 @@ import re
 import threading
 import time
 from bisect import bisect_right
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
@@ -344,14 +344,51 @@ def replace(
 class WatchSeams:
     """What the watch reaches outside itself through. Real by default (Linux)."""
 
-    find_game: Callable[[], int | None] = lambda: _find_game(Path("/proc"))
+    find_game: Callable[[Path | None], int | None] = lambda client: game_pid(Path("/proc"), client)
     open_memory: Callable[[int], Memory] = Memory
     tcp_tables: Callable[[], list[str]] = field(default=lambda: _tcp_tables(Path("/proc")))
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
 
 
-def _find_game(proc: Path) -> int | None:
+def wine_path(argv0: bytes) -> Path | None:
+    """The Linux path behind Wine's Windows `argv[0]`, or None when it is another drive.
+
+    Wine hands the game a Windows path for a file on this filesystem: `Z:\\home\\deck\\...`
+    (the Z: drive is `/`). A `C:` path lives inside a prefix and is not a path this side
+    can compare.
+    """
+    text = argv0.decode("utf-8", "replace").strip().strip('"')
+    if len(text) < 2 or text[1] != ":":
+        return None
+    drive, rest = text[0].upper(), text[2:].replace("\\", "/")
+    if drive != "Z":
+        return None
+    return Path("/" + rest.lstrip("/"))
+
+
+def is_this_game(argv0: bytes, client_dir: Path | None) -> bool:
+    """`argv0` is WoW Forever's game AND it runs from `client_dir` (when one is named).
+
+    T888: the same client folder on the same Deck is what Play launched; a second copy
+    elsewhere (another install's folder, a desktop game) is not this server's game.
+    """
+    if not is_game(argv0):
+        return False
+    if client_dir is None:
+        return True
+    path = wine_path(argv0)
+    return path is not None and path.is_relative_to(client_dir)
+
+
+def game_pid(proc: Path, client_dir: Path | None = None) -> int | None:
+    """The pid of this client's game under Wine, or None (`is_this_game`)."""
+    return next(iter(game_pids(proc, client_dir)), None)
+
+
+def game_pids(proc: Path, client_dir: Path | None = None) -> list[int]:
+    """Every pid of this client's game under Wine, in `proc`'s order (Linux)."""
+    found: list[int] = []
     for entry in proc.iterdir():
         if not entry.name.isdigit():
             continue
@@ -361,9 +398,9 @@ def _find_game(proc: Path) -> int | None:
             argv0 = (entry / "cmdline").read_bytes().split(b"\0", 1)[0]
         except OSError:
             continue
-        if is_game(argv0):
-            return int(entry.name)
-    return None
+        if is_this_game(argv0, client_dir):
+            found.append(int(entry.name))
+    return found
 
 
 def _uid() -> int:
@@ -386,22 +423,30 @@ def watch(
     region_group: int,
     world_port: int,
     *,
+    client_dir: Path | None = None,
+    before: Collection[int] = (),
     say: Callable[[str], None] = logger.info,
     halt: threading.Event | None = None,
     seams: WatchSeams | None = None,
 ) -> bool:
-    """Watch the game until it closes; True once the server's key was written at least once."""
+    """Watch the game until it closes; True once the server's key was written at least once.
+
+    `client_dir` is the player's client folder: only a game running from under it is this
+    server's game (T888). `before` is the set of pids that matched before Play launched,
+    and only a pid outside it is attached to -- an older copy that was already running is
+    somebody else's game.
+    """
     s = seams if seams is not None else WatchSeams()
     stop = halt if halt is not None else threading.Event()
     group_key = KNOWN_REGION_KEYS[region_group - 1]
     started = s.clock()
-    pid = s.find_game()
-    while pid is None:
+    pid = s.find_game(client_dir)
+    while pid is None or pid in before:
         if stop.is_set() or s.clock() - started > START_WAIT:
             say("The game did not start, so no login key was written.")
             return False
         s.sleep(0.25)
-        pid = s.find_game()
+        pid = s.find_game(client_dir)
     memory: Memory | None = None
     for _ in range(120):  # Wine allows ptrace a moment after the process starts
         try:
@@ -482,16 +527,41 @@ def _run(
     return written
 
 
+_WATCHES: dict[str, threading.Thread] = {}
+"""The key watch running for each client folder (T888): one game, one watch."""
+
+_WATCHES_LOCK = threading.Lock()
+
+
 def start_watch(
-    server_key: bytes, region_group: int, world_port: int, say: Callable[[str], None] = logger.info
+    server_key: bytes,
+    region_group: int,
+    world_port: int,
+    *,
+    client_dir: Path | None = None,
+    before: Collection[int] = (),
+    say: Callable[[str], None] = logger.info,
 ) -> threading.Thread:
-    """`watch` on a daemon thread, so Play returns while the game starts."""
-    thread = threading.Thread(
-        target=watch,
-        args=(server_key, region_group, world_port),
-        kwargs={"say": say},
-        name="forever-keywatch",
-        daemon=True,
-    )
-    thread.start()
-    return thread
+    """`watch` on a daemon thread, so Play returns while the game starts.
+
+    Never a second watch for the same client folder while one runs: the thread already
+    watching is returned instead (`watch` itself ends with the game).
+    """
+    key_path = "" if client_dir is None else str(client_dir)
+    with _WATCHES_LOCK:
+        live = _WATCHES.get(key_path)
+        if live is not None and live.is_alive():
+            logger.info(
+                "a key watch for this client folder is already running; not starting another"
+            )
+            return live
+        thread = threading.Thread(
+            target=watch,
+            args=(server_key, region_group, world_port),
+            kwargs={"client_dir": client_dir, "before": before, "say": say},
+            name="forever-keywatch",
+            daemon=True,
+        )
+        _WATCHES[key_path] = thread
+        thread.start()
+        return thread

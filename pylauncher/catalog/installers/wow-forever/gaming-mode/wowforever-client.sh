@@ -129,7 +129,7 @@ fi
 run_slr() { "$SLR" --verb=waitforexitandrun -- "$PROTON_DIR/proton" waitforexitandrun "$@"; }
 
 # ── The login key, from Linux beside the game (stops with it) ─────────────────
-setsid python3 -I - "${WOWFO_WORLD_PORT:-8085}" "$$" >>"$LOGFILE" 2>&1 <<'PY' &
+setsid python3 -I - "${WOWFO_WORLD_PORT:-8085}" "$$" "$CLIENT_ROOT" >>"$LOGFILE" 2>&1 <<'PY' &
 import ctypes, os, re, sys, time
 from bisect import bisect_right
 
@@ -149,6 +149,7 @@ KEYS = [bytes.fromhex(h) for h in (
 SERVER = bytes.fromhex("02596F0D0C061A8B30745988FD72C59E29EC367FB0F341F28E0F08D037BAFC69")
 GROUP = KEYS[8 - 1]  # Network.EnterEncryptedModeRegionGroup
 PORT, PARENT = int(sys.argv[1]), int(sys.argv[2])
+CLIENT = os.path.normpath(sys.argv[3])
 PAGE, BATCH, SEP = 4096, 16 << 20, bytes(32)
 PRESENT, SWAPPED, DIRTY, SCAN = 1 << 3, 1 << 4, 1 << 7, 0xC0606610
 GAME = re.compile(rb"\\_forever_\\wowb?\.exe(?: |$)", re.I)
@@ -169,16 +170,33 @@ class ScanArg(ctypes.Structure):
 libc = ctypes.CDLL(None, use_errno=True)
 libc.ioctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_void_p]
 
-def find_game():
+def under_client(argv0):
+    # Wine's argv[0] is the Windows path of a file on this filesystem: Z: is /. Only a game
+    # running from THIS client folder is this server's game, and only a pid that was not
+    # there before the launch is the one this tile started (T888).
+    t = argv0.decode("utf-8", "replace").strip().strip('"')
+    if len(t) < 2 or t[1] != ":" or t[0].upper() != "Z":
+        return False
+    p = os.path.normpath("/" + t[2:].replace("\\", "/").lstrip("/"))
+    return p == CLIENT or p.startswith(CLIENT.rstrip("/") + "/")
+
+def game_pids():
+    out = []
     for d in os.listdir("/proc"):
         if d.isdigit():
             try:
-                if os.stat("/proc/" + d).st_uid == os.getuid() and GAME.search(
-                        open("/proc/%s/cmdline" % d, "rb").read().split(b"\0", 1)[0]):
-                    return int(d)
+                if os.stat("/proc/" + d).st_uid == os.getuid():
+                    argv0 = open("/proc/%s/cmdline" % d, "rb").read().split(b"\0", 1)[0]
+                    if GAME.search(argv0) and under_client(argv0):
+                        out.append(int(d))
             except OSError:
                 pass
-    return None
+    return out
+
+BEFORE = set(game_pids())  # running before the launch below: not ours to write into
+
+def find_game():
+    return next((p for p in game_pids() if p not in BEFORE), None)
 
 def mappings(pid):
     out = []

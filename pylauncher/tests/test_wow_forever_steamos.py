@@ -20,6 +20,7 @@ from yulon.forever_keywatch import (
     WatchSeams,
     clip,
     is_game,
+    is_this_game,
     take,
     world_connected,
     writable_mappings,
@@ -149,7 +150,7 @@ def _watch_seams(game: FakeGame | None, tcp: Sequence[str] = ()) -> WatchSeams:
         now[0] += seconds
 
     return WatchSeams(
-        find_game=lambda: game.pid if game is not None else None,
+        find_game=lambda _client: game.pid if game is not None else None,
         open_memory=lambda _pid: game,  # type: ignore[arg-type,return-value]
         tcp_tables=lambda: list(tcp),
         sleep=sleep,
@@ -181,7 +182,7 @@ def test_the_watch_idles_in_the_world_and_gives_up_on_a_game_that_never_starts()
             game.buf[64:96] = GROUP8  # a copy made long after the login
 
     seams = WatchSeams(
-        find_game=lambda: game.pid,
+        find_game=lambda _client: game.pid,
         open_memory=lambda _pid: game,  # type: ignore[arg-type,return-value]
         tcp_tables=lambda: [up],
         sleep=sleep,
@@ -194,6 +195,60 @@ def test_the_watch_idles_in_the_world_and_gives_up_on_a_game_that_never_starts()
         SERVER_KEY, 8, 8085, say=said.append, seams=_watch_seams(None)
     )
     assert said == ["The game did not start, so no login key was written."]
+
+
+def test_only_a_game_running_from_this_client_folder_is_this_servers_game() -> None:
+    """T888 item 5: another copy of the game on the Deck is another game's memory."""
+    deck = Path("/home/deck/Games/WoWForever-70888/World of Warcraft")
+    mine = b"Z:\\home\\deck\\Games\\WoWForever-70888\\World of Warcraft\\_forever_\\Wow.exe"
+    other = b"Z:\\home\\deck\\Games\\Other\\_forever_\\Wow.exe"
+    assert is_this_game(mine, deck) and is_this_game(mine, None)
+    assert not is_this_game(other, deck)
+    assert not is_this_game(
+        mine.replace(b"_forever_", b"_forever_2"), deck
+    ), "a prefix is not a parent"
+    assert not is_this_game(b"C:\\Games\\_forever_\\Wow.exe", deck), "a prefix path is not ours"
+    assert forever_keywatch.wine_path(mine) == Path(
+        "/home/deck/Games/WoWForever-70888/World of Warcraft/_forever_/Wow.exe"
+    )
+
+
+def test_the_watch_ignores_a_game_that_was_already_running() -> None:
+    """T888 item 5: the pre-launch pid set is skipped; the new pid is the one attached to."""
+    data, spots = _memory_with_keys()
+    game = FakeGame(bytes(data))
+    opened: list[int] = []
+    asked = {"n": 0}
+
+    def find_game(_client: Path | None) -> int | None:
+        asked["n"] += 1
+        return 111 if asked["n"] == 1 else game.pid
+
+    seams = WatchSeams(
+        find_game=find_game,
+        open_memory=lambda pid: (opened.append(pid), game)[1],  # type: ignore[arg-type,return-value]
+        tcp_tables=lambda: [],
+        sleep=lambda _s: None,
+        clock=lambda: 0.0,
+    )
+    assert forever_keywatch.watch(SERVER_KEY, 8, 8085, before=(111,), seams=seams)
+    assert opened == [game.pid]
+    assert game.buf[spots[0] : spots[0] + 32] == SERVER_KEY
+
+
+def test_linux_play_refuses_while_the_game_this_client_starts_already_runs(
+    tmp_path: Path,
+) -> None:
+    """T888 item 5: on the Deck, `forever_keywatch`'s own finder is the refusal."""
+    calls: list[str] = []
+    seams = forever_play.PlaySeams(
+        **{**_linux_seams(calls).__dict__, "find_game": lambda _client: 4040}
+    )
+    with pytest.raises(PlayRefusal, match="already running"):
+        forever_play.play(
+            FOREVER, _server(tmp_path), _client(tmp_path), os_name="linux", seams=seams
+        )
+    assert calls == []
 
 
 def test_the_soft_dirty_flag_is_the_one_the_kernel_defines() -> None:
@@ -429,7 +484,7 @@ def _linux_seams(calls: list[str], *, hosts: bool = True) -> forever_play.PlaySe
         hosts_ready=lambda portal: calls.append(f"hosts {portal}") is None and hosts,
         prepare_proton=prepare,  # type: ignore[arg-type]
         start_game=lambda runtime, exe, args: calls.append(f"start {exe.name} {' '.join(args)}"),
-        keywatch=lambda key, group, port: calls.append(f"keywatch {group} {port}"),
+        keywatch=lambda key, group, port, **_kw: calls.append(f"keywatch {group} {port}"),
     )
 
 
