@@ -144,7 +144,7 @@ OLD_CERTS_REASON = (
 )
 
 
-def certificate_problem(server_dir: Path, login: ForeverLogin) -> str | None:
+def certificate_remake_reason(server_dir: Path, login: ForeverLogin) -> str | None:
     """Why this install's certificates must be made again before Play trusts them; None.
 
     Three answers: `certs/ca.key` exists (the image's script left the CA's private key in a
@@ -264,7 +264,7 @@ def play(
         )
     stale = ""
     if stack is not None and stack.certificates:
-        reason = certificate_problem(server_dir, login)
+        reason = certificate_remake_reason(server_dir, login)
         if reason is not None:
             stale = remake_certificates(entry, server_dir, login, seams=s, say=say)
     if os_name == "windows":
