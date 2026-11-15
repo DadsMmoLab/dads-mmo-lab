@@ -54,3 +54,14 @@ def test_run_once_removes_its_container_and_starts_nothing_else(
 ) -> None:
     docker.compose_run_once(tmp_path, "meshes", profiles=("seed",))
     assert ran[0][0] == ["compose", "--profile", "seed", "run", "--rm", "--no-deps", "meshes"]
+    docker.compose_run_once(tmp_path, "certificates", profiles=("seed",), command=("--force",))
+    assert ran[1][0] == [
+        "compose",
+        "--profile",
+        "seed",
+        "run",
+        "--rm",
+        "--no-deps",
+        "certificates",
+        "--force",
+    ]

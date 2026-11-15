@@ -79,10 +79,14 @@ class PlaySeams:
     trust: Callable[..., bool] = forever_trust.ensure
     trust_record: TrustRecord = TrustRecord()
     """Where the trusted CA's thumbprint is recorded (`state.KnownInstall`), for removal."""
-    remake_certificates: Callable[[Path], None] = stack_install.make_certificates
-    """Make the install's certificates again, in the stack's own image (T888)."""
+    remake_certificates: Callable[[SingleEntry, Path], None] = stack_install.remake_certificates
+    """Re-render the compose files, then make the certificates again (T888)."""
     restart_service: Callable[..., None] = docker.compose_up_service
-    """Restart one service of the install after its certificates changed (`--force-recreate`)."""
+    """Restart the login server after its certificates changed (`--force-recreate`)."""
+    container_project: Callable[[str], str | None] = docker.container_project
+    """Which compose project owns a container, so a same-named container is never restarted."""
+    compose_project: Callable[[SingleEntry, Path], str] = stack_install.project_of
+    """This install's own compose project name, to compare the container's owner against."""
     account: Callable[..., tuple[str, str]] = forever_account.ensure
     start_client: Callable[[play_launch.LaunchSpec], bool] = single_play.start
     watch: Callable[..., object] = forever_key.start_watch
@@ -142,20 +146,6 @@ def _set(lines: list[str], key: str, value: str) -> list[str]:
 ALREADY_RUNNING = "WoW Forever is already running. Close it, then press Play again."
 """What Play refuses with while this client's game runs (T888)."""
 
-CERTIFICATE_FILES: tuple[str, ...] = (
-    "ca.key",
-    "ca.pem",
-    "server.key",
-    "server.pem",
-    "chain.pem",
-)
-"""Everything the old installer's script and this one write, removed before a remake.
-
-`ca.key` is on the list although Yu'lon's own script never writes it there: the image's
-`certs.sh` did, in a folder the player can write to, and an install made by the old one
-has to lose it.
-"""
-
 OLD_CERTS_REASON = (
     "the certificates were made by the older script, whose CA also vouched for Blizzard's "
     "real actual.battle.net hosts and left its key in the install folder"
@@ -188,13 +178,19 @@ def remake_certificates(
 ) -> str:
     """Make the install's certificates again; the old CA's thumbprint, or "".
 
-    The old files go first (a script that finds `chain.pem` and friends says "ready" and
-    leaves them), and with them the CA's key the old script left behind. The stack's own
-    image makes the new ones; the login and world services are restarted only if they were
-    running, since they read the certificate at start. One INFO line, and no prompt beyond
-    the one the trust step asks for anyway.
+    Before anything is replaced the old CA's thumbprint is written to the install record
+    (T888): the old root stays in this computer's store until a `certutil -delstore`
+    succeeds, and that name must survive a declined prompt or a Yu'lon closed at the wrong
+    moment. The stack's own script then makes the new set, in a staging folder inside the
+    container, and swaps it in only after `openssl verify` -- nothing in `certs/` is
+    deleted from here, where rootful Docker owns the folder. Only the login server reads
+    the new certificate at its start, and it is restarted only when it was running AND the
+    container of that name belongs to THIS install's compose project (a fixed container
+    name is not proof of ownership). One INFO line, and no prompt beyond the one the trust
+    step asks for anyway.
 
-    Raises `PlayRefusal` when the script or a restart fails.
+    Raises `PlayRefusal` when the certificate or a restart fails; a failed script leaves
+    the old set untouched and Play refuses with its sentence.
     """
     ca = server_dir / login.ca
     old = ""
@@ -211,43 +207,49 @@ def remake_certificates(
                 f"({exc.strerror or exc}), so it was not replaced: a certificate this "
                 "computer trusts must not be lost track of. Press Play again."
             ) from exc
-    for name in CERTIFICATE_FILES:
-        try:
-            (ca.parent / name).unlink(missing_ok=True)
-        except OSError as exc:
-            raise single_play.PlayRefusal(
-                f"The old certificate {ca.parent / name} could not be removed "
-                f"({exc.strerror or exc}), so the certificate was not remade."
-            ) from exc
     try:
-        seams.remake_certificates(server_dir)
+        seams.remake_certificates(entry, server_dir)
     except (CertificatesError, docker.DockerCommandError) as exc:
         raise single_play.PlayRefusal(str(exc)) from exc
-    restarted = [
-        service
-        for service in _listener_services(entry)
-        if seams.state_of(forever_account.container_of(entry, service)).status == "running"
-    ]
-    for service in restarted:
-        try:
-            seams.restart_service(server_dir, service, force_recreate=True)
-        except docker.DockerCommandError as exc:
-            raise single_play.PlayRefusal(
-                f"The {service} server could not be restarted with the new certificate: {exc}"
-            ) from exc
+    restart = _restart_login(entry, server_dir, seams)
     logger.info(
-        "remade the server's certificates; restarted "
-        + (", ".join(restarted) if restarted else "nothing")
+        "remade the server's certificates; restarted " + (_LOGIN_SERVICE if restart else "nothing")
     )
     say("This server's certificate was made again for its own login name.")
     return old
 
 
-def _listener_services(entry: SingleEntry) -> tuple[str, ...]:
-    """The services that read the certificate at start: the login server and the world."""
-    stack = entry.install.stack
-    named = {service.service for service in stack.services} if stack is not None else set()
-    return tuple(s for s in ("bnet", forever_account.WORLD_SERVICE) if s in named)
+_LOGIN_SERVICE = "bnet"
+"""The one service that reads the certificate at start: the Battle.net login server."""
+
+
+def _restart_login(entry: SingleEntry, server_dir: Path, seams: PlaySeams) -> bool:
+    """Restart the login server if it is running and this install owns it; whether it did.
+
+    `--force-recreate` makes a new container that re-reads `certs/`, and only the login
+    server needs it (T888): the world server does not use the certificate, and recreating
+    it used to race the account step that runs right after. A container OF THAT NAME in
+    another compose project (a second install, an abandonware copy) is not this install's,
+    and is left alone.
+    """
+    container = forever_account.container_of(entry, _LOGIN_SERVICE)
+    if seams.state_of(container).status != "running":
+        return False
+    owner = seams.container_project(container)
+    project = seams.compose_project(entry, server_dir)
+    if owner != project:
+        logger.warning(
+            f"not restarting {container} with the new certificate: it belongs to "
+            + (f"the compose project {owner!r}, not {project!r}" if owner else "no compose project")
+        )
+        return False
+    try:
+        seams.restart_service(server_dir, _LOGIN_SERVICE, force_recreate=True)
+    except docker.DockerCommandError as exc:
+        raise single_play.PlayRefusal(
+            f"The {_LOGIN_SERVICE} server could not be restarted with the new certificate: {exc}"
+        ) from exc
+    return True
 
 
 def play(
