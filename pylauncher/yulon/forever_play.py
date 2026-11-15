@@ -331,7 +331,12 @@ def play(
     else:
         try:
             runtime = s.prepare_proton(
-                server_dir, client_dir, server_dir / login.ca, say, portal=login.portal
+                server_dir,
+                client_dir,
+                server_dir / login.ca,
+                say,
+                portal=login.portal,
+                stale=s.trust_record.stale(),
             )
             s.start_game(runtime, exe, entry.play.args)
         except (forever_proton.ProtonError, forever_trust.TrustError) as exc:
