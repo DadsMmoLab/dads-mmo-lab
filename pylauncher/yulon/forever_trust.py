@@ -499,8 +499,14 @@ def remove_commands(
     known = [t for t in [thumb, *dict.fromkeys(stale)] if t]
     if thumb is None and ca is not None:
         s = seams if seams is not None else TrustSeams()
-        fallback = thumbprint(ca)
-        if _installed(s, fallback):
+        try:
+            fallback: str | None = thumbprint(ca)
+        except TrustError as exc:
+            # No readable fallback CA: nothing of it to delete, and the hosts line below
+            # must still go (T888 final review).
+            logger.info(f"no fallback CA to remove: {exc}")
+            fallback = None
+        if fallback is not None and _installed(s, fallback):
             known.insert(0, fallback)
     commands: list[list[str]] = [
         ["certutil", "-delstore", "Root", thumbprint_] for thumbprint_ in dict.fromkeys(known)
