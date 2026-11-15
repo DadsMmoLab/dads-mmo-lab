@@ -2349,12 +2349,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "content differs. A short listing leaves a file out, which the compose file's mount then "
         "names as missing when the server starts; no other folder is written"
     ),
-    ("forever_keywatch.py", "_find_game"): (
+    ("forever_keywatch.py", "game_pids"): (
         "WoW Forever on Linux. Lists `/proc` to find the player's own Wine process whose argv[0] "
-        "is `...\\_forever_\\Wow.exe`, so the key watch can open its memory. It writes nothing on "
-        "disk and decides no write anywhere: a short listing only means the game is looked for "
-        "again a quarter of a second later, and a game never found writes no key, which the "
-        "player sees as a failed login"
+        "is `...\\_forever_\\Wow.exe` UNDER this client's folder, so the key watch can open its "
+        "memory; Play asks the same function before it starts a second game (T888). It writes "
+        "nothing on disk and decides no write anywhere: a short listing only means the game is "
+        "looked for again a quarter of a second later, and a game never found writes no key, "
+        "which the player sees as a failed login"
     ),
     ("forever_proton.py", "library_folders"): (
         "WoW Forever on Linux. Globs `/run/media` for Steam libraries on an SD card or drive, "
