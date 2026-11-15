@@ -209,13 +209,42 @@ def unwritable(entry: SingleEntry, client: Path) -> tuple[Path, ...]:
     return tuple(client / name for name in play.writable if not writable(client / name))
 
 
+UNSAFE_FOLDER = (
+    "{folder} holds the character {char}, and Windows would read that as the end of the "
+    "folder's name when it makes the game's settings folders writable: it would run what "
+    "follows as a separate administrator command. So Yu'lon did not try. Move or rename the "
+    "client folder so its path holds none of {chars}, then press Play again."
+)
+"""What a player reads when their client's path cannot be passed to the administrator prompt."""
+
+
+class UnsafeClientFolder(RuntimeError):
+    """A folder `cmd.exe` would reparse: no command may be built for it."""
+
+
+def unsafe_folder(folder: Path) -> str | None:
+    """The `cmd.exe` metacharacter in `folder`'s path, or None (`platform.shell_metacharacter`)."""
+    return platform.shell_metacharacter(str(folder))
+
+
 def grant_commands(folders: Sequence[Path], user_sid: str) -> list[list[str]]:
     """The commands that make `folders` the player's to write: mkdir where missing, then icacls.
 
     Named by SID (`*S-1-5-21-...`), which `icacls` reads the same in every locale.
+
+    Refused (`UnsafeClientFolder`) before a single command is built for a folder whose
+    path holds a character `cmd.exe` reparses: `cmd /c mkdir` joins its arguments back
+    into one command line and parses it again, so `C:\\a&b` made the prompt run `b`.
     """
     commands: list[list[str]] = []
     for folder in folders:
+        char = unsafe_folder(folder)
+        if char is not None:
+            raise UnsafeClientFolder(
+                UNSAFE_FOLDER.format(
+                    folder=folder, char=char, chars=" ".join(platform.SHELL_METACHARACTERS)
+                )
+            )
         if not folder.is_dir():
             commands.append(["cmd", "/c", "mkdir", str(folder)])
         commands.append(["icacls", str(folder), "/grant", f"*{user_sid}:{GRANT}"])
@@ -244,7 +273,11 @@ def grant(
     folders = unwritable(entry, client)
     if not folders:
         return GrantReport()
-    commands = grant_commands(folders, user_sid())
+    try:
+        commands = grant_commands(folders, user_sid())
+    except UnsafeClientFolder as exc:
+        # No prompt, and no command line: the player renames the folder, as said.
+        return GrantReport(problems=(str(exc),))
     wrapped = batch(commands)
     if wrapped is None:
         failed = []

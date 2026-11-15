@@ -482,10 +482,13 @@ def test_what_is_missing_goes_behind_one_prompt_and_no_says_so(tmp_path: Path) -
         forever_trust.ensure(_ca(tmp_path), "trinity.actual.battle.net", seams=seams)
 
 
-def test_only_certutil_icacls_and_cmd_run_elevated() -> None:
-    assert platform.ADMIN_BATCH_PROGRAMS == ("icacls", "cmd", "certutil")
+def test_only_certutil_and_icacls_run_elevated_and_cmd_only_in_its_own_forms() -> None:
+    """T888 item 4: `cmd` left the list, so a bare `cmd /c ...` cannot reach the prompt."""
+    assert platform.ADMIN_BATCH_PROGRAMS == ("icacls", "certutil")
     with pytest.raises(ValueError):
         platform.elevated_admin_batch([["powershell", "-c", "x"]], is_admin=False)
+    with pytest.raises(ValueError, match="exact forms"):
+        platform.elevated_admin_batch([["cmd", "/c", "whoami"]], is_admin=False)
 
 
 # -- forever_account -----------------------------------------------------------------
