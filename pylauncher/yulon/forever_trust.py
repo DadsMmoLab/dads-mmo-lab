@@ -67,6 +67,21 @@ def _pem(der: bytes) -> bytes:
     return f"-----BEGIN CERTIFICATE-----\n{body}-----END CERTIFICATE-----\n".encode("ascii")
 
 
+_BASE64_BODY = re.compile(r"[A-Za-z0-9+/]*={0,2}")
+
+
+def _pem_body(text: str) -> bytes:
+    """A PEM block's body as DER, refusing anything that is not exactly base64 (T888).
+
+    `b64decode(validate=True)` alone is not enough: Python 3.11 accepts excess padding
+    (`AAAA====`) that 3.13 refuses, and the Windows release is built on 3.11.
+    """
+    body = "".join(text.split())
+    if not body or len(body) % 4 != 0 or _BASE64_BODY.fullmatch(body) is None:
+        raise ValueError("the certificate body is not base64")
+    return base64.b64decode(body, validate=True)
+
+
 def _certificate_der(ca: Path) -> bytes:
     """`ca`'s one certificate's DER. Raises `TrustError(UNCHECKED)` when it holds none."""
     try:
@@ -79,7 +94,7 @@ def _certificate_der(ca: Path) -> bytes:
         logger.warning(f"{ca} holds no certificate")
         raise TrustError(UNCHECKED)
     try:
-        return base64.b64decode("".join(found.group(1).split()), validate=True)
+        return _pem_body(found.group(1))
     except ValueError as exc:
         logger.warning(f"{ca} holds no readable certificate: {exc}")
         raise TrustError(UNCHECKED) from exc
@@ -147,7 +162,7 @@ def thumbprint(ca: Path) -> str:
     if found is None:
         raise TrustError(f"{ca} holds no certificate. Start the server once: it makes it.")
     try:
-        der = base64.b64decode("".join(found.group(1).split()), validate=True)
+        der = _pem_body(found.group(1))
     except ValueError as exc:
         raise TrustError(
             f"{ca} holds no readable certificate ({exc}). Start the server once: it makes it."

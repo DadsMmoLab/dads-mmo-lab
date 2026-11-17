@@ -1153,6 +1153,7 @@ def build_window() -> object:
         two that follow a successful prompt stay warnings: the trust itself is in place,
         and the CA can still be taken out from the certificate manager by hand.
         """
+        from yulon import forever_play  # TYPE_CHECKING-only at the top; used at run time here
         from yulon.state import save_state
 
         def install() -> KnownInstall | None:
