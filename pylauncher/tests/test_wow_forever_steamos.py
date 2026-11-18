@@ -260,6 +260,70 @@ def test_the_finder_is_every_pid_and_resolves_the_client_folder(tmp_path: Path) 
     assert forever_keywatch.game_pids(proc, alias) == [100, 200, 300], "the alias is the folder"
 
 
+def _prefix(root: Path, client: Path) -> Path:
+    """A prefix's `dosdevices` as Proton makes it: `s:` is the client, `z:` is `/`."""
+    dosdevices = root / "pfx" / "dosdevices"
+    dosdevices.mkdir(parents=True)
+    (root / "pfx" / "drive_c").mkdir()
+    (dosdevices / "c:").symlink_to("../drive_c", target_is_directory=True)
+    (dosdevices / "s:").symlink_to(client, target_is_directory=True)
+    (dosdevices / "z:").symlink_to("/", target_is_directory=True)
+    return dosdevices
+
+
+def test_a_proton_game_on_drive_s_is_read_through_its_own_prefix(tmp_path: Path) -> None:
+    """T888 D1-D3: Proton links `s:` to the client folder, so the game is `S:\\_forever_\\Wow.exe`.
+
+    Measured on Deck #2 (GE-Proton11-12), 2026-11-17: a `Z:`-only reading never found the
+    game, so the key watch never attached and every login failed with WOW51900319.
+    """
+    client = tmp_path / "Games" / "WoWForever" / "World of Warcraft"
+    (client / "_forever_").mkdir(parents=True)
+    other = tmp_path / "Games" / "Other"
+    (other / "_forever_").mkdir(parents=True)
+    mine = _prefix(tmp_path / "mine", client)
+    theirs = _prefix(tmp_path / "theirs", other)
+    argv0 = b"S:\\_forever_\\Wow.exe"
+    assert forever_keywatch.wine_path(argv0, mine) == client.resolve() / "_forever_/Wow.exe"
+    assert is_this_game(argv0, client, mine)
+    assert not is_this_game(argv0, client, theirs), "another prefix's s: is another folder"
+    assert not is_this_game(argv0, client), "without the prefix an S: path cannot be told"
+    drive_c = (tmp_path / "mine/pfx/drive_c").resolve()
+    assert forever_keywatch.wine_path(b"C:\\x.exe", mine) == drive_c / "x.exe", "a relative link"
+    assert forever_keywatch.wine_path(b"Q:\\_forever_\\Wow.exe", mine) is None, "no such drive"
+    z = f"Z:{client}/_forever_/Wow.exe".replace("/", "\\").encode()
+    assert is_this_game(z, client, mine) and is_this_game(z, client)
+
+
+def test_prefix_dosdevices_reads_wineprefix_from_a_process_environment() -> None:
+    environ = b"HOME=/home/deck\0WINEPREFIX=/home/deck/x/pfx/\0STEAM_COMPAT_INSTALL_PATH=/c\0"
+    assert forever_keywatch.prefix_dosdevices(environ) == Path("/home/deck/x/pfx/dosdevices")
+    assert forever_keywatch.prefix_dosdevices(b"HOME=/home/deck\0") is None
+    assert forever_keywatch.prefix_dosdevices(b"WINEPREFIX=\0") is None
+
+
+def test_the_finder_reads_each_games_drive_through_its_own_wineprefix(tmp_path: Path) -> None:
+    """T888 D1-D3: `game_pids` (the watch AND Play's already-running refusal) finds S: games."""
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    client = tmp_path / "Games" / "WoWForever"
+    (client / "_forever_").mkdir(parents=True)
+    other = tmp_path / "Games" / "Other"
+    (other / "_forever_").mkdir(parents=True)
+    mine = _prefix(tmp_path / "mine", client)
+    theirs = _prefix(tmp_path / "theirs", other)
+    argv0 = b"S:\\_forever_\\Wow.exe\0"
+    for pid, dosdevices in (("100", mine), ("200", theirs), ("300", None)):
+        (proc / pid).mkdir()
+        (proc / pid / "cmdline").write_bytes(argv0)
+        if dosdevices is not None:
+            prefix = str(dosdevices.parent) + "/"  # Proton's own WINEPREFIX ends in a slash
+            (proc / pid / "environ").write_bytes(b"WINEPREFIX=" + prefix.encode() + b"\0")
+    assert forever_keywatch.game_pids(proc, client) == [100]
+    assert forever_keywatch.game_pids(proc, other) == [200]
+    assert forever_keywatch.game_pids(proc, None) == [100, 200, 300]
+
+
 def test_linux_play_refuses_while_the_game_this_client_starts_already_runs(
     tmp_path: Path,
 ) -> None:
