@@ -523,6 +523,79 @@ def test_the_tile_watch_takes_this_client_folder_and_skips_a_game_that_was_alrea
     scope["game_pids"] = lambda: [111, 222]
     assert scope["BEFORE"] == {111}, "the shell's pre-launch snapshot, not the watch's own"
     assert scope["find_game"]() == 222, "the pid that was there before the launch is skipped"
+    # T888 D1-D3: Proton runs the game as S:\_forever_\Wow.exe; s: is read through the
+    # game's own prefix, and with no prefix to read an S: path is nobody's.
+    scope["drive_root"] = lambda _pid, drive: str(client) if drive == "s" else None
+    assert under(b"S:\\_forever_\\Wow.exe", 4242)
+    assert not under(b"S:\\_forever_\\Wow.exe"), "no pid, no prefix: not this client's game"
+    scope["drive_root"] = lambda _pid, drive: "/home/deck/Games/Other" if drive == "s" else None
+    assert not under(b"S:\\_forever_\\Wow.exe", 4242), "another prefix's s: is another folder"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads a live /proc")
+def test_every_finder_sees_a_proton_game_on_drive_s(tmp_path: Path) -> None:
+    """T888 D1-D3, end to end on /proc: a process whose argv[0] is `S:\\_forever_\\Wow.exe`
+    and whose WINEPREFIX links s: to the client folder is THIS client's game -- for Play's
+    refusal and watch (`forever_keywatch.game_pids`), the tile's pre-launch snapshot
+    (`client_pids`) and the tile's own watch (`under_client`). Before the fix all three
+    read only `Z:` and never saw the game on the Deck.
+    """
+    from yulon import forever_keywatch
+
+    client = tmp_path / "Games" / "WoWForever" / "World of Warcraft"
+    (client / "_forever_").mkdir(parents=True)
+    other = tmp_path / "Games" / "Other"
+    (other / "_forever_").mkdir(parents=True)
+    dosdevices = tmp_path / "prefix" / "pfx" / "dosdevices"
+    dosdevices.mkdir(parents=True)
+    (dosdevices / "s:").symlink_to(client, target_is_directory=True)
+    (dosdevices / "z:").symlink_to("/", target_is_directory=True)
+    env = {**os.environ, "WINEPREFIX": str(dosdevices.parent) + "/"}
+    game = subprocess.Popen(["bash", "-c", 'exec -a "S:\\_forever_\\Wow.exe" sleep 60'], env=env)
+    try:
+        for _ in range(100):  # until exec -a has replaced bash's own argv[0]
+            if Path(f"/proc/{game.pid}/cmdline").read_bytes().startswith(b"S:"):
+                break
+            subprocess.run(["sleep", "0.05"], check=True)
+        assert game.pid in forever_keywatch.game_pids(Path("/proc"), client)
+        assert game.pid not in forever_keywatch.game_pids(Path("/proc"), other)
+
+        text = (
+            resources.installers_dir() / "wow-forever/gaming-mode/wowforever-client.sh"
+        ).read_text(encoding="utf-8")
+        snapshot = text.split("client_pids() {\n", 1)[1].split("<<'PYEOF'", 1)[1]
+        snapshot = snapshot.split("\n", 1)[1].split("\nPYEOF\n", 1)[0]
+        listed = subprocess.run(
+            [sys.executable, "-I", "-", str(client)],
+            input=snapshot,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        assert str(game.pid) in listed
+        listed = subprocess.run(
+            [sys.executable, "-I", "-", str(other)],
+            input=snapshot,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        assert str(game.pid) not in listed
+
+        body = text.split("<<'PY' &\n", 1)[1].split("\nPY\n", 1)[0]
+        head = body.split("\nmain()", 1)[0]
+        scope: dict[str, Any] = {}
+        argv = sys.argv
+        sys.argv = ["-", "8085", "1", str(client), ""]
+        try:
+            exec(compile(head, "keywatch", "exec"), scope)
+        finally:
+            sys.argv = argv
+        assert scope["drive_root"](game.pid, "s") == str(client.resolve())
+        assert game.pid in scope["game_pids"]()
+    finally:
+        game.kill()
+        game.wait()
 
 
 def test_wow_forever_before_its_first_play_says_press_play_and_writes_nothing(
