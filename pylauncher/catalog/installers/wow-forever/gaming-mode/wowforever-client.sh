@@ -128,11 +128,28 @@ for d in os.listdir("/proc"):
         argv0 = open("/proc/%s/cmdline" % d, "rb").read().split(b"\0", 1)[0]
     except OSError:
         continue
-    text = argv0.decode("utf-8", "replace").strip().strip('"')
-    if len(text) < 2 or text[1] != ":" or text[0].upper() != "Z":
+    if not game.search(argv0):
         continue
-    path = os.path.realpath("/" + text[2:].replace("\\", "/").lstrip("/"))
-    if game.search(argv0) and (path == client or path.startswith(client.rstrip("/") + "/")):
+    # The drive letter is the game's own prefix's: Proton links s: to the client folder,
+    # so the game runs as S:\\_forever_\\Wow.exe, not Z:\\... (T888, D1-D3).
+    text = argv0.decode("utf-8", "replace").strip().strip('"')
+    if len(text) < 2 or text[1] != ":" or not text[0].isalpha():
+        continue
+    drive, rest = text[0].lower(), text[2:].replace("\\", "/").lstrip("/")
+    try:
+        env = open("/proc/%s/environ" % d, "rb").read().split(b"\0")
+    except OSError:
+        env = []
+    pfx = next((e[11:] for e in env if e.startswith(b"WINEPREFIX=")), b"")
+    link = os.path.join(os.fsdecode(pfx), "dosdevices", drive + ":") if pfx else ""
+    if link and os.path.lexists(link):
+        base = os.path.realpath(link)
+    elif drive == "z":
+        base = "/"
+    else:
+        continue
+    path = os.path.realpath(os.path.join(base, rest))
+    if path == client or path.startswith(client.rstrip("/") + "/"):
         print(d)
 PYEOF
 }
@@ -212,7 +229,7 @@ KEYS = [bytes.fromhex(h) for h in (
 SERVER = bytes.fromhex("02596F0D0C061A8B30745988FD72C59E29EC367FB0F341F28E0F08D037BAFC69")
 GROUP = KEYS[8 - 1]  # Network.EnterEncryptedModeRegionGroup
 PORT, PARENT = int(sys.argv[1]), int(sys.argv[2])
-CLIENT = os.path.normpath(sys.argv[3])
+CLIENT = os.path.realpath(sys.argv[3])
 PAGE, BATCH, SEP = 4096, 16 << 20, bytes(32)
 PRESENT, SWAPPED, DIRTY, SCAN = 1 << 3, 1 << 4, 1 << 7, 0xC0606610
 GAME = re.compile(rb"\\_forever_\\wowb?\.exe(?: |$)", re.I)
@@ -233,15 +250,33 @@ class ScanArg(ctypes.Structure):
 libc = ctypes.CDLL(None, use_errno=True)
 libc.ioctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_void_p]
 
-def under_client(argv0):
-    # Wine's argv[0] is the Windows path of a file on this filesystem: Z: is /. Only a game
-    # running from THIS client folder is this server's game, and only a pid that was not
-    # there before the launch is the one this tile started (T888).
+def drive_root(pid, drive):
+    # The Linux folder behind a drive letter in the game's OWN prefix (its WINEPREFIX):
+    # Proton links s: to the client folder, Wine links z: to /.
+    try:
+        env = open("/proc/%d/environ" % pid, "rb").read().split(b"\0")
+    except OSError:
+        env = []
+    pfx = next((e[11:] for e in env if e.startswith(b"WINEPREFIX=")), b"")
+    link = os.path.join(os.fsdecode(pfx), "dosdevices", drive + ":") if pfx else ""
+    if link and os.path.lexists(link):
+        return os.path.realpath(link)
+    return "/" if drive == "z" else None
+
+def under_client(argv0, pid=None):
+    # Wine's argv[0] is the Windows path of the game: S:\\_forever_\\Wow.exe under Proton
+    # (T888, D1-D3), Z:\\home\\... under plain Wine. Only a game running from THIS client
+    # folder is this server's game, and only a pid that was not there before the launch is
+    # the one this tile started (T888).
     t = argv0.decode("utf-8", "replace").strip().strip('"')
-    if len(t) < 2 or t[1] != ":" or t[0].upper() != "Z":
+    if len(t) < 2 or t[1] != ":" or not t[0].isalpha():
         return False
-    p = os.path.normpath("/" + t[2:].replace("\\", "/").lstrip("/"))
-    return p == CLIENT or p.startswith(CLIENT.rstrip("/") + "/")
+    drive = t[0].lower()
+    base = drive_root(pid, drive) if pid is not None else ("/" if drive == "z" else None)
+    if base is None:
+        return False
+    p = os.path.realpath(os.path.join(base, t[2:].replace("\\", "/").lstrip("/")))
+    return p == CLIENT or p.startswith(os.path.join(CLIENT, ""))
 
 def game_pids():
     out = []
@@ -250,7 +285,7 @@ def game_pids():
             try:
                 if os.stat("/proc/" + d).st_uid == os.getuid():
                     argv0 = open("/proc/%s/cmdline" % d, "rb").read().split(b"\0", 1)[0]
-                    if GAME.search(argv0) and under_client(argv0):
+                    if GAME.search(argv0) and under_client(argv0, int(d)):
                         out.append(int(d))
             except OSError:
                 pass

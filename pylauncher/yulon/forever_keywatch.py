@@ -64,7 +64,8 @@ SEP = bytes(32)
 """Between pieces in one search buffer: no key holds 32 zero bytes, so no match spans it."""
 
 GAME_ARGV0 = re.compile(rb"\\_forever_\\wowb?\.exe(?: |$)", re.I)
-"""Wine keeps the Windows path as argv[0]: `Z:\\...\\_forever_\\Wow.exe`."""
+"""Wine keeps the Windows path as argv[0]: `S:\\_forever_\\Wow.exe` under Proton (its `s:` is
+the install folder), `Z:\\...\\_forever_\\Wow.exe` under plain Wine."""
 
 SKIP_PREFIX = (b"/dev/", b"[vvar", b"[vdso", b"[vsyscall", b"anon_inode:", b"/SYSV")
 SKIP_SUFFIX = (b".so", b".exe", b".dll", b".drv", b".sys", b".ocx", b".cpl", b".ax")
@@ -354,44 +355,61 @@ class WatchSeams:
     clock: Callable[[], float] = time.monotonic
 
 
-def wine_path(argv0: bytes) -> Path | None:
-    """The Linux path behind Wine's Windows `argv[0]`, or None when it is another drive.
+def wine_path(argv0: bytes, dosdevices: Path | None = None) -> Path | None:
+    """The Linux path behind Wine's Windows `argv[0]`, or None when it cannot be told.
 
-    Wine hands the game a Windows path for a file on this filesystem: `Z:\\home\\deck\\...`
-    (the Z: drive is `/`). A `C:` path lives inside a prefix and is not a path this side
-    can compare.
+    Wine hands the game a Windows path, and the drive letter is whatever the game's prefix
+    maps it to: `<prefix>/dosdevices/<letter>:` is a symlink to the Linux folder. Proton
+    links `s:` to the game's install folder (STEAM_COMPAT_INSTALL_PATH), so on the Deck
+    the game runs as `S:\\_forever_\\Wow.exe`, not `Z:\\home\\deck\\...` (T888, D1-D3).
+    `dosdevices` is that folder of the game's own prefix; without one, only `Z:` (Wine's
+    default link to `/`) can be read.
     """
     text = argv0.decode("utf-8", "replace").strip().strip('"')
-    if len(text) < 2 or text[1] != ":":
+    if len(text) < 2 or text[1] != ":" or not text[0].isascii() or not text[0].isalpha():
         return None
-    drive, rest = text[0].upper(), text[2:].replace("\\", "/")
-    if drive != "Z":
-        return None
-    return Path("/" + rest.lstrip("/"))
+    drive, rest = text[0].lower(), text[2:].replace("\\", "/").lstrip("/")
+    if dosdevices is not None:
+        link = dosdevices / f"{drive}:"
+        if os.path.lexists(link):
+            return Path(os.path.realpath(link)) / rest
+    if drive == "z":
+        return Path("/") / rest
+    return None
 
 
-def is_this_game(argv0: bytes, client_dir: Path | None) -> bool:
+def is_this_game(argv0: bytes, client_dir: Path | None, dosdevices: Path | None = None) -> bool:
     """`argv0` is WoW Forever's game AND it runs from `client_dir` (when one is named).
 
     T888: the same client folder on the same Deck is what Play launched; a second copy
     elsewhere (another install's folder, a desktop game) is not this server's game. Both
     paths are resolved first: `/home/deck/Games` and a symlink to it are one folder, and a
     client folder reached through one must not let the other's game in (or keep this one
-    out).
+    out). `dosdevices` is the game's own prefix's drive folder (see `wine_path`).
     """
     if not is_game(argv0):
         return False
     if client_dir is None:
         return True
-    path = wine_path(argv0)
+    path = wine_path(argv0, dosdevices)
     return path is not None and path.resolve().is_relative_to(client_dir.resolve())
+
+
+def prefix_dosdevices(environ: bytes) -> Path | None:
+    """`$WINEPREFIX/dosdevices` from a process's `/proc/<pid>/environ`, or None."""
+    for item in environ.split(b"\0"):
+        if item.startswith(b"WINEPREFIX="):
+            value = item[len(b"WINEPREFIX=") :]
+            return Path(os.fsdecode(value)) / "dosdevices" if value else None
+    return None
 
 
 def game_pids(proc: Path, client_dir: Path | None = None) -> list[int]:
     """Every pid of this client's game under Wine, oldest first (Linux).
 
     All of them, never just the first: an older copy that is already running (a lower pid,
-    usually) must not hide the game this Play just started (T888).
+    usually) must not hide the game this Play just started (T888). Each game's drive letter
+    is read through its own prefix (its WINEPREFIX), never a fixed `Z:`.
     """
     found: list[int] = []
     for entry in proc.iterdir():
@@ -403,7 +421,15 @@ def game_pids(proc: Path, client_dir: Path | None = None) -> list[int]:
             argv0 = (entry / "cmdline").read_bytes().split(b"\0", 1)[0]
         except OSError:
             continue
-        if is_this_game(argv0, client_dir):
+        if not is_game(argv0):
+            continue
+        dosdevices = None
+        if client_dir is not None:
+            try:
+                dosdevices = prefix_dosdevices((entry / "environ").read_bytes())
+            except OSError:
+                pass  # `Z:` still reads without the prefix
+        if is_this_game(argv0, client_dir, dosdevices):
             found.append(int(entry.name))
     return sorted(found)
 
