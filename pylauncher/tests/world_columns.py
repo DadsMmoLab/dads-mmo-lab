@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import re
 
-PIN = "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2"
+PIN = "32fd3472aa74961c91cb9bc942ee3e0a44b36779"
 """mod-playerbots/azerothcore-wotlk: wow-wotlk's pin, and wow-unbound's core, since PINS
-(2026-11-09; 93333d6a since T860, 2026-11-02; 3f2969dd since T824, 8a4e76ea since v0.9.18,
-2a2211cd, T655, before). `PIN_COLUMNS` was read at `FORMER_PINS[4]`, f19a1879,
-and shown to hold here (see `VALID_AT`)."""
+(2026-11-20; e7e2e288 since PINS, 2026-11-09; 93333d6a since T860, 2026-11-02; 3f2969dd
+since T824, 8a4e76ea since v0.9.18, 2a2211cd, T655, before). `PIN_COLUMNS` was read at
+`FORMER_PINS[5]`, f19a1879, and shown to hold here (see `VALID_AT`)."""
 
 FORMER_PINS = (
+    "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2",
     "93333d6a9eb00fdf0179adde30da3c17618207d6",
     "3f2969ddb0da42b48b4fca050c02b19163ba1e20",
     "8a4e76eac8c4ccebf547113afe7b51d6c3e91641",
@@ -22,7 +23,8 @@ FORMER_PINS = (
     "f19a18799a35f7c24bdcdc9ea399c601f166259b",
     "7f12e89ee5f467a50e62eba1d525eac7dc953d03",
 )
-"""wow-wotlk's earlier pins, newest first: 93333d6a from T860 (2026-11-02) to PINS (2026-11-09);
+"""wow-wotlk's earlier pins, newest first: e7e2e288 from PINS (2026-11-09) to PINS
+(2026-11-20); 93333d6a from T860 (2026-11-02) to PINS (2026-11-09);
 3f2969dd from T824 (2026-10-28) to T860;
 8a4e76ea from v0.9.18 (2026-10-17) to T824; f19a1879 from T389 (2026-10-08, the revision
 `PIN_COLUMNS` was read at; wow-unbound's core from T580, 2026-10-09) until T655; 2a2211cd
@@ -48,8 +50,10 @@ TRUNCATE statement. Between
 because update 2026_10_28_00 runs `DROP TABLE IF EXISTS spell_proc_event`; the other DDL in the
 23 new `db_world` updates is `CREATE TABLE IF NOT EXISTS acore_string_locale` (2026_10_25_00) and
 `ALTER TABLE acore_string DROP COLUMN locale_*` (2026_10_31_00). None of those three tables is
-among `PIN_COLUMNS`. Each pin move must add its revision here after checking the same two
-things."""
+among `PIN_COLUMNS`. Between e7e2e288 and 32fd3472 (43 commits, PINS, read in a checkout
+2026-11-20) no file under `data/sql/base` changed and the 13 new `db_world` updates hold no
+ALTER, CREATE, DROP, RENAME or TRUNCATE statement. Each pin move must add its revision here
+after checking the same two things."""
 
 PIN_COLUMNS: dict[str, frozenset[str]] = {
     "creature": frozenset(

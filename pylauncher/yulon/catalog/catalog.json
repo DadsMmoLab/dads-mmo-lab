@@ -10,7 +10,8 @@
         "The tile said, until T194: \"The flagship install; module/ALE/mod/keg management is manifest-driven.\"",
         "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested.",
         "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested.",
-        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested."
+        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested.",
+        "PINS (2026-11-20): core e7e2e288 -> 32fd3472 and mod-playerbots 405f8119 -> ecc4a537, the newest at 2026-11-20, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots",
@@ -20,13 +21,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2"
+            "rev": "32fd3472aa74961c91cb9bc942ee3e0a44b36779"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "405f81196161017eebae3ee7a612d786a3ed2a9d"
+            "rev": "ecc4a537a3b43056e412fae63fb4a4271849b472"
           }
         ]
       },
@@ -312,7 +313,8 @@
       "notes": [
         "T824 (2026-10-28): mangos-tbc 15b6ddb4 -> 37767e95, playerbots da4419af -> 6823423e and tbc-db ebe51a83 -> 1c54acd2, the newest at 2026-10-28, not live-tested.",
         "T860 (2026-11-02): mangos-tbc 37767e95 -> af6b4885 and playerbots 6823423e -> de1b1823; tbc-db stays 1c54acd2 (already the newest); not live-tested.",
-        "2026-11-09: mangos-tbc af6b4885 -> ec0d40c3, playerbots de1b1823 -> 8d102f91 and tbc-db 1c54acd2 -> a4c6a8c8, the newest at 2026-11-09; not live-tested."
+        "2026-11-09: mangos-tbc af6b4885 -> ec0d40c3, playerbots de1b1823 -> 8d102f91 and tbc-db 1c54acd2 -> a4c6a8c8, the newest at 2026-11-09; not live-tested.",
+        "2026-11-20: mangos-tbc ec0d40c3 -> 147c0b63, playerbots 8d102f91 -> 87624d0a and tbc-db a4c6a8c8 -> 5dc223d3, the newest at 2026-11-20; not live-tested."
       ],
       "emulator": {
         "name": "CMaNGOS mangos-tbc + cmangos/playerbots + tbc-db",
@@ -320,17 +322,17 @@
           {
             "repo": "cmangos/mangos-tbc",
             "dest": "src/mangos-tbc",
-            "rev": "ec0d40c3d1462cf1b1a9e66184a07da7af7dc993"
+            "rev": "147c0b63fbb5d22b70b23819cc1d3e883e8bf3e4"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-tbc/src/modules/Bots",
-            "rev": "8d102f91c882bd0d75ff6fd73665631d1e76e85c"
+            "rev": "87624d0a1d2772551dd4be6947b5a362ceacec80"
           },
           {
             "repo": "cmangos/tbc-db",
             "dest": "src/tbc-db",
-            "rev": "a4c6a8c8bbc83d920fb75ebca3f4b8fc30aafed1"
+            "rev": "5dc223d3ab1e4a72121b7330533879805cba93c9"
           }
         ]
       },
@@ -782,7 +784,8 @@
       "notes": [
         "T824 (2026-10-28): mangos-classic 8ec338a1 -> 57312491, playerbots da4419af -> 6823423e and classic-db ec4f5961 -> 603ece10, the newest at 2026-10-28, not live-tested.",
         "T860 (2026-11-02): mangos-classic 57312491 -> ff13624a and playerbots 6823423e -> de1b1823; classic-db stays 603ece10 (already the newest); not live-tested.",
-        "2026-11-09: mangos-classic ff13624a -> 6d8821c7, playerbots de1b1823 -> 8d102f91 and classic-db 603ece10 -> c33f90b8, the newest at 2026-11-09; not live-tested."
+        "2026-11-09: mangos-classic ff13624a -> 6d8821c7, playerbots de1b1823 -> 8d102f91 and classic-db 603ece10 -> c33f90b8, the newest at 2026-11-09; not live-tested.",
+        "2026-11-20: mangos-classic 6d8821c7 -> 28a26c38, playerbots 8d102f91 -> 87624d0a and classic-db c33f90b8 -> e4825cf4, the newest at 2026-11-20; not live-tested."
       ],
       "emulator": {
         "name": "CMaNGOS mangos-classic + cmangos/playerbots + classic-db",
@@ -790,17 +793,17 @@
           {
             "repo": "cmangos/mangos-classic",
             "dest": "src/mangos-classic",
-            "rev": "6d8821c78b4f947d4cd40570657c88aefa804a24"
+            "rev": "28a26c388a3c817f34cdb4737847a345841b6a08"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-classic/src/modules/Bots",
-            "rev": "8d102f91c882bd0d75ff6fd73665631d1e76e85c"
+            "rev": "87624d0a1d2772551dd4be6947b5a362ceacec80"
           },
           {
             "repo": "cmangos/classic-db",
             "dest": "src/classic-db",
-            "rev": "c33f90b8eeb3f8bacb53d5cbfee45075c80b416c"
+            "rev": "e4825cf48176edff313d78de66b0beb14371c8eb"
           }
         ]
       },
@@ -1252,7 +1255,8 @@
         "Commands reach this world over SOAP again: the core builds gsoap from source behind ENABLE_SOAP, which the image template switches on (T86, 2026-09-17).",
         "Installed, started and pressed headless through the app's own seams on the test box; no client rendered there (T30, T86).",
         "T824 (2026-10-28): core 10393426 -> 33d0131a and TortoiseBots ff668fee -> 573c7919 (release v1.14.0), the newest at 2026-10-28, not live-tested.",
-        "2026-11-09: core 33d0131a -> 48cb227f and TortoiseBots 573c7919 -> a90d0407 (release v1.22.1), the newest at 2026-11-09, not live-tested."
+        "2026-11-09: core 33d0131a -> 48cb227f and TortoiseBots 573c7919 -> a90d0407 (release v1.22.1), the newest at 2026-11-09, not live-tested.",
+        "2026-11-20: TortoiseBots a90d0407 -> d5e903d3 (release v1.29.2), the newest at 2026-11-20; the core stays 48cb227f, already the newest at 2026-11-09; not live-tested."
       ],
       "emulator": {
         "name": "tortoise-wow/tortoise-wow @ main (the Penqle core) + Sagiroth/TortoiseBots",
@@ -1267,7 +1271,7 @@
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "a90d0407251f6e8471bd79b2fba7f6b20370d281",
+            "rev": "d5e903d3c99f6342502736fcd56af3190fc6d255",
             "follow": "releases"
           }
         ]
@@ -1699,7 +1703,8 @@
       "notes": [
         "T824 (2026-10-28): TrinityCore112 CENTURION 25d3e6ef -> 351950fb, the newest at 2026-10-28, not live-tested.",
         "T860 (2026-11-02): TrinityCore112 CENTURION 351950fb -> 0f7e3f59, the newest at 2026-11-02, not live-tested.",
-        "PINS (2026-11-09): TrinityCore112 CENTURION 0f7e3f59 -> e91044da, the newest at 2026-11-09, not live-tested."
+        "PINS (2026-11-09): TrinityCore112 CENTURION 0f7e3f59 -> e91044da, the newest at 2026-11-09, not live-tested.",
+        "PINS (2026-11-20): TrinityCore112 CENTURION e91044da -> 0846c691 (+78), the newest at 2026-11-20, not live-tested."
       ],
       "emulator": {
         "name": "Centurion (TrinityCore 3.3.5 fork with its own playerbots)",
@@ -1708,7 +1713,7 @@
             "repo": "thomasjteachey/TrinityCore112",
             "branch": "CENTURION",
             "dest": "src/centurion",
-            "rev": "e91044dae91b427c0fadbf753c2294af77656c58"
+            "rev": "0846c691f15d00f9de4ef6aac63b95f4ee28548d"
           }
         ]
       },
@@ -2614,7 +2619,8 @@
         "T554: the multi-class server. Own folder, containers, images, volumes, databases and ports, so it runs beside WoW WotLK.",
         "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested.",
         "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested.",
-        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested."
+        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested.",
+        "PINS (2026-11-20): core e7e2e288 -> 32fd3472 and mod-playerbots 405f8119 -> ecc4a537, the newest at 2026-11-20, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots + mod-ale + Wrath Unbound",
@@ -2624,13 +2630,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2"
+            "rev": "32fd3472aa74961c91cb9bc942ee3e0a44b36779"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "405f81196161017eebae3ee7a612d786a3ed2a9d"
+            "rev": "ecc4a537a3b43056e412fae63fb4a4271849b472"
           },
           {
             "repo": "azerothcore/mod-ale",
@@ -3479,7 +3485,8 @@
             "The four databases come from the release asset LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip (142,501,177 B, sha256 db8dd845e3a5da4bc3a6f28afa68ed839aceb222101db949ae74840a5a2365a0): four .sql files at the ZIP'S ROOT, no folder (GAP §0). Source pin, asset and zip layout read at GAP §0; NOT from the checkout, whose sql/base holds no world.",
             "Client data is MPQ, not CASC: 5.4.8 predates CASC, and the extractors open fixed names (upstream src/tools/map_extractor/System.cpp:104-117,1275-1400 and vmap4_extractor/vmapexport.cpp:68-79,130-165). Target build is 18273 -- `18414 but Blizz didnt rename the MPQ files` (System.cpp:101) -- so the 18 wow-update MPQ names carry 16016..18273, never 18414.",
             "GAP §2's \"Characters tab\" row: NOTHING has been run against a live LoA Pandaria server, so every Characters verb is withheld with the \"each is offered once it has been checked against a live server\" sentence, Revive included; fill them in after the first live check.",
-            "T850-F: the Bots tab's marker is `RNDBOT`, the stored form of `AiPlayerbot.RandomBotAccountPrefix`'s default `rndbot` (playerbots.conf.dist:621): the core upper-cases every account name in AccountMgr::normalizeString (AccountMgr.cpp:48-50,327-343). No registry table is named (`registry: null`) because this core's module creates none: the only playerbots table it touches is `playerbots_random_bots` (PlayerbotAIConfig.cpp:418), which it deletes from, and GAP §2 lists no account-type table for MoP -- so bots are found by the prefix arm alone until a live install shows a registry."
+            "T850-F: the Bots tab's marker is `RNDBOT`, the stored form of `AiPlayerbot.RandomBotAccountPrefix`'s default `rndbot` (playerbots.conf.dist:621): the core upper-cases every account name in AccountMgr::normalizeString (AccountMgr.cpp:48-50,327-343). No registry table is named (`registry: null`) because this core's module creates none: the only playerbots table it touches is `playerbots_random_bots` (PlayerbotAIConfig.cpp:418), which it deletes from, and GAP §2 lists no account-type table for MoP -- so bots are found by the prefix arm alone until a live install shows a registry.",
+        "PINS (2026-11-20): 1LineAtaTime/LoA-Pandaria-Playerbots efe7f291 -> f5fc970d (+315), the newest at 2026-11-20, not live-tested. The database asset is unchanged: the v1.0.4 ZIP still holds auth.sql, characters.sql, playerbots.sql and world.sql at its ROOT (142,501,177 B, sha256 db8dd845e3a5da4bc3a6f28afa68ed839aceb222101db949ae74840a5a2365a0), and its playerbots.sql already creates the tables the new source reads at startup (`playerbot_farming_zone`, `playerbot_farming_spot`, `playerbot_item_store`, `playerbot_city`). Upstream's newer release v1.1.1 (2026-11-13) ships a database ZIP of the same four-at-root shape; this entry does not use it. The extractor's target build is still 18273 and its MPQ list is unchanged (`src/tools/map_extractor/System.cpp:109-121`, `src/tools/vmap4_extractor/vmapexport.cpp:65-79`), `-i`/`-o` are still its input/output flags, the cmake options (`-DCMAKE_BUILD_TYPE=RelWithDebInfo -DTOOLS=1 -DELUNA=0`) and every tool the plan names (`mapextractor`, `vmap4extractor`, `vmap4assembler`, `mmaps_generator`) are still in the tree, every conf key the entry writes still exists (`PlayerbotsDatabaseInfo` in `worldserver.conf.dist`, the rest in `playerbots.conf.dist`, as before), and the ready line and fatal line are still printed. The new source's own module SQL (`modules/mod_playerbots/data/sql/playerbots/base/updates.sql` and the 2026_10_24..2026_10_28 updates) is NOT imported: this entry installs the database asset and sets `Updates.EnableDatabases = 0`, as before."
         ],
         "emulator": {
             "name": "Legends of Azeroth Pandaria (TrinityCore 5.4.8 fork) + mod_playerbots",
@@ -3488,7 +3495,7 @@
                     "repo": "1LineAtaTime/LoA-Pandaria-Playerbots",
                     "branch": "playerbot",
                     "dest": "src/mop",
-                    "rev": "efe7f29107e15a98e0bc4b3ebf61f54696e0827f"
+                    "rev": "f5fc970d22ae29ced5f0e1752a33ec7468c55853"
                 }
             ]
         },

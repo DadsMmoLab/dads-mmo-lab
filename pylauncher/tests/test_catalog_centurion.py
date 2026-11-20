@@ -55,6 +55,19 @@ GitHub compare from 0f7e3f59 is one commit that touches only
 `src/server/scripts/Spells/spell_priest.cpp`, so every reading above holds at the new commit
 (added to `REVIVE_FIXED_PINS`).
 
+PINS (2026-11-20) moved the pin to 0846c691, the newest CENTURION tip, without a live run: the
+GitHub compare from e91044da is 84 files, mostly Violet Hold boons, spells and playerbot PvP
+code. The versioned SQL files this entry imports are unchanged (`auth_data.sql`'s realm row is
+still :73, `auth_schema.sql`'s `localAddress` is now :400), the ready line is still Main.cpp:446
+and the signal handlers :304-308, `World initialized` moved to World.cpp:2599 and the fatal line
+to :1928, `TCSoap.cpp`'s `SEC_ADMINISTRATOR` check is still :103-105,
+`worldserver.conf.dist`'s `MaxCoreStuckTime = 60` is still :464 and its rate lines are still
+:2539-2547, :2565-2567, :2632 and :2653, `playerbots.conf.dist` is unchanged, and
+`cs_misc.cpp:797-798` still holds the revive fix (added to `REVIVE_FIXED_PINS`). Three files
+under `centurion/dbc/` changed (`GameObjectDisplayInfo`, `Spell`, `Talent`), so an install moved
+onto this pin is asked to re-extract map data; `centurion/patches/` and `centurion/launcher/`
+are unchanged, so the client facts stand.
+
 The entry's family blocks were tested before this entry existed against the fixture in
 `tests/support_trinitycore.py`; the last test here holds the two together, so a template
 proved on the fixture is proved on what ships.
@@ -80,7 +93,7 @@ ENTRY: CatalogEntry = load_catalog().get("wow-centurion")
 NATIVE = ENTRY.install.native
 assert NATIVE is not None and NATIVE.trinitycore is not None
 TC = NATIVE.trinitycore
-REV = "e91044dae91b427c0fadbf753c2294af77656c58"
+REV = "0846c691f15d00f9de4ef6aac63b95f4ee28548d"
 CHECKOUT = "src/centurion"
 PATCHES = f"{CHECKOUT}/centurion/patches"
 CORE = "/opt/trinitycore"

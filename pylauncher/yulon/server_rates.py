@@ -213,7 +213,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-wotlk": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2",
+        rev="32fd3472aa74961c91cb9bc942ee3e0a44b36779",
         keys=_ALL_KEYS,
         notes={},
     ),
@@ -222,11 +222,12 @@ _GAMES: dict[str, _GameRates] = {
     # (2026-10-10) moved both to 2a2211cd (worldserver.conf.dist unchanged between the two);
     # the move to 8a4e76ea (2026-10-17) changed only the default of `DungeonFinder.OptionsMask`;
     # T860 (2026-11-02) moved both to 93333d6a, the newest, not live-tested (same conf.dist);
-    # the 2026-11-09 pins move to e7e2e288 (the rate keys are unchanged; two comments reworded).
+    # the 2026-11-09 pins move to e7e2e288 (the rate keys are unchanged; two comments reworded);
+    # the 2026-11-20 pins move to 32fd3472 (worldserver.conf.dist is unchanged).
     "wow-unbound": _GameRates(
         file="env/dist/etc/worldserver.conf",
         repo="mod-playerbots/azerothcore-wotlk",
-        rev="e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2",
+        rev="32fd3472aa74961c91cb9bc942ee3e0a44b36779",
         keys=_ALL_KEYS,
         notes={},
     ),
@@ -242,7 +243,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-tbc": _GameRates(
         file="etc/mangosd.conf",
         repo="cmangos/mangos-tbc",
-        rev="ec0d40c3d1462cf1b1a9e66184a07da7af7dc993",
+        rev="147c0b63fbb5d22b70b23819cc1d3e883e8bf3e4",
         keys=_ALL_KEYS,
         notes={
             **{
@@ -255,7 +256,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-vanilla": _GameRates(
         file="etc/mangosd.conf",
         repo="cmangos/mangos-classic",
-        rev="6d8821c78b4f947d4cd40570657c88aefa804a24",
+        rev="28a26c388a3c817f34cdb4737847a345841b6a08",
         keys=_ALL_KEYS,
         notes={"Rate.Drop.Money": _QUEST_MONEY},
     ),
@@ -269,7 +270,7 @@ _GAMES: dict[str, _GameRates] = {
     "wow-centurion": _GameRates(
         file="etc/worldserver.conf",
         repo="thomasjteachey/TrinityCore112",
-        rev="e91044dae91b427c0fadbf753c2294af77656c58",
+        rev="0846c691f15d00f9de4ef6aac63b95f4ee28548d",
         keys=_ALL_KEYS,
         notes={},
     ),

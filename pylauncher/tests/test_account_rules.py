@@ -91,10 +91,10 @@ def test_create_refuses_a_password_set_password_would_refuse(game: str, password
 @pytest.mark.parametrize(
     ("game", "longest"),
     [
-        # MAX_ACCOUNT_STR, read at each catalog pin: AzerothCore e7e2e288 AccountMgr.h:34 (17);
-        # mangos-tbc ec0d40c3 and mangos-classic 6d8821c7 src/game/Accounts/AccountMgr.h:34,
-        # tortoise-wow 48cb227f src/game/AccountMgr.h:50, TrinityCore112 e91044da
-        # src/server/game/Accounts/AccountMgr.h:42 (16).
+        # MAX_ACCOUNT_STR, read at each catalog pin: AzerothCore 32fd3472 AccountMgr.h:34 (17);
+        # mangos-tbc 147c0b63 and mangos-classic 28a26c38 src/game/Accounts/AccountMgr.h:34,
+        # tortoise-wow 48cb227f src/game/AccountMgr.h:50, TrinityCore112 0846c691
+        # src/server/game/Accounts/AccountMgr.h:41-42 (16).
         ("wow-wotlk", 17),
         ("wow-tbc", 16),
         ("wow-vanilla", 16),

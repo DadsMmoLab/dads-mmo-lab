@@ -23,7 +23,9 @@ pins, 405f8119, adds four keys and renames none (`RandomBotCountMode`, `RandomBo
 `RandomBotCountMaxTime` and `BlessingRefreshThresholdSeconds`) and removes five
 (`EnablePeriodicOnlineOffline`, `PeriodicOnlineOfflineRatio`, `MinRandomBotInWorldTime`,
 `MaxRandomBotInWorldTime` and `PermanentlyInWorldTime`), so it is 894 keys; none of the
-removed five is one Yu'lon names. So a key's own name is kept and its prefix is swapped, in both
+removed five is one Yu'lon names. The tip PINS (2026-11-20) pins, ecc4a537, has the same 894
+keys with none added, removed or renamed, and the same 393 `GetOption` literals in `src/`
+(read in a checkout 2026-11-20). So a key's own name is kept and its prefix is swapped, in both
 directions.
 
 **Three kinds of name the swap never touches**, read in both trees:

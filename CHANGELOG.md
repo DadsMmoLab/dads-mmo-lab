@@ -36,6 +36,13 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Add to Steam Deck (Gaming Mode)…** works with two Steam accounts: the tiles go to the one that signed in last.
 
 ### Changed
+- WotLK: the server and Playerbots move to the newest upstream code (2026-11-20).
+- Unbound: the server and Playerbots move to the newest upstream code (2026-11-20).
+- TBC: the server and Playerbots move to the newest upstream code (2026-11-20).
+- Vanilla: the server and Playerbots move to the newest upstream code (2026-11-20).
+- Tortoise: the bots move to the newest release, v1.29.2 (2026-11-20).
+- Centurion: the server moves to the newest upstream code (2026-11-20).
+- Mists of Pandaria: the server moves to the newest upstream code (2026-11-20).
 
 ## v0.9.32-Public — 2026-11-09
 
