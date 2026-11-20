@@ -63,7 +63,7 @@ CENTURION_STAGES = (
 
 FETCH_RELEASE = "fetch-release"
 
-DEST = "release/v1.0.4/db"
+DEST = "release/v1.1.1/db"
 """Where the fixture asset's members land, relative to the server dir."""
 
 DATABASE_ZIP = database_zip()
@@ -346,8 +346,8 @@ def test_the_members_land_the_note_is_written_and_the_zip_is_deleted(tmp_path: P
     assert said == [
         f"Downloading {MOP_DATABASE_URL}",
         "db.download.zip matches its pinned size and sha256.",
-        "Unpacked 4 files into release/v1.0.4/db; "
-        "LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip was deleted.",
+        "Unpacked 4 files into release/v1.1.1/db; "
+        "LoA-Pandaria-Playerbots-v1.1.1-win64-database.zip was deleted.",
     ]
 
 
@@ -359,7 +359,7 @@ def test_a_second_run_skips_the_download_entirely(tmp_path: Path) -> None:
     said = fetch(mop_like(), server_dir, again)
     assert again.calls == [], "the download seam was not reached at all"
     assert said == [
-        "release/v1.0.4/db already holds LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip; "
+        "release/v1.1.1/db already holds LoA-Pandaria-Playerbots-v1.1.1-win64-database.zip; "
         "not downloaded again."
     ]
 
@@ -793,7 +793,7 @@ def test_the_progress_callback_logs_about_every_tenth_and_the_full_size(
     body = b"x" * (1 << 20)
     opener = ServingOpener(body, chunk=64)
     path = tmp_path / "db.download.zip"
-    zip_name = "LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip"
+    zip_name = "LoA-Pandaria-Playerbots-v1.1.1-win64-database.zip"
     with caplog.at_level("INFO", logger="yulon.catalog.families.trinitycore"):
         verified_download.fetch_bounded(
             MOP_DATABASE_URL,
@@ -817,11 +817,11 @@ def test_the_progress_callback_logs_about_every_tenth_and_the_full_size(
 def test_the_progress_callback_logs_every_sixteen_megabytes_for_a_large_asset(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The 142 MB asset's 10% is rarer than 16 MB never: the floor wins (T850-M3)."""
+    """The 139 MB asset's 10% is rarer than 16 MB never: the floor wins (T850-M3)."""
     from yulon.catalog.families import trinitycore as trinitycore_family
 
-    zip_name = "LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip"
-    size = 142 << 20
+    zip_name = "LoA-Pandaria-Playerbots-v1.1.1-win64-database.zip"
+    size = 145865764
     note = trinitycore_family._release_progress(zip_name, size)
     with caplog.at_level("INFO", logger="yulon.catalog.families.trinitycore"):
         note(1 << 20, size)
@@ -834,6 +834,6 @@ def test_the_progress_callback_logs_every_sixteen_megabytes_for_a_large_asset(
         and record.getMessage().startswith("Downloading")
     ]
     assert said == [
-        f"Downloading {zip_name}: 16 of 142 MB",
-        f"Downloading {zip_name}: 142 of 142 MB",
+        f"Downloading {zip_name}: 16 of 139 MB",
+        f"Downloading {zip_name}: 139 of 139 MB",
     ]

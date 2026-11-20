@@ -8,7 +8,7 @@ bots were made has rows the registry knows about and the prefix does not; a
 single number hides that, and a person looking for a missing bot has nowhere to
 look.
 
-**Only WotLK has two.** The three CMaNGOS trees carry the account prefix and
+**WotLK and MoP have two.** The three CMaNGOS trees carry the account prefix and
 nothing else, so on those the split is a sentence about nothing: it named the
 `playerbots` registry, which those installs have not got, and put a zero beside
 it that a person would then go looking for. `has_registry()` is the one reading
@@ -273,10 +273,12 @@ def has_registry(entry: CatalogEntry) -> bool:
     """Whether this tree has a second bot signal to attribute a row to (8.5b).
 
     The split is worth showing only where two signals can disagree. Of the four
-    games, only WotLK's AzerothCore carries the playerbots registry; the three
-    CMaNGOS trees have the account prefix and nothing else, and on m910q's TBC
-    install the schema list read exactly `characters, logs, realmd, mangos, sys,
-    mysql, performance_schema` on 2026-09-07 — no `playerbots` anywhere.
+    games, WotLK's AzerothCore and MoP's TrinityCore-lineage core carry the
+    playerbots registry (MoP's table comes from its own module, type 1 = RNDbot
+    and type 2 = AddClass); the three CMaNGOS trees have the account prefix and
+    nothing else, and on m910q's TBC install the schema list read exactly
+    `characters, logs, realmd, mangos, sys, mysql, performance_schema` on
+    2026-09-07 — no `playerbots` anywhere.
 
     One definition, read by both the SQL that attributes a row and the sentence
     that reports the attribution, because two independent readings of the same

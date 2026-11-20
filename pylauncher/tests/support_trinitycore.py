@@ -409,10 +409,10 @@ MOP_MEMBERS = ("auth.sql", "characters.sql", "playerbots.sql", "world.sql")
 
 MOP_DATABASE_URL = (
     "https://github.com/1LineAtaTime/LoA-Pandaria-Playerbots/releases/download/"
-    "v1.0.4/LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip"
+    "v1.1.1/LoA-Pandaria-Playerbots-v1.1.1-win64-database.zip"
 )
-"""The real asset's url (GAP §0, GitHub API 2026-11-01): a github.com host, so the
-`RELEASE_HOSTS` fence is exercised on the url it will really fetch."""
+"""The real asset's url (the entry's own asset, read 2026-11-20): a github.com host,
+so the `RELEASE_HOSTS` fence is exercised on the url it will really fetch."""
 
 
 def database_zip(
@@ -442,7 +442,7 @@ def release_asset(
     zip_bytes: bytes,
     *,
     url: str = MOP_DATABASE_URL,
-    dest: str = "release/v1.0.4/db",
+    dest: str = "release/v1.1.1/db",
     members: Sequence[str] = MOP_MEMBERS,
 ) -> dict[str, Any]:
     """One `release_assets` entry, pinning the zip `zip_bytes` IS (T850-B)."""

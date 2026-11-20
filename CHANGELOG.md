@@ -43,6 +43,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Tortoise: the bots move to the newest release, v1.29.2 (2026-11-20).
 - Centurion: the server moves to the newest upstream code (2026-11-20).
 - Mists of Pandaria: the server moves to the newest upstream code (2026-11-20).
+- Mists of Pandaria: a fresh install's databases match the new server code and include the bots' account table.
 
 ## v0.9.32-Public — 2026-11-09
 

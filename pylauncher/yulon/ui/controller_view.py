@@ -19519,7 +19519,7 @@ class ControllerView(QWidget):
             self._show_page_buttons()
             return
         # 8.5b: the split is drawn only where the two signals can disagree.
-        # Three of the four trees have no playerbots schema at all, and on
+        # The three CMaNGOS trees have no playerbots schema at all, and on
         # m910q's TBC install this tab read "0 by the playerbots registry" —
         # naming a table that install has not got, beside a zero a person would
         # then go looking for. The per-row source is the same noise: one signal

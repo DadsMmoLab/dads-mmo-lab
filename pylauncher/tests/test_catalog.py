@@ -275,8 +275,11 @@ Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
   `conf/tortoise_bots.conf.dist`, `ai/playerbot/aiplayerbot.conf.dist.in`, `data/sql/world` and
   `data/sql/character` and every conf key the entry writes; the two DB repos'
   `utilities/cmangos_custom.sql` is byte for byte the same; Centurion's `cs_misc.cpp` revive fix
-  and the paths its entry names are unchanged. Tortoise, Centurion and MoP are pinned and
-  checked in their own entries.
+  and the paths its entry names are unchanged; MoP's database asset moved from v1.0.4's ZIP to
+  v1.1.1's (145,865,764 B, sha256 `cb283195...`) because f5fc970d prepares statements against
+  `playerbots_account_type`, which v1.0.4's dump does not create, and every table those
+  statements name in the four databases exists in v1.1.1. Tortoise, Centurion and MoP are pinned
+  and checked in their own entries.
 * PINS (2026-11-09) moved `wow-wotlk` (and `wow-unbound`) to the newest heads of that day WITHOUT a
   live gate: core `93333d6a` -> `e7e2e288` (90 commits) and module `05a1f6f` -> `405f8119` (18
   commits); `wow-centurion` `0f7e3f59` -> `e91044da` (one commit, `spell_priest.cpp` only) and
