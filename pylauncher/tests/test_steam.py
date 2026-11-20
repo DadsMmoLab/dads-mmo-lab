@@ -257,6 +257,108 @@ def test_two_profiles_steam_does_not_tell_apart_are_still_refused(
         steam.find_profile(tmp_path)
 
 
+def _timestamp_loginusers(home: Path, *accounts: tuple[str, str | None]) -> None:
+    """A loginusers.vdf like a current Steam writes: no MostRecent, a `timestamp` per account.
+
+    (account id, timestamp or None for a block that has none). The keys and their order
+    are those of a real file from a Steam client; the ids and names are made up.
+    """
+    config = home / ".local/share/Steam/config"
+    config.mkdir(parents=True, exist_ok=True)
+    body = ""
+    for account, stamp in accounts:
+        body += (
+            f'\t"{int(account) + steam.STEAMID64_BASE}"\n\t{{\n'
+            '\t\t"AccountName"\t\t"someone"\n\t\t"PersonaName"\t\t"someone"\n'
+            '\t\t"RememberPassword"\t\t"1"\n\t\t"WantsOfflineMode"\t\t"0"\n'
+            '\t\t"SkipOfflineModeWarning"\t\t"0"\n\t\t"AutoLogin"\t\t"0"\n'
+        )
+        if stamp is not None:
+            body += f'\t\t"timestamp"\t\t"{stamp}"\n'
+        body += "\t}\n"
+    (config / "loginusers.vdf").write_text(f'"users"\n{{\n{body}}}\n', encoding="utf-8")
+
+
+def _two_profiles(home: Path) -> None:
+    """Two userdata profiles under the native root, with the made-up ids the tests use."""
+    for account in ("18347166", "28006437"):
+        (home / ".local/share/Steam/userdata" / account / "config").mkdir(parents=True)
+
+
+def test_with_no_mostrecent_the_account_with_the_newest_login_timestamp_is_the_one(
+    tmp_path: Path,
+) -> None:
+    """A Steam Deck with two profiles whose loginusers.vdf has no MostRecent key at all.
+
+    The shape is a real Steam client's file: per account AccountName, PersonaName,
+    RememberPassword, WantsOfflineMode, SkipOfflineModeWarning, AutoLogin and a lowercase
+    `timestamp`, and nothing else. The timestamps are real; ids and names are made up.
+    """
+    _two_profiles(tmp_path)
+    _timestamp_loginusers(tmp_path, ("18347166", "1795045277"), ("28006437", "1795043241"))
+    assert steam.find_profile(tmp_path).parent.name == "18347166"
+
+    _timestamp_loginusers(tmp_path, ("18347166", "1795043241"), ("28006437", "1795045277"))
+    assert steam.find_profile(tmp_path).parent.name == "28006437"
+
+
+def test_two_profiles_with_the_same_newest_login_timestamp_are_still_refused(
+    tmp_path: Path,
+) -> None:
+    """A tie is not an answer: Yu'lon will not guess which one signed in last."""
+    _two_profiles(tmp_path)
+    _timestamp_loginusers(tmp_path, ("18347166", "1795045277"), ("28006437", "1795045277"))
+    with pytest.raises(steam.SteamRefusal, match="does not say which one signed in last"):
+        steam.find_profile(tmp_path)
+
+
+def test_a_mostrecent_mark_beats_a_newer_timestamp_on_another_account(tmp_path: Path) -> None:
+    """MostRecent stays the first check; timestamps are only for a file with no mark."""
+    _two_profiles(tmp_path)
+    config = tmp_path / ".local/share/Steam/config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "loginusers.vdf").write_text(
+        '"users"\n{\n'
+        f'\t"{18347166 + steam.STEAMID64_BASE}"\n\t{{\n'
+        '\t\t"MostRecent"\t\t"1"\n\t\t"timestamp"\t\t"1795043241"\n\t}\n'
+        f'\t"{28006437 + steam.STEAMID64_BASE}"\n\t{{\n'
+        '\t\t"MostRecent"\t\t"0"\n\t\t"timestamp"\t\t"1795045277"\n\t}\n}\n',
+        encoding="utf-8",
+    )
+    assert steam.find_profile(tmp_path).parent.name == "18347166"
+
+
+def test_an_account_with_no_timestamp_means_steam_does_not_say_and_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Stricter than "newest wins": one block without a timestamp and we cannot compare."""
+    _two_profiles(tmp_path)
+    _timestamp_loginusers(tmp_path, ("18347166", "1795045277"), ("28006437", None))
+    with pytest.raises(steam.SteamRefusal, match="does not say which one signed in last"):
+        steam.find_profile(tmp_path)
+
+
+def test_a_file_listing_one_account_with_a_timestamp_names_that_account(tmp_path: Path) -> None:
+    """A stale profile beside the real one, and Steam remembers only the real account.
+
+    Nothing to compare, so no tie: the one account Steam lists signed in, the same as a
+    lone `MostRecent "1"`. The stale profile is never chosen because it is not listed.
+    """
+    _two_profiles(tmp_path)
+    _timestamp_loginusers(tmp_path, ("28006437", "1795045277"))
+    assert steam.find_profile(tmp_path).parent.name == "28006437"
+
+
+def test_the_newest_login_belonging_to_an_account_with_no_profile_here_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The write must never be handed to the other account because the newest has no folder."""
+    _two_profiles(tmp_path)
+    _timestamp_loginusers(tmp_path, ("18347166", "1795043241"), ("39999999", "1795045277"))
+    with pytest.raises(steam.SteamRefusal, match="does not say which one signed in last"):
+        steam.find_profile(tmp_path)
+
+
 # --------------------------------------------------------------------------
 # the write
 # --------------------------------------------------------------------------

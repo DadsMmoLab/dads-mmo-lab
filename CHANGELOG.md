@@ -24,6 +24,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - WoW Forever: Holy Strike, Blessing of Light, Salvation, Mutilate and Revoke play their animations again.
+- **Add to Steam Deck (Gaming Mode)…** works with two Steam accounts: the tiles go to the one that signed in last.
 
 ### Changed
 
