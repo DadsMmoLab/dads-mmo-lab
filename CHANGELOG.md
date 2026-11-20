@@ -14,6 +14,14 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+
+### Fixed
+
+### Changed
+
+## v0.9.33-Public — 2026-11-20
+
+### New
 - WotLK: the Time Is Time module makes the day and night cycle run faster or slower, and keeps the calendar on the real date.
 - Install a Final Fantasy XI (FFXI) server in beta from **Other games**; play with your own updated client.
 - An FFXI server's tab has Start, Stop and the live log of all its servers, and finds your installed FFXI client.
