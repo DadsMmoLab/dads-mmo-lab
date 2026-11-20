@@ -409,7 +409,7 @@ MOP_MEMBERS = ("auth.sql", "characters.sql", "playerbots.sql", "world.sql")
 
 MOP_DATABASE_URL = (
     "https://github.com/1LineAtaTime/LoA-Pandaria-Playerbots/releases/download/"
-    "v1.1.1/LoA-Pandaria-Playerbots-v1.1.1-win64-database.zip"
+    "v1.1.1/LoA-Pandaria-Playerbots-v1.1.1-database.zip"
 )
 """The real asset's url (the entry's own asset, read 2026-11-20): a github.com host,
 so the `RELEASE_HOSTS` fence is exercised on the url it will really fetch."""
