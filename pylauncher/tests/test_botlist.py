@@ -244,7 +244,7 @@ def test_a_full_page_offers_a_next_one() -> None:
 
 
 def test_a_tree_with_no_registry_has_no_second_signal_to_split_by() -> None:
-    """8.5b. TBC, Vanilla and Tortoise have one signal; WotLK and MoP have two.
+    """8.5b. TBC, Vanilla and Tortoise have one signal; WotLK has two.
 
     The split is worth showing only where the two can disagree. On a tree whose
     catalog entry carries no registry there is nothing to disagree with, and
@@ -258,30 +258,6 @@ def test_a_tree_with_no_registry_has_no_second_signal_to_split_by() -> None:
     assert botlist.has_registry(catalog.get("wow-tbc")) is False
     assert botlist.has_registry(catalog.get("wow-vanilla")) is False
     assert botlist.has_registry(catalog.get("wow-tortoise")) is False
-
-
-def test_the_mop_entry_reads_its_registry_the_same_way_wotlks_does() -> None:
-    """MoP's module keeps `playerbots_account_type`, so the second signal is read.
-
-    `has_registry()` asks only whether the entry names a registry whose database
-    its `schema_map()` holds; nothing in it is family-specific, and this is the
-    case that proves it: MoP is `trinitycore_sha`, not AzerothCore. Its types are
-    1 (RNDbot) and 2 (AddClass) — the table's own comment says so, and there is
-    no type 3 to borrow from WotLK's — written against its own `mop_playerbots`
-    schema and its own characters account column.
-    """
-    mop = load_catalog().get("wow-mop")
-
-    assert botlist.has_registry(mop) is True
-    clause = botlist._registry_clause(mop, mop.observability)
-    assert (
-        "account IN (SELECT account_id FROM mop_playerbots.playerbots_account_type "
-        "WHERE account_type IN (1, 2))" in clause
-    )
-    # The identity clause is a separate reader of the same catalog field, and it
-    # takes MoP's entry without a family test either.
-    identity = dbreads.bot_clause(mop, dbreads.Marker(prefix="RNDBOT", source="conf"))
-    assert "mop_playerbots.playerbots_account_type" in identity
 
 
 def test_the_split_flag_and_the_attribution_clause_cannot_disagree() -> None:
@@ -380,3 +356,16 @@ def test_a_filter_on_a_server_the_marker_found_nothing_on_still_blames_the_marke
 
     assert "no character matched the bot marker" in page.warning, page.warning
     assert "900" in page.warning
+
+
+def test_mop_names_no_registry_so_v104_installs_keep_their_bots_page() -> None:
+    """MoP servers installed from the v1.0.4 database have no `playerbots_account_type`.
+
+    `update_to_latest` is false for wow-mop, so those servers keep that database even
+    after the source pin moved to f5fc970d, whose fresh installs do get the table. A
+    registry clause would name a table they lack and break their Bots queries, so the
+    entry keeps the account prefix as its only signal.
+    """
+    mop = load_catalog().get("wow-mop")
+
+    assert botlist.has_registry(mop) is False
