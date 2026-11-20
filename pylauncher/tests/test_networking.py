@@ -24,6 +24,7 @@ from yulon import docker, networking, platform, runner
 from yulon.apply import ApplyError
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.ui.controller_view import _format_network_report, _network_report_details
 
 WOTLK = load_catalog().get("wow-wotlk")
 TORTOISE = load_catalog().get("wow-tortoise")
@@ -7211,6 +7212,53 @@ def test_apply_remembers_the_chosen_address_only_once_the_realm_row_is_written(
     assert intent is not None and (intent.mode, intent.address) == ("lan", VPN_ADDRESS)
 
 
+def test_a_failed_realmlist_update_says_the_choice_was_not_saved(tmp_path: Path) -> None:
+    """T885: a failed UPDATE says the choice was not saved, and records no intent."""
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.25",
+        firewall="none",
+        steamos=False,
+        wsl=False,
+    )
+    report = networking.apply(p, sql=_FailingSql(), server_dir=tmp_path)
+    shown = _format_network_report(report)
+    assert report.realm_unchanged, "the lost choice went unnamed"
+    assert "The realm address was not changed" in shown, shown
+    assert "Details says why" in shown, shown
+    assert "ERROR 1054" not in shown, shown
+    assert "ERROR 1054" in _network_report_details(report), _network_report_details(report)
+    assert any("realmlist not updated" in s for s in report.skipped)
+    assert networking.INTENT_FILE not in {p.name for p in tmp_path.iterdir()}
+    assert report.restart_required is False
+
+
+def test_a_realm_refusal_runs_the_firewall_and_records_nothing(tmp_path: Path) -> None:
+    """T885: a refused database start still opens the ports, sends no UPDATE, records nothing."""
+    p = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.25",
+        firewall="ufw",
+        steamos=False,
+        wsl=False,
+    )
+    sql = _RecordingSql()
+    report = networking.apply(
+        p,
+        sql=sql,
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+        server_dir=tmp_path,
+        realm_refusal="the database would not start",
+    )
+    assert report.done, "the firewall half stopped with the realm half"
+    assert sql.statements == [], "a refused start still sent the UPDATE"
+    assert report.realm_unchanged == "realmlist not updated: the database would not start"
+    assert any("realmlist not updated" in s for s in report.skipped)
+    assert networking.INTENT_FILE not in {p.name for p in tmp_path.iterdir()}
+
+
 IP_ADDR_OUT = (
     "1: lo    inet 127.0.0.1/8 scope host lo\n"
     "2: enp0s31f6    inet 192.168.1.5/24 brd 192.168.1.255 scope global dynamic enp0s31f6\n"
@@ -7929,3 +7977,649 @@ def test_the_wsl_branch_of_lan_detection_passes_over_the_vpn_adapter_too() -> No
         return subprocess.CompletedProcess(argv, 0, "Wintun|10.2.0.2\n", "")
 
     assert platform._windows_lan_ip_from_wsl(run=run_vpn_only) == "10.2.0.2"
+
+
+# -- T881 A: a realm row that advertises an address this computer lost ---------
+
+LAN_LOST = "192.168.1.50"
+LAN_HELD = "172.20.5.10"
+
+
+def _start_services(
+    monkeypatch: pytest.MonkeyPatch,
+    server_dir: Path,
+    *,
+    row: str,
+    holds: Callable[[str], bool | None],
+    detect: Callable[[], str | None] = lambda: LAN_HELD,
+) -> tuple[object, list[tuple[str, str]]]:
+    """The WotLK tab's own Start step, over a recording SQL seam (T881 A).
+
+    `holds` and `detect` are the two questions the step asks the host, pinned so
+    the answer is about the rule and not about this test box's network.
+    """
+    from yulon import apply
+    from yulon.ui import controller_view
+
+    ran: list[tuple[str, str]] = []
+    monkeypatch.setattr(apply.DockerSql, "run_statement", lambda self, db, s: ran.append((db, s)))
+    monkeypatch.setattr(apply.DockerSql, "query", lambda self, db, s: row)
+    monkeypatch.setattr(docker, "start_database", lambda *a, **k: True)
+    monkeypatch.setattr(networking, "holds_here", lambda address, **kwargs: holds(address))
+    monkeypatch.setattr(platform, "detect_lan_ip", detect)
+    services = controller_view._for_wotlk(WOTLK, server_dir, None, None)
+    return services, ran
+
+
+def _start_services_for(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: str,
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    row: str,
+    holds: Callable[[str], bool | None],
+    detect: Callable[[], str | None] = lambda: LAN_HELD,
+) -> tuple[object, list[tuple[str, str]]]:
+    """The `factory` tab's own Start step, over a recording SQL seam (T883).
+
+    `_start_services` is the WotLK spelling; this is the same step asked of the
+    four older factories, so each game's Start moves the realm row the same way.
+    `holds` and `detect` pin the host's answers, as there.
+    """
+    from yulon import apply
+    from yulon.ui import controller_view
+
+    ran: list[tuple[str, str]] = []
+    monkeypatch.setattr(apply.DockerSql, "run_statement", lambda self, db, s: ran.append((db, s)))
+
+    def query(self: object, db: str, statement: str) -> str:
+        return row
+
+    monkeypatch.setattr(apply.DockerSql, "query", query)
+    monkeypatch.setattr(docker, "start_database", lambda *a, **k: True)
+    monkeypatch.setattr(networking, "holds_here", lambda address, **kwargs: holds(address))
+    monkeypatch.setattr(platform, "detect_lan_ip", detect)
+    services = getattr(controller_view, factory)(entry, server_dir, None, None)
+    return services, ran
+
+
+def test_a_start_moves_a_realm_row_off_a_lan_address_this_computer_no_longer_holds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The defect T881 reports: the row says 192.168.1.50, this PC no longer has it.
+
+    Exactly one UPDATE, carrying the address the machine holds now, in both
+    columns -- and it says so at INFO with both addresses, because the installer's
+    log is where somebody looks after a player cannot reach the world.
+    """
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: addr == LAN_HELD
+    )
+    with caplog.at_level("INFO", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert ran == [
+        (
+            "auth",
+            networking.realmlist_sql(WOTLK, LAN_HELD, LAN_HELD),
+        )
+    ]
+    said = [r.getMessage() for r in caplog.records]
+    assert [line for line in said if f"the realm advertised {LAN_LOST}" in line], said
+    assert [line for line in said if f"it now advertises {LAN_HELD}" in line], said
+
+
+def test_a_start_leaves_a_held_address_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A row this computer still holds is exactly right: no statement at all."""
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: True
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == []
+
+
+def test_a_start_leaves_a_chosen_loopback_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """bug-checklist §41: the owner asked for the loopback, so no rule of ours moves it."""
+    networking.record_network_intent(tmp_path, "loopback")
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row="127.0.0.1\t127.0.0.1\n", holds=lambda addr: False
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == []
+
+
+def test_a_start_keeps_a_public_internet_address(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Internet play chose 203.0.113.9: a stale LAN `localAddress` is the only thing moved."""
+    networking.record_network_intent(tmp_path, "internet")
+    services, ran = _start_services(
+        monkeypatch,
+        tmp_path,
+        row=f"203.0.113.9\t{LAN_LOST}\n",
+        holds=lambda addr: addr != LAN_LOST,
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == [("auth", networking.realmlist_sql(WOTLK, "203.0.113.9", LAN_HELD))]
+
+
+def test_a_start_writes_nothing_when_the_address_list_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """None is not "no": an unreadable listing says nothing about the address, and the
+    step says ONE warning rather than guessing, and never blocks the start."""
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: None
+    )
+    with caplog.at_level("WARNING", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert ran == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert [line for line in warnings if "could not be read" in line], warnings
+
+
+def test_a_start_writes_nothing_when_the_network_choice_file_is_damaged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A file that exists and does not read is not "no file" (T881 review).
+
+    `read_network_intent()` answers None for a damaged record on purpose, so the
+    install and Apply roads take the reachable path. At Start that same None would
+    run the automatic rewrite -- over an owner's choice this build cannot read -- so
+    nothing is written, and the one warning says why.
+    """
+    (tmp_path / networking.INTENT_FILE).write_text("{not json", encoding="utf-8")
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+    with caplog.at_level("WARNING", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert ran == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == [
+        "the network choice file for this server could not be read, so the realm address "
+        "was not checked at Start"
+    ]
+
+
+def test_a_start_writes_nothing_when_the_network_choice_file_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stat that raises PermissionError must not read as "no file" (T881 C).
+
+    Python 3.12+ answers `exists()` False for a permission error, so the old
+    check fell through to the automatic rewrite -- over the owner's loopback
+    choice a file inside an unsearchable folder holds. `stat()` names the case:
+    nothing is written, one warning says so, and the Start goes ahead.
+    """
+    choice = tmp_path / networking.INTENT_FILE
+    real_stat = Path.stat
+
+    def stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if self == choice:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+    with caplog.at_level("WARNING", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert ran == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == [
+        "the network choice file for this server could not be read, so the realm address "
+        "was not checked at Start"
+    ]
+
+
+def test_a_start_continues_when_checking_the_network_choice_file_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Any other OSError from the check is the step's own failure: Start is not blocked.
+
+    The old `exists()` sat outside the step's `try`, so a raise here held the
+    Start up. The whole check is inside that handling now, and a state it cannot
+    name writes nothing.
+    """
+    choice = tmp_path / networking.INTENT_FILE
+    real_stat = Path.stat
+
+    def stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if self == choice:
+            raise OSError(5, "Input/output error", str(self))
+        return real_stat(self, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == []
+
+
+def test_a_start_reads_the_address_listing_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One reading answers every address question the rule asks (T881 review).
+
+    Under WSL each read of the Windows listing is a PowerShell round trip with an
+    8 s bound, and a row with both columns private asked `holds_here()` twice and
+    the detect check a third time. Each ask now gets the same reading.
+    """
+    reads: list[bool] = []
+    listing = object()
+
+    def local_ipv4_listing(*, wsl: bool) -> object:
+        reads.append(wsl)
+        return listing
+
+    seen: list[tuple[str, object]] = []
+
+    def holds(
+        address: str, *, under_wsl: bool | None = None, listing: object = None
+    ) -> bool | None:
+        seen.append((address, listing))
+        return address == LAN_HELD
+
+    services, ran = _start_services(
+        monkeypatch, tmp_path, row=f"{LAN_LOST}\t{LAN_LOST}\n", holds=lambda addr: False
+    )
+    monkeypatch.setattr(platform, "in_wsl", lambda: True)
+    monkeypatch.setattr(platform, "local_ipv4_listing", local_ipv4_listing)
+    monkeypatch.setattr(networking, "holds_here", holds)
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert reads == [True]
+    assert seen and all(each is listing for _, each in seen), seen
+    assert ran == [("auth", networking.realmlist_sql(WOTLK, LAN_HELD, LAN_HELD))]
+
+
+# -- T882: a realmlist.wtf whose old line hides (BOM, tab, case) --------------
+
+
+@pytest.mark.parametrize(
+    "old",
+    [
+        b"set realmlist logon.example.com\r\nset patchlist x\r\n",
+        b"\xef\xbb\xbfset realmlist logon.example.com\r\nset patchlist x\r\n",
+        b"\tset realmlist logon.example.com\r\nset patchlist x\r\n",
+        b"  set  realmlist   logon.example.com\r\nset patchlist x\r\n",
+        b'  SET realmList "x"\r\nset patchlist x\r\n',
+    ],
+    ids=["plain-crlf", "bom-crlf", "tab", "double-space", "quoted-caps"],
+)
+def test_a_root_realmlist_keeps_no_other_realmlist_line(tmp_path: Path, old: bytes) -> None:
+    """T882: every spelling of the old line goes; the other line stays byte for byte."""
+    f = tmp_path / "client" / "realmlist.wtf"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(old)
+
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
+
+    assert out == f
+    assert f.read_bytes() == b"set realmlist 10.0.0.5\r\nset patchlist x\r\n"
+
+
+@pytest.mark.parametrize(
+    "old",
+    [
+        b"set patchlist p\rset realmlist old\r",
+        b"set realmlist old\rset patchlist p\r",
+    ],
+    ids=["old-line-last", "old-line-first"],
+)
+def test_a_lone_cr_is_a_line_break(tmp_path: Path, old: bytes) -> None:
+    """T882 round 3: a lone CR splits lines too: one line of ours, `set patchlist p` kept."""
+    f = tmp_path / "client" / "realmlist.wtf"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(old)
+
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
+
+    assert out == f
+    assert f.read_bytes() == b"set realmlist 10.0.0.5\rset patchlist p\r"
+
+
+def test_a_utf16_root_realmlist_keeps_its_other_lines(tmp_path: Path) -> None:
+    """T882 round 3: UTF-16 with a BOM decodes in that byte order and keeps other lines.
+
+    The result is plain UTF-8 with no BOM and no NUL: this build's ready-to-play
+    copy must stay readable as text, and the game reads the ASCII line either way.
+    """
+    le = tmp_path / "le" / "realmlist.wtf"
+    le.parent.mkdir(parents=True)
+    le.write_bytes(
+        b"\xff\xfe" + "set realmlist logon.example.com\r\nset patchlist x\r\n".encode("utf-16-le")
+    )
+    be = tmp_path / "be" / "realmlist.wtf"
+    be.parent.mkdir(parents=True)
+    be.write_bytes(
+        b"\xfe\xff" + "set realmlist logon.example.com\r\nset patchlist x\r\n".encode("utf-16-be")
+    )
+
+    out_le = networking.write_client_realmlist(tmp_path / "le", "10.0.0.5", auth_port=3724)
+    out_be = networking.write_client_realmlist(tmp_path / "be", "10.0.0.5", auth_port=3724)
+
+    assert out_le == le
+    assert out_be == be
+    for target in (le, be):
+        raw = target.read_bytes()
+        assert b"\x00" not in raw
+        assert raw == b"set realmlist 10.0.0.5\r\nset patchlist x\r\n"
+        raw.decode("utf-8")
+
+
+def test_a_root_realmlist_with_a_nul_and_no_bom_is_replaced_whole(tmp_path: Path) -> None:
+    """T882 round 3: a NUL byte with no UTF-16 BOM is our own copy gone binary: one line out."""
+    f = tmp_path / "client" / "realmlist.wtf"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"set realmlist logon.example.com\x00\nset patchlist x\n")
+
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
+
+    assert out == f
+    assert f.read_bytes() == b"set realmlist 10.0.0.5\n"
+
+
+def test_a_non_ascii_hostname_is_written_as_utf8(tmp_path: Path) -> None:
+    """T882 round 4: our line is UTF-8, so a non-ASCII hostname writes rather than raises."""
+    play = tmp_path / "play"
+    play.mkdir(parents=True)
+
+    networking.write_ready_to_play_realmlists(play, "münchen.example", auth_port=3724)
+
+
+def test_an_odd_length_utf16_file_leaves_no_replacement_character(tmp_path: Path) -> None:
+    """T882 round 4: an odd byte count's trailing U+FFFD is dropped, not kept as a junk line."""
+    f = tmp_path / "client" / "realmlist.wtf"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(
+        b"\xff\xfe"
+        + "set realmlist logon.example.com\r\nset patchlist x\r\n".encode("utf-16-le")
+        + b"\x41"
+    )
+
+    out = networking.write_client_realmlist(tmp_path / "client", "10.0.0.5", auth_port=3724)
+
+    assert out == f
+    assert b"\xef\xbf\xbd" not in f.read_bytes()
+    assert f.read_bytes() == b"set realmlist 10.0.0.5\r\nset patchlist x\r\n"
+
+
+def test_a_crlf_root_realmlist_stays_crlf_and_keeps_other_lines(tmp_path: Path) -> None:
+    """T882: CRLF in, CRLF out; LF in, LF out."""
+    crlf = tmp_path / "crlf" / "realmlist.wtf"
+    crlf.parent.mkdir(parents=True)
+    crlf.write_bytes(b"set realmlist logon.example.com\r\nset patchlist x\r\n")
+    networking.write_client_realmlist(tmp_path / "crlf", "10.0.0.5", auth_port=3724)
+    assert crlf.read_bytes() == b"set realmlist 10.0.0.5\r\nset patchlist x\r\n"
+
+    lf = tmp_path / "lf" / "realmlist.wtf"
+    lf.parent.mkdir(parents=True)
+    lf.write_bytes(b"set realmlist logon.example.com\nset patchlist x\n")
+    networking.write_client_realmlist(tmp_path / "lf", "10.0.0.5", auth_port=3724)
+    assert lf.read_bytes() == b"set realmlist 10.0.0.5\nset patchlist x\n"
+
+
+@needs_case_sensitive_disk
+def test_two_root_realmlists_in_different_case_are_both_written(tmp_path: Path) -> None:
+    """T882: on a disk that tells cases apart, both spellings are the client's file.
+
+    Round 3: the exact spelling leads, so the client's own read is written first.
+    """
+    lower = tmp_path / "client" / "realmlist.wtf"
+    upper = tmp_path / "client" / "REALMLIST.WTF"
+    lower.parent.mkdir(parents=True)
+    lower.write_bytes(b"set realmlist old.example.com\n")
+    upper.write_bytes(b"SET REALMLIST old.example.com\n")
+
+    written = networking.write_ready_to_play_realmlists(
+        tmp_path / "client", "127.0.0.1", auth_port=3724
+    )
+
+    assert sorted(written) == sorted([lower, upper])
+    for f in (lower, upper):
+        assert f.read_bytes() == b"set realmlist 127.0.0.1\n"
+    assert list(written) == [lower, upper]
+
+
+@needs_case_sensitive_disk
+def test_the_exact_spelling_comes_first(tmp_path: Path) -> None:
+    """T882 round 3: `realmlist_file` itself leads, other spellings follow sorted by name."""
+    Client = tmp_path / "client"
+    Client.mkdir(parents=True)
+    (Client / "REALMLIST.WTF").write_bytes(b"SET REALMLIST old.example.com\n")
+    (Client / "Realmlist.WTF").write_bytes(b"set realmlist old.example.com\n")
+    (Client / "realmlist.wtf").write_bytes(b"set realmlist old.example.com\n")
+
+    found = networking._root_realmlist_spellings(Client, "realmlist.wtf")
+
+    assert [p.name for p in found] == ["realmlist.wtf", "REALMLIST.WTF", "Realmlist.WTF"]
+
+
+# -- T883: the four older factories keep the realm-address keeper ------------
+
+
+@pytest.mark.parametrize(
+    "factory,game",
+    [
+        ("_for_tortoise", "wow-tortoise"),
+        ("_for_tbc", "wow-tbc"),
+        ("_for_vanilla", "wow-vanilla"),
+        ("_for_centurion", "wow-centurion"),
+    ],
+    ids=["tortoise", "tbc", "vanilla", "centurion"],
+)
+def test_a_t883_start_moves_a_realm_row_off_a_lan_address_this_computer_no_longer_holds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    factory: str,
+    game: str,
+) -> None:
+    """T883: the older Start moves the row off 192.168.1.50, as WotLK's does.
+
+    Only the ADDRESS keeper runs: no statement may touch the port. Tortoise
+    expects `UPDATE tw_logon.realmlist SET address='<held>' WHERE id=1;`.
+    """
+    entry = load_catalog().get(game)
+    services, ran = _start_services_for(
+        monkeypatch,
+        factory,
+        entry,
+        tmp_path,
+        row=f"{LAN_LOST}\t{LAN_LOST}\n",
+        holds=lambda addr: addr == LAN_HELD,
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    if game == "wow-tortoise":
+        # Pinned literally: this core has no LAN column, so the catalog must not gain one.
+        expected = [
+            ("auth", f"UPDATE tw_logon.realmlist SET address='{LAN_HELD}' WHERE id=1;"),
+        ]
+    else:
+        expected = [("auth", networking.realmlist_sql(entry, LAN_HELD, LAN_HELD))]
+    assert ran == expected
+    assert not [s for _, s in ran if "SET port" in s], ran
+
+
+@pytest.mark.parametrize(
+    "factory,game",
+    [
+        ("_for_tortoise", "wow-tortoise"),
+        ("_for_tbc", "wow-tbc"),
+        ("_for_vanilla", "wow-vanilla"),
+        ("_for_centurion", "wow-centurion"),
+    ],
+    ids=["tortoise", "tbc", "vanilla", "centurion"],
+)
+def test_a_t883_start_leaves_a_chosen_loopback_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    factory: str,
+    game: str,
+) -> None:
+    """T883 round 3: only the loopback choice stops the rewrite of a lost LAN row.
+
+    The row is the LOST address and nothing is held, so without the choice the
+    automatic rule would act: the keeper must return before it even starts the
+    database (§41), let alone writes.
+    """
+    entry = load_catalog().get(game)
+    networking.record_network_intent(tmp_path, "loopback")
+    services, ran = _start_services_for(
+        monkeypatch,
+        factory,
+        entry,
+        tmp_path,
+        row=f"{LAN_LOST}\t{LAN_LOST}\n",
+        holds=lambda addr: False,
+    )
+    started: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(docker, "start_database", lambda *a, **k: started.append((a, k)) or True)
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == []
+    assert not [s for _, s in ran if "SET port" in s], ran
+    assert started == [], started
+
+
+@pytest.mark.parametrize(
+    "factory,game",
+    [
+        ("_for_tortoise", "wow-tortoise"),
+        ("_for_tbc", "wow-tbc"),
+        ("_for_vanilla", "wow-vanilla"),
+        ("_for_centurion", "wow-centurion"),
+    ],
+    ids=["tortoise", "tbc", "vanilla", "centurion"],
+)
+def test_a_t883_start_leaves_a_chosen_lan_address_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    factory: str,
+    game: str,
+) -> None:
+    """T883 round 4: the test catches a dropped choice, not the automatic rule.
+
+    `LAN_HELD` is held, so without the recorded lan choice the automatic rule
+    would UPDATE the row to it: `ran == []` alone proves the choice stopped the
+    write. The keeper logs the owner's stale choice as a warning and the start
+    is not refused.
+    """
+    entry = load_catalog().get(game)
+    networking.record_network_intent(tmp_path, "lan", LAN_LOST)
+    services, ran = _start_services_for(
+        monkeypatch,
+        factory,
+        entry,
+        tmp_path,
+        row=f"{LAN_LOST}\t{LAN_LOST}\n",
+        holds=lambda addr: addr == LAN_HELD,
+    )
+
+    with caplog.at_level("WARNING", logger="yulon.ui.controller_view"):
+        assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+
+    assert ran == []
+    assert not [s for _, s in ran if "SET port" in s], ran
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    expected = (
+        f"The realm advertises {LAN_LOST}, the address you chose, which is no "
+        "longer one of this computer's addresses. It was left as it is: choose your "
+        "address again on the Networking tab if it changed."
+    )
+    assert expected in warnings, warnings
+
+
+@pytest.mark.parametrize(
+    "factory,game",
+    [
+        ("_for_tortoise", "wow-tortoise"),
+        ("_for_tbc", "wow-tbc"),
+        ("_for_vanilla", "wow-vanilla"),
+        ("_for_centurion", "wow-centurion"),
+    ],
+    ids=["tortoise", "tbc", "vanilla", "centurion"],
+)
+def test_a_t883_start_leaves_an_internet_choice_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    factory: str,
+    game: str,
+) -> None:
+    """T883 round 4: the internet choice is obeyed while a held address waits.
+
+    `LAN_HELD` is held, so a dropped choice would let the automatic rule UPDATE
+    the row to it: `ran == []` on the single-column cores proves the choice
+    stopped that write. `stale_realm_address()` answers `keep` for them, since
+    with no `localAddress` column there is no stale private local address to
+    move. Centurion has the column, so the keeper moves only the local address
+    to the held one and the public `address` stays exactly as the owner chose it.
+    """
+    entry = load_catalog().get(game)
+    networking.record_network_intent(tmp_path, "internet")
+    services, ran = _start_services_for(
+        monkeypatch,
+        factory,
+        entry,
+        tmp_path,
+        row=f"{LAN_LOST}\t{LAN_LOST}\n",
+        holds=lambda addr: addr == LAN_HELD,
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    if game == "wow-centurion":
+        assert ran == [("auth", networking.realmlist_sql(entry, LAN_LOST, LAN_HELD))]
+    else:
+        assert ran == []
+    assert not [s for _, s in ran if "SET port" in s], ran
+
+
+@pytest.mark.parametrize(
+    "factory,game",
+    [
+        ("_for_tortoise", "wow-tortoise"),
+        ("_for_tbc", "wow-tbc"),
+        ("_for_vanilla", "wow-vanilla"),
+        ("_for_centurion", "wow-centurion"),
+    ],
+    ids=["tortoise", "tbc", "vanilla", "centurion"],
+)
+def test_a_t883_start_leaves_a_held_address_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    factory: str,
+    game: str,
+) -> None:
+    """T883: a row this computer still holds is left alone on the older Start too."""
+    entry = load_catalog().get(game)
+    services, ran = _start_services_for(
+        monkeypatch,
+        factory,
+        entry,
+        tmp_path,
+        row=f"{LAN_LOST}\t{LAN_LOST}\n",
+        holds=lambda addr: True,
+    )
+
+    assert services.controller.before_servers() is None  # type: ignore[attr-defined]
+    assert ran == []
+    assert not [s for _, s in ran if "SET port" in s], ran

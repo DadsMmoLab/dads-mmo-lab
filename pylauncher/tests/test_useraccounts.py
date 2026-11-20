@@ -289,14 +289,42 @@ def test_a_channel_that_could_not_ask_says_that_rather_than_that_it_failed() -> 
 # -- the object the tab holds ------------------------------------------------
 
 
-def _install(tmp_path, *, sql, channel=None):
+def _install(tmp_path, *, sql, channel=None, log=None):
     return useraccounts.InstallAccounts(
         WOTLK,
         tmp_path,
         sql=sql,
         channel_for_saved=lambda: channel,
         app_account="YULON_AB12CD34",
+        auth_server_log=log,
     )
+
+
+def test_the_listing_names_a_player_whose_last_login_used_a_wrong_password(tmp_path) -> None:
+    """T881 B: the authserver's line, against the names the list itself holds.
+
+    The log names a bot and a player; only the player is in the list, so only the
+    player is named -- a bot's failed login reported as somebody's would send the
+    owner after the wrong account. The sentence rides the listing, so the tab's one
+    worker read carries it.
+    """
+    sql = _Reader("1\tALICE\t0\n7\tBOB\t3\n")
+    log = (
+        "2026-11-09 20:00:00 account BOTONE tried to login with invalid password\n"
+        "2026-11-09 20:01:00 account alice tried to login with invalid password\n"
+    )
+
+    listing = _install(tmp_path, sql=sql, log=lambda: log).listing()
+
+    assert listing.wrong_password == "A recent login as ALICE used a wrong password."
+    assert "BOTONE" not in listing.wrong_password
+
+
+def test_a_log_that_could_not_be_read_is_no_sentence(tmp_path) -> None:
+    """`None` from the reader is "nothing known", never "nobody typed a wrong password"."""
+    listing = _install(tmp_path, sql=_Reader("1\tALICE\t0\n"), log=lambda: None).listing()
+
+    assert listing.wrong_password == ""
 
 
 def test_the_listing_uses_this_installs_own_marker(tmp_path) -> None:

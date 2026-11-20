@@ -45,12 +45,12 @@ import os
 import re
 import zipfile
 import zlib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from yulon import __version__
+from yulon import __version__, platform
 from yulon.log import get_logger
 from yulon.support import runlog
 from yulon.support import sources as src
@@ -129,6 +129,17 @@ class Seams:
     machine: Callable[[], list[str]] | None = None
     docker_size: Callable[[str | None], tuple[int, int] | None] | None = None
     now: Callable[[], datetime] = _utc_now
+    listing: Callable[[], platform.LocalListing] | None = None
+    """This computer's own IPv4 addresses for `system-info.txt` (T881 E); None asks the host."""
+    lan_ip: Callable[[], str | None] | None = None
+    """The address the detector would advertise (T881 E); None asks the host."""
+    realm_log: Callable[[InstallFacts, Collection[str | None]], str | None] | None = None
+    """One install's authserver tail (T881 E); None reuses the tail `live_logs` already read.
+
+    A seam so a test states it instead of reading a test box's docker. Left None,
+    `build()` answers from the logs the `live/` read returned -- the same daemon and
+    the same silent set, with no second `docker logs` call to escape a test's fake.
+    """
 
 
 @dataclass(frozen=True)
@@ -249,22 +260,30 @@ class _Collector:
         install: InstallFacts,
         ask: Callable[[InstallFacts, SilentTargets], list[LiveLog]],
         silent: SilentTargets,
-    ) -> None:
+    ) -> list[LiveLog]:
+        """Read one install's container tails, name what did not arrive, and return them.
+
+        The list goes back to `build()` so `system-info.txt`'s realm-address line can
+        reuse the authserver tail this call already read (T881 D). Reading it a second
+        time there made a bundle over a faked `live_logs` shell out to the real docker
+        CLI, which is exactly what the seam exists to prevent.
+        """
         if install.entry is None:
             self.skip(f"live/{install.label}", f"{install.game} is not in this version's catalog")
-            return
+            return []
         try:
             logs = ask(install, silent)
         except Exception as exc:  # boundary: one bad source never kills the bundle
             why = f"docker not reachable ({type(exc).__name__}: {exc})"
             self.skip(f"live/{install.label}", why)
-            return
+            return []
         for live in logs:
             name = f"live/{install.label}-{live.container}.log"
             if live.text is None:
                 self.skip(name, live.problem or "docker could not read its log")
             else:
                 self.text(name, src.keep_tail(live.text), "live")
+        return logs
 
     def confs(self, install: InstallFacts) -> None:
         folder = f"conf/{install.label}/"
@@ -354,9 +373,27 @@ def build(
         collector.skip("live/", _NO_SERVERS)
         collector.skip("conf/", _NO_SERVERS)
     silent: SilentTargets = set()
+    read_logs: dict[int, tuple[LiveLog, ...]] = {}
     for install in sources.installs:
-        collector.live(install, seams.live_logs, silent)
+        read_logs[id(install)] = tuple(collector.live(install, seams.live_logs, silent))
         collector.confs(install)
+
+    def realm_log_from_live(install: InstallFacts, quiet: Collection[str | None]) -> str | None:
+        """This install's authserver tail, already read for `live/` (T881 E).
+
+        `realm_log_of()` asked docker a second time for the same tail, so a test that
+        faked `live_logs` still reached the real docker CLI. The bundle's own read is
+        the seam the test already hands over, and it is the same daemon and the same
+        `silent_targets` -- an authserver whose tail did not arrive has text None here.
+        """
+        if install.entry is None or install.wsl_distro in quiet:
+            return None
+        auth = install.entry.container_spec().auth
+        for read in read_logs.get(id(install), ()):
+            if read.container == auth:
+                return read.text
+        return None
+
     # After the live logs, so a docker that went silent there is not asked for its version.
     info = src.system_info(
         sources,
@@ -364,6 +401,9 @@ def build(
         silent_targets=silent,
         machine=seams.machine,
         engine=seams.docker_size,
+        listing=seams.listing,
+        lan_ip=seams.lan_ip,
+        realm_log=seams.realm_log or realm_log_from_live,
     )
     collector.text("system-info.txt", info, "info")
     stamp = seams.now().strftime("%Y-%m-%d %H:%M:%S UTC")

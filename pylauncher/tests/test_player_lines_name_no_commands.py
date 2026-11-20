@@ -891,6 +891,14 @@ def test_the_reader_finds_each_kind_of_player_line() -> None:
     assert ("yulon/apply.py", "ApplyRefusal() in _require_own_clone") in whats
     assert ("yulon/catalog/native.py", "InstallerError() in stage_ready") in whats
     assert ("yulon/platform.py", "manual_steps() in ensure_wsl2") in whats
+    assert (
+        "yulon/forgetting.py",
+        "engine_mismatch_refusal()",
+    ) in whats, "a refusal said under the other engine"
+    assert (
+        "yulon/forgetting.py",
+        "engine_unknown_refusal()",
+    ) in whats, "a refusal said when the engine cannot be read"
 
 
 @pytest.mark.parametrize(

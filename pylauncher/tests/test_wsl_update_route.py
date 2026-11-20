@@ -288,6 +288,8 @@ _NOT_ADDRESSED_TO_THE_DISTRO = {
     "sleep": "a clock",
     "keep_awake": "it is Windows that must not sleep while the distro compiles",
     "lan_ip": "install-only: the realm row an install ends by setting",
+    "holds": "install-only: the address check `_advertise_realm()` makes beside `lan_ip`; it "
+    "reads this computer's interfaces (Windows' listing under WSL), not the distro's daemon",
     "relabel": "SELinux: the WSL kernel has none, and the label is '' (never called with '')",
     "selinux_enforcing": "answered False: the WSL kernel runs no SELinux",
     "fs_type": "answered None: no SELinux, so nothing to ask (never the host's `stat -f`)",

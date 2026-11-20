@@ -560,7 +560,12 @@ def test_before_the_servers_start_the_realm_gets_its_port(monkeypatch: pytest.Mo
     assert controller.start_guard is None
     assert controller.before_servers() is None
     assert ran == [("auth", PORT_SQL)]
-    assert services.started_dbs == [SECOND_CONTAINERS["db"]]  # type: ignore[attr-defined]
+    # Twice since T881: the port keeper starts the database to write its row, and the
+    # address keeper starts it (a no-op once it is up) to read the address columns.
+    assert services.started_dbs == [  # type: ignore[attr-defined]
+        SECOND_CONTAINERS["db"],
+        SECOND_CONTAINERS["db"],
+    ]
 
 
 @pytest.mark.parametrize("row", ["8085\n", "", "NULL\n", "8086\n8086\n"])
@@ -724,27 +729,33 @@ def test_a_conflict_that_appears_between_the_two_looks_still_gets_the_step_after
 
 
 def test_a_wotlk_start_has_no_port_step(monkeypatch: pytest.MonkeyPatch) -> None:
-    """WotLK (8085) starts as it did before T552: no database start, no realm-row statement.
+    """WotLK (8085) starts as it did before T552: no realm-row PORT statement.
 
-    Since T808 every game's start step also re-applies a SAVED realm name, so the step is
-    there; with no name saved it must do nothing at all, and the port UPDATE never runs.
+    Since T808 every game's start step also re-applies a SAVED realm name, and since
+    T881 it reads the row's address columns (and starts the database to do it). With no
+    name saved and a row this computer still holds, nothing is WRITTEN: the port UPDATE
+    never runs, and the address is read and left alone.
     """
-    from yulon import docker
+    from yulon import docker, networking
     from yulon.ui import controller_view
 
+    entry = load_catalog().get("wow-wotlk")
     asked: list[str] = []
     monkeypatch.setattr(docker, "start_database", lambda *_a, **_k: asked.append("database"))
     monkeypatch.setattr(
         controller_view.DockerSql, "run_statement", lambda _s, _db, sql: asked.append(sql)
     )
-    monkeypatch.setattr(controller_view.DockerSql, "query", lambda _s, _db, sql: asked.append(sql))
-    services = controller_view._for_wotlk(
-        load_catalog().get("wow-wotlk"), Path("/nonexistent/srv"), None, None
+    monkeypatch.setattr(
+        controller_view.DockerSql,
+        "query",
+        lambda _s, _db, sql: asked.append(sql) or "127.0.0.1\t127.0.0.1\n",
     )
+    services = controller_view._for_wotlk(entry, Path("/nonexistent/srv"), None, None)
     step = services.controller.before_servers
     assert step is not None
     assert step() is None
-    assert asked == []
+    assert asked == ["database", networking.realmlist_address_query(entry)]
+    assert not any(statement.startswith("UPDATE") for statement in asked), asked
 
 
 @pytest.mark.parametrize("row", ["8085\n", "", "8086\n8086\n"])

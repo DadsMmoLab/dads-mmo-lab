@@ -14,7 +14,8 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QPushButton
 
-from yulon import gaming_mode, steam
+from tests.conftest import pump_until_every_job_has_answered
+from yulon import gaming_mode, single_play, steam
 from yulon.catalog.catalog import SingleEntry, load_catalog
 from yulon.play_launch import LaunchSpec
 from yulon.single_controller import RUNNING, STOPPED, SingleServerError
@@ -569,3 +570,176 @@ def test_a_gaming_mode_refusal_is_shown_and_reported_up(
     assert title == "DDON was not added to Steam"
     assert failed == [message] and "Steam is running" in message
     view.shutdown()
+
+
+# -- a client a loader starts (FFXI) ------------------------------------------------------
+
+FFXI: SingleEntry = load_catalog().get_single("ffxi")
+
+
+@pytest.fixture(autouse=True)
+def _every_job_answers() -> Iterator[None]:
+    """The server console's log panel reads on a thread, whatever the view's `run_job` (T771)."""
+    yield
+    pump_until_every_job_has_answered("the jobs the view started when it was built")
+
+
+def _ffxi_view(
+    control: FakeController,
+    *,
+    loaded: list[tuple[LaunchSpec, Path]] | None = None,
+    os_name: str = "windows",
+    describe: str = "Client: D:/Games/FFXI (US, version 30261006_0)",
+    account: str = "",
+    remembered: list[str] | None = None,
+    signed_in: list[tuple[str, str]] | None = None,
+    sign_in_error: Exception | None = None,
+) -> SingleServerView:
+    def start_loader(entry: SingleEntry, spec: LaunchSpec, client: Path) -> bool:
+        if loaded is not None:
+            loaded.append((spec, client))
+        return True
+
+    def sign_in(entry: SingleEntry, host: str, name: str) -> Path:
+        if sign_in_error is not None:
+            raise sign_in_error
+        if signed_in is not None:
+            signed_in.append((host, name))
+        return Path("C:/cfg/accounts/ffxi-login.json")
+
+    view = SingleServerView(
+        FFXI,
+        control,
+        run_job=run_inline,
+        poll_ms=60_000,
+        reaches=lambda: REACHES,
+        os_name=lambda: os_name,
+        start_loader=start_loader,
+        describe_client=lambda _e: describe,
+        sign_in=sign_in,
+        account=account,
+        remember_account=remembered.append if remembered is not None else None,
+    )
+    view.poll()
+    view.read_client()
+    return view
+
+
+def test_a_loader_tab_asks_for_an_account_and_no_folder(qapp: object, tmp_path: Path) -> None:
+    view = _ffxi_view(FakeController(tmp_path, entry=FFXI), account="Shantotto")
+    assert view.account_edit is not None and view.account_edit.text() == "Shantotto"
+    assert view.account_edit.maxLength() == 15
+    assert view.client_label.text() == "Client: D:/Games/FFXI (US, version 30261006_0)"
+    buttons = {b.text() for b in view.findChildren(QPushButton)}
+    assert "Choose client folder…" not in buttons
+    assert view.play_button.isEnabled()
+    words = " ".join(label.text() for label in view.findChildren(single_server_view.QLabel))
+    assert "this computer only" in words and "a password it keeps for you" in words
+
+
+def _fake_loader_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asked: list[tuple[Path, str, str]]
+) -> LaunchSpec:
+    spec = LaunchSpec(
+        argv=("xiloader.exe", "--server", "127.0.0.1", "--lang", "1"), env={}, cwd=tmp_path
+    )
+
+    def loader_spec(
+        entry: SingleEntry, server_dir: Path, *, host: str, os_name: str
+    ) -> tuple[LaunchSpec, Path]:
+        asked.append((server_dir, host, os_name))
+        return spec, tmp_path / "client"
+
+    monkeypatch.setattr(single_server_view.single_play, "loader_spec", loader_spec)
+    return spec
+
+
+def test_play_with_a_name_signs_in_and_hands_the_loader_its_login_file(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[tuple[Path, str, str]] = []
+    _fake_loader_spec(tmp_path, monkeypatch, asked)
+    loaded: list[tuple[LaunchSpec, Path]] = []
+    signed_in: list[tuple[str, str]] = []
+    remembered: list[str] = []
+    view = _ffxi_view(
+        FakeController(tmp_path, entry=FFXI),
+        loaded=loaded,
+        account="Shantotto",
+        remembered=remembered,
+        signed_in=signed_in,
+    )
+    view.play()
+    assert asked == [(tmp_path, "127.0.0.1", "windows")]
+    assert signed_in == [("127.0.0.1", "Shantotto")]
+    ((spec, client),) = loaded
+    login = str(Path("C:/cfg/accounts/ffxi-login.json"))
+    assert spec.argv[-2:] == ("--json", login) and client == tmp_path / "client"
+    assert remembered == ["Shantotto"]
+    assert view.busy_reason() is None
+
+
+def test_play_with_the_box_empty_leaves_the_loader_to_ask(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[tuple[Path, str, str]] = []
+    spec = _fake_loader_spec(tmp_path, monkeypatch, asked)
+    loaded: list[tuple[LaunchSpec, Path]] = []
+    signed_in: list[tuple[str, str]] = []
+    view = _ffxi_view(FakeController(tmp_path, entry=FFXI), loaded=loaded, signed_in=signed_in)
+    view.play()
+    assert signed_in == []
+    assert loaded == [(spec, tmp_path / "client")]
+
+
+def test_a_name_the_loader_cannot_carry_is_refused_before_anything(
+    qapp: object, tmp_path: Path, said: Said
+) -> None:
+    loaded: list[tuple[LaunchSpec, Path]] = []
+    signed_in: list[tuple[str, str]] = []
+    remembered: list[str] = []
+    view = _ffxi_view(
+        FakeController(tmp_path, entry=FFXI),
+        loaded=loaded,
+        account="no spaces",
+        remembered=remembered,
+        signed_in=signed_in,
+    )
+    view.play()
+    assert loaded == [] and signed_in == [] and remembered == []
+    ((title, message),) = said.warnings
+    assert title == "FFXI was not started" and "3 to 15 letters or digits" in message
+
+
+def test_a_refused_sign_in_starts_nothing_and_says_why(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, said: Said
+) -> None:
+    _fake_loader_spec(tmp_path, monkeypatch, [])
+    loaded: list[tuple[LaunchSpec, Path]] = []
+    view = _ffxi_view(
+        FakeController(tmp_path, entry=FFXI),
+        loaded=loaded,
+        account="Shantotto",
+        sign_in_error=single_play.PlayRefusal("Nothing answered on 127.0.0.1:54231"),
+    )
+    view.play()
+    assert loaded == []
+    assert said.warnings and "Nothing answered" in said.warnings[-1][1]
+    assert view.busy_reason() is None
+
+
+def test_play_through_the_loader_off_windows_says_so_and_starts_nothing(
+    qapp: object, tmp_path: Path, said: Said
+) -> None:
+    loaded: list[tuple[LaunchSpec, Path]] = []
+    view = _ffxi_view(FakeController(tmp_path, entry=FFXI), loaded=loaded, os_name="linux")
+    view.play()
+    assert loaded == []
+    assert said.warnings and "on Windows only" in said.warnings[-1][1]
+
+
+def test_start_on_a_loader_tab_hands_the_server_no_account(qapp: object, tmp_path: Path) -> None:
+    control = FakeController(tmp_path, state=STOPPED, entry=FFXI)
+    view = _ffxi_view(control)
+    view.start_server()
+    assert control.started_with == [("", None)]

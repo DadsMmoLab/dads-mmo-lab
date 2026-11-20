@@ -37,7 +37,7 @@ import pytest
 
 from tests import catalog_provenance
 from yulon import resources
-from yulon.catalog import composegen, families, native
+from yulon.catalog import composegen, families, native, stack_install
 from yulon.catalog.catalog import CATALOG_FILE, CatalogEntry, NativeInstall, load_catalog
 from yulon.catalog.families import FAMILIES, decisions
 from yulon.catalog.families.cmangos import CmangosInstaller
@@ -334,12 +334,15 @@ def test_the_named_template_dirs_and_the_shipped_ones_are_the_same_set() -> None
             for name in DOCKERFILE_TEMPLATES:
                 assert (build_context / name).is_file(), f"{entry.id}: {build_context / name}"
     # A single server (`catalog.SingleEntry`) keeps its templates in the one directory it
-    # names: a container's compose and Dockerfile set, or every file a process's Start writes.
+    # names: a container's compose and Dockerfile set, every file a process's Start writes,
+    # or a stack's two compose templates (it builds nothing, so no Dockerfile).
     for single in load_catalog().single:
         templates = TEMPLATES / single.install.runtime.templates
         named.add(templates)
         if single.install.process is not None:
             wanted: tuple[str, ...] = tuple(f.template for f in single.install.process.files)
+        elif single.install.stack is not None:
+            wanted = tuple(template for _file, template in stack_install.STACK_TEMPLATES)
         else:
             wanted = (*COMPOSE_TEMPLATES, *DOCKERFILE_TEMPLATES)
         for name in wanted:

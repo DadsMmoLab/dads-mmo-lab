@@ -19,6 +19,40 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Changed
 
+## v0.9.33-Public — 2026-11-20
+
+### New
+- WotLK: the Time Is Time module makes the day and night cycle run faster or slower, and keeps the calendar on the real date.
+- Install a Final Fantasy XI (FFXI) server in beta from **Other games**; play with your own updated client.
+- An FFXI server's tab has Start, Stop and the live log of all its servers, and finds your installed FFXI client.
+- **Play** on the FFXI tab opens xiloader, where you log in or make your account; the first Play asks Windows once.
+- Install a WoW Forever Classic server with Karrz's bots in beta from **Other games**, using your own copy of the game.
+- **Play** on the WoW Forever tab sets up the login once, makes your account and starts the game.
+- WoW Forever plays on a Steam Deck too: **Play** gets GE-Proton once and runs the game in its own Proton prefix.
+- **Add to Steam Deck (Gaming Mode)…** on WoW Forever's tab adds its Server, game and Server Stop tiles to Steam.
+
+### Fixed
+- WotLK, Unbound and Conquest of Azeroth: Start moves a realm off a network address this computer no longer has.
+- Tortoise, TBC, Vanilla and Centurion: Start moves the realm off a network address this computer no longer has, as WotLK does.
+- A realmlist.wtf whose old line has a hidden byte-order mark, a tab or a UTF-16 save no longer sends Play to another server.
+- The Accounts tab says when a recent login used a wrong password, and names the button Set password needs.
+- Networking: the realm name is read again once the server is up.
+- Support files now list this computer's addresses and the address each realm tells players.
+- Networking: **Apply** on a stopped server starts only the database to change who can connect, then stops it again.
+- Networking: **Apply** on a stopped server refuses other writers while its database is up.
+- WoW Forever: Holy Strike, Blessing of Light, Salvation, Mutilate and Revoke play their animations again.
+- **Add to Steam Deck (Gaming Mode)…** works with two Steam accounts: the tiles go to the one that signed in last.
+
+### Changed
+- WotLK: the server and Playerbots move to the newest upstream code (2026-11-20).
+- Unbound: the server and Playerbots move to the newest upstream code (2026-11-20).
+- TBC: the server and Playerbots move to the newest upstream code (2026-11-20).
+- Vanilla: the server and Playerbots move to the newest upstream code (2026-11-20).
+- Tortoise: the bots move to the newest release, v1.29.2 (2026-11-20).
+- Centurion: the server moves to the newest upstream code (2026-11-20).
+- Mists of Pandaria: the server moves to the newest upstream code (2026-11-20).
+- Mists of Pandaria: a fresh install's databases match the new server code and include the bots' account table.
+
 ## v0.9.32-Public — 2026-11-09
 
 ### New

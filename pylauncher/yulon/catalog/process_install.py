@@ -332,7 +332,9 @@ class ProcessInstaller:
                     "Pick an empty folder or a new one. Nothing was written."
                 )
         return native.InstallState(
-            game_id=self.entry.id, install_id=expected, family=self.process.family
+            game_id=self.entry.id,
+            install_id=expected,
+            family=self.process.family,
         )
 
     @staticmethod

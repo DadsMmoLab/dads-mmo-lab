@@ -201,8 +201,16 @@ def _sources() -> Sources:
     return Sources(platform.config_dir(), None, ())
 
 
+def _info(sources: Sources, version: object, **kwargs: object) -> str:
+    """`system_info` with this host's network stated, so no test reads the test box (T881 E)."""
+    kwargs.setdefault("listing", lambda: platform.LocalListing(addresses=()))
+    kwargs.setdefault("lan_ip", lambda: None)
+    kwargs.setdefault("realm_log", lambda install, silent: None)
+    return system_info(sources, version, **kwargs)  # type: ignore[arg-type]
+
+
 def test_system_info_carries_the_machine_and_dockers_view() -> None:
-    text = system_info(
+    text = _info(
         _sources(),
         lambda _: "27.0.1",
         machine=lambda: ["CPU: X", "RAM: Y"],
@@ -216,9 +224,9 @@ def test_system_info_says_when_docker_will_not_say_or_raises() -> None:
     def boom(_: str | None) -> tuple[int, int] | None:
         raise RuntimeError("x")
 
-    text = system_info(_sources(), lambda _: "1", machine=lambda: [], engine=lambda d: None)
+    text = _info(_sources(), lambda _: "1", machine=lambda: [], engine=lambda d: None)
     assert "Docker on this machine sees: could not read" in text
-    text = system_info(_sources(), lambda _: "1", machine=lambda: [], engine=boom)
+    text = _info(_sources(), lambda _: "1", machine=lambda: [], engine=boom)
     assert "Docker on this machine sees: could not read" in text
 
 
@@ -229,7 +237,7 @@ def test_system_info_does_not_ask_the_machine_probes_of_a_silent_docker() -> Non
         asked.append(distro)
         return (1, 1)
 
-    text = system_info(
+    text = _info(
         _sources(), lambda _: "1", silent_targets={None}, machine=lambda: [], engine=engine
     )
     assert asked == []
@@ -247,7 +255,7 @@ def test_system_info_asks_each_wsl_distros_docker_for_its_size(tmp_path: Path) -
 
     wsl = InstallFacts("wow-wotlk", "0badc0de", tmp_path / "w", "Ubuntu", None)
     sources = Sources(platform.config_dir(), None, (wsl,))
-    text = system_info(
+    text = _info(
         sources,
         lambda _: "1",
         machine=lambda: [],
@@ -273,7 +281,7 @@ def test_a_docker_that_did_not_answer_the_version_is_not_asked_its_size(tmp_path
             raise RuntimeError("wedged")
         return None
 
-    text = system_info(sources, version, machine=lambda: [], engine=engine)
+    text = _info(sources, version, machine=lambda: [], engine=engine)
     assert asked == []
     assert "Docker on this machine sees: skipped" in text
     assert "Docker in WSL distro Ubuntu sees: skipped" in text
@@ -286,7 +294,7 @@ def test_a_docker_that_answered_the_version_is_asked_its_size(tmp_path: Path) ->
         asked.append(distro)
         return (1, 1024**3)
 
-    system_info(_sources(), lambda _: "27", machine=lambda: [], engine=engine)
+    _info(_sources(), lambda _: "27", machine=lambda: [], engine=engine)
     assert asked == [None]
 
 
@@ -340,3 +348,63 @@ def test_the_bundle_hands_its_machine_and_engine_seams_to_system_info(tmp_path: 
     assert "CPU: seam" in info
     assert "Docker on this machine sees: 3 CPUs, 2.0 GiB memory" in info
     assert asked == [None]
+
+
+def test_system_info_names_this_computers_addresses_and_each_realms_advertised_address(
+    tmp_path: Path,
+) -> None:
+    """T881 E: the report's support file had neither the PC's addresses nor the row's.
+
+    The realm advertised an address the PC had lost, and nothing in the bundle showed
+    it. The line reads the last `Added realm ... at ...` in the authserver's tail (every
+    start prints one), and says whether this computer still holds it -- `no` is the
+    report's case, and the one a reader has to be able to see.
+    """
+    from yulon import networking, platform
+    from yulon.catalog.catalog import load_catalog
+    from yulon.support.sources import InstallFacts, Sources
+
+    entry = load_catalog().get("wow-wotlk")
+    held = tmp_path / "held"
+    lost = tmp_path / "lost"
+    for folder in (held, lost):
+        folder.mkdir()
+    networking.record_network_intent(held, "lan", "192.168.1.25")
+    listing = platform.LocalListing(
+        addresses=(
+            platform.LocalAddress("eth0", "192.168.1.25", False),
+            platform.LocalAddress("tailscale0", "100.64.0.10", True),
+        )
+    )
+    sources = Sources(
+        platform.config_dir(),
+        None,
+        (
+            InstallFacts("wow-wotlk", "aaaa", held, None, entry),
+            InstallFacts("wow-wotlk", "bbbb", lost, None, entry),
+        ),
+    )
+    logs = {
+        "held": 'Added realm "One" at 192.168.1.25:8085.\n',
+        # Two starts: the LAST line is what the realm advertises now.
+        "lost": (
+            'Added realm "Two" at 192.168.1.25:8085.\n' 'Added realm "Two" at 192.168.1.50:8085.\n'
+        ),
+    }
+
+    text = _info(
+        sources,
+        lambda _: "1",
+        machine=lambda: [],
+        engine=lambda distro: (1, 1),
+        listing=lambda: listing,
+        lan_ip=lambda: "192.168.1.25",
+        realm_log=lambda install, silent: logs[install.server_dir.name],
+    )
+
+    assert "192.168.1.25 (eth0), 100.64.0.10 (tailscale0, VPN)" in text
+    assert "detected LAN address: 192.168.1.25" in text
+    assert "Network record (.yulon-network.json): mode lan, 192.168.1.25, written " in text
+    assert "Network record (.yulon-network.json): none saved" in text
+    assert "192.168.1.25 (from its authserver log), held by this PC: yes" in text
+    assert "192.168.1.50 (from its authserver log), held by this PC: no" in text

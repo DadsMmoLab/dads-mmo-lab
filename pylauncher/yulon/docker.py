@@ -506,6 +506,9 @@ _PORT_REFUSALS = (
     re.compile(r"failed to bind host port \S*?:(\d+)/tcp: (?P<why>[^\r\n]*)"),
     # ... or another container publishes it.
     re.compile(r"Bind for \S*?:(\d+) failed: (?P<why>port is already allocated)"),
+    # Rootless Podman through the Docker CLI (T887, spike Q6): the compat API
+    # reports a taken port in rootlessport/pasta words, not Docker's.
+    re.compile(r"rootlessport listen tcp \S*?:(\d+): bind: (?P<why>address already in use)"),
 )
 
 
@@ -529,7 +532,9 @@ def _port_refusal(stderr: str) -> str | None:
 
     Docker Desktop says `ports are not available`; Linux Docker Engine says `failed to
     bind host port` (a program) or `Bind for ... failed: port is already allocated` (a
-    container). All three are read.
+    container); rootless Podman says `rootlessport listen tcp ...: bind: address
+    already in use`. All four are read, with the same player sentence Docker's
+    wording gives today.
 
     The preflight bind check covers a port blocked when the install starts; this
     covers one that became blocked afterwards (a range Windows reserved at the
@@ -5868,7 +5873,15 @@ def daemon_identity(*, wsl_distro: str | None = None) -> str:
     `Created` is the daemon's start time; `docker info`'s `ID` does not change.
     `""` when it cannot be read (no daemon, no `bridge` network as with Windows
     containers): the caller must then not assume either way.
+
+    Under Podman (T887, developer switch only) this is always `""` ("cannot
+    tell"): Podman has no daemon and no changing bridge Id. Callers treat `""`
+    as no evidence either way (dashboard's loop watcher keeps its last answer).
     """
+    from yulon import engine as engine_seam
+
+    if engine_seam.is_podman():
+        return ""
     proc = _docker(["network", "inspect", "bridge", "--format", "{{.Id}}"], wsl_distro=wsl_distro)
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
@@ -8022,6 +8035,109 @@ def compose_up_service(
     if force_recreate:
         argv.append("--force-recreate")
     _run([*argv, service], cwd=server_dir, timeout=timeout, wsl_distro=wsl_distro)
+
+
+def compose_up_all(
+    server_dir: Path, *, timeout: float | None = None, wsl_distro: str | None = None
+) -> None:
+    """Start every service of this install's project, in the order its `depends_on` gives.
+
+    For the stack runtime (`catalog.SingleStack`), whose services start in a chain
+    the compose file states (database healthy, then the one-shot update, then the
+    servers), so compose's own ordering is the start and nothing is started `--no-deps`.
+    A service under a profile is not started (the stack's seed). Raises
+    `DockerCommandError` with compose's own words, as `compose_up_service()` does.
+    """
+    _run(["compose", "up", "-d"], cwd=server_dir, timeout=timeout, wsl_distro=wsl_distro)
+
+
+def compose_stop_all(
+    server_dir: Path, *, timeout: float | None = None, wsl_distro: str | None = None
+) -> None:
+    """Stop every running service of this install's project (`compose stop`), last started first.
+
+    Compose stops a project's services in the reverse of their `depends_on` order, so
+    a stack's database outlives every server that writes to it. The project is the
+    one the compose file in `server_dir` names, so this stops nothing of another install's.
+    """
+    _run(["compose", "stop"], cwd=server_dir, timeout=timeout, wsl_distro=wsl_distro)
+
+
+def compose_pull(
+    server_dir: Path,
+    *,
+    profiles: Sequence[str] = (),
+    wsl_distro: str | None = None,
+    sink: OutputSink | None = None,
+    cancel: threading.Event | None = None,
+) -> AttachedRun:
+    """Pull every image this install's compose files name, streamed (`compose pull`).
+
+    `profiles` are added as `--profile` so a service `up` never starts (a stack's
+    seed) has its image pulled too. `--progress plain` and `merge_stderr` for
+    `build_staged()`'s reason: the default progress display is ANSI for a terminal
+    that is not there, and compose writes it to stderr. The exit status is returned,
+    never raised (`run_attached()`).
+    """
+    argv = ["compose", *(a for p in profiles for a in ("--profile", p)), "--progress", "plain"]
+    return run_attached(
+        [*argv, "pull"],
+        server_dir,
+        wsl_distro=wsl_distro,
+        sink=sink,
+        cancel=cancel,
+        merge_stderr=True,
+    )
+
+
+def compose_run_once(
+    server_dir: Path,
+    service: str,
+    *,
+    profiles: Sequence[str] = (),
+    volumes: Sequence[str] = (),
+    wsl_distro: str | None = None,
+    sink: OutputSink | None = None,
+    cancel: threading.Event | None = None,
+) -> AttachedRun:
+    """Run one service of this install's project to completion and remove it (`compose run --rm`).
+
+    For a stack's seed: a service whose command copies an image's data into the
+    project's volumes. `--no-deps` because a seed needs nothing else running. `volumes`
+    are extra `-v` mounts for this run only (a client extract's read-only client folder,
+    which the compose file must not name: it is the player's, and may move). The exit
+    status is returned, never raised (`run_attached()`).
+    """
+    argv = ["compose", *(a for p in profiles for a in ("--profile", p))]
+    mounts = [a for v in volumes for a in ("-v", v)]
+    return run_attached(
+        [*argv, "run", "--rm", "--no-deps", *mounts, service],
+        server_dir,
+        wsl_distro=wsl_distro,
+        sink=sink,
+        cancel=cancel,
+        merge_stderr=True,
+    )
+
+
+def compose_follow_logs(
+    server_dir: Path, services: Sequence[str], tail: int = 200, *, wsl_distro: str | None = None
+) -> Iterator[str]:
+    """`follow_logs()` for several services of one project at once (`compose logs -f`).
+
+    A stack's console: its servers log to five containers, and a player reads them as
+    one server. Each line keeps compose's `<service>  | ` prefix, which says which
+    program wrote it. Raises as `follow_logs()` does.
+    """
+    prefix = platform.docker_prefix(wsl_distro)
+    if prefix is None:
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    argv = [*prefix, "compose", "logs", "-f", "--no-color", "--tail", str(tail), *services]
+    try:
+        for line in runner.stream(argv, cwd=server_dir):
+            yield from lines.relayed(line, stage="console")
+    except OSError as exc:
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP) from exc
 
 
 def compose_remove_service(

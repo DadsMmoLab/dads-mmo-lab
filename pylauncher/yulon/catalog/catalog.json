@@ -10,7 +10,8 @@
         "The tile said, until T194: \"The flagship install; module/ALE/mod/keg management is manifest-driven.\"",
         "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested.",
         "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested.",
-        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested."
+        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested.",
+        "PINS (2026-11-20): core e7e2e288 -> 32fd3472 and mod-playerbots 405f8119 -> ecc4a537, the newest at 2026-11-20, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots",
@@ -20,13 +21,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2"
+            "rev": "32fd3472aa74961c91cb9bc942ee3e0a44b36779"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "405f81196161017eebae3ee7a612d786a3ed2a9d"
+            "rev": "ecc4a537a3b43056e412fae63fb4a4271849b472"
           }
         ]
       },
@@ -312,7 +313,8 @@
       "notes": [
         "T824 (2026-10-28): mangos-tbc 15b6ddb4 -> 37767e95, playerbots da4419af -> 6823423e and tbc-db ebe51a83 -> 1c54acd2, the newest at 2026-10-28, not live-tested.",
         "T860 (2026-11-02): mangos-tbc 37767e95 -> af6b4885 and playerbots 6823423e -> de1b1823; tbc-db stays 1c54acd2 (already the newest); not live-tested.",
-        "2026-11-09: mangos-tbc af6b4885 -> ec0d40c3, playerbots de1b1823 -> 8d102f91 and tbc-db 1c54acd2 -> a4c6a8c8, the newest at 2026-11-09; not live-tested."
+        "2026-11-09: mangos-tbc af6b4885 -> ec0d40c3, playerbots de1b1823 -> 8d102f91 and tbc-db 1c54acd2 -> a4c6a8c8, the newest at 2026-11-09; not live-tested.",
+        "2026-11-20: mangos-tbc ec0d40c3 -> 147c0b63, playerbots 8d102f91 -> 87624d0a and tbc-db a4c6a8c8 -> 5dc223d3, the newest at 2026-11-20; not live-tested."
       ],
       "emulator": {
         "name": "CMaNGOS mangos-tbc + cmangos/playerbots + tbc-db",
@@ -320,17 +322,17 @@
           {
             "repo": "cmangos/mangos-tbc",
             "dest": "src/mangos-tbc",
-            "rev": "ec0d40c3d1462cf1b1a9e66184a07da7af7dc993"
+            "rev": "147c0b63fbb5d22b70b23819cc1d3e883e8bf3e4"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-tbc/src/modules/Bots",
-            "rev": "8d102f91c882bd0d75ff6fd73665631d1e76e85c"
+            "rev": "87624d0a1d2772551dd4be6947b5a362ceacec80"
           },
           {
             "repo": "cmangos/tbc-db",
             "dest": "src/tbc-db",
-            "rev": "a4c6a8c8bbc83d920fb75ebca3f4b8fc30aafed1"
+            "rev": "5dc223d3ab1e4a72121b7330533879805cba93c9"
           }
         ]
       },
@@ -782,7 +784,8 @@
       "notes": [
         "T824 (2026-10-28): mangos-classic 8ec338a1 -> 57312491, playerbots da4419af -> 6823423e and classic-db ec4f5961 -> 603ece10, the newest at 2026-10-28, not live-tested.",
         "T860 (2026-11-02): mangos-classic 57312491 -> ff13624a and playerbots 6823423e -> de1b1823; classic-db stays 603ece10 (already the newest); not live-tested.",
-        "2026-11-09: mangos-classic ff13624a -> 6d8821c7, playerbots de1b1823 -> 8d102f91 and classic-db 603ece10 -> c33f90b8, the newest at 2026-11-09; not live-tested."
+        "2026-11-09: mangos-classic ff13624a -> 6d8821c7, playerbots de1b1823 -> 8d102f91 and classic-db 603ece10 -> c33f90b8, the newest at 2026-11-09; not live-tested.",
+        "2026-11-20: mangos-classic 6d8821c7 -> 28a26c38, playerbots 8d102f91 -> 87624d0a and classic-db c33f90b8 -> e4825cf4, the newest at 2026-11-20; not live-tested."
       ],
       "emulator": {
         "name": "CMaNGOS mangos-classic + cmangos/playerbots + classic-db",
@@ -790,17 +793,17 @@
           {
             "repo": "cmangos/mangos-classic",
             "dest": "src/mangos-classic",
-            "rev": "6d8821c78b4f947d4cd40570657c88aefa804a24"
+            "rev": "28a26c388a3c817f34cdb4737847a345841b6a08"
           },
           {
             "repo": "cmangos/playerbots",
             "dest": "src/mangos-classic/src/modules/Bots",
-            "rev": "8d102f91c882bd0d75ff6fd73665631d1e76e85c"
+            "rev": "87624d0a1d2772551dd4be6947b5a362ceacec80"
           },
           {
             "repo": "cmangos/classic-db",
             "dest": "src/classic-db",
-            "rev": "c33f90b8eeb3f8bacb53d5cbfee45075c80b416c"
+            "rev": "e4825cf48176edff313d78de66b0beb14371c8eb"
           }
         ]
       },
@@ -1252,7 +1255,8 @@
         "Commands reach this world over SOAP again: the core builds gsoap from source behind ENABLE_SOAP, which the image template switches on (T86, 2026-09-17).",
         "Installed, started and pressed headless through the app's own seams on the test box; no client rendered there (T30, T86).",
         "T824 (2026-10-28): core 10393426 -> 33d0131a and TortoiseBots ff668fee -> 573c7919 (release v1.14.0), the newest at 2026-10-28, not live-tested.",
-        "2026-11-09: core 33d0131a -> 48cb227f and TortoiseBots 573c7919 -> a90d0407 (release v1.22.1), the newest at 2026-11-09, not live-tested."
+        "2026-11-09: core 33d0131a -> 48cb227f and TortoiseBots 573c7919 -> a90d0407 (release v1.22.1), the newest at 2026-11-09, not live-tested.",
+        "2026-11-20: TortoiseBots a90d0407 -> d5e903d3 (release v1.29.2), the newest at 2026-11-20; the core stays 48cb227f, already the newest at 2026-11-09; not live-tested."
       ],
       "emulator": {
         "name": "tortoise-wow/tortoise-wow @ main (the Penqle core) + Sagiroth/TortoiseBots",
@@ -1267,7 +1271,7 @@
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "a90d0407251f6e8471bd79b2fba7f6b20370d281",
+            "rev": "d5e903d3c99f6342502736fcd56af3190fc6d255",
             "follow": "releases"
           }
         ]
@@ -1699,7 +1703,8 @@
       "notes": [
         "T824 (2026-10-28): TrinityCore112 CENTURION 25d3e6ef -> 351950fb, the newest at 2026-10-28, not live-tested.",
         "T860 (2026-11-02): TrinityCore112 CENTURION 351950fb -> 0f7e3f59, the newest at 2026-11-02, not live-tested.",
-        "PINS (2026-11-09): TrinityCore112 CENTURION 0f7e3f59 -> e91044da, the newest at 2026-11-09, not live-tested."
+        "PINS (2026-11-09): TrinityCore112 CENTURION 0f7e3f59 -> e91044da, the newest at 2026-11-09, not live-tested.",
+        "PINS (2026-11-20): TrinityCore112 CENTURION e91044da -> 0846c691 (+78), the newest at 2026-11-20, not live-tested."
       ],
       "emulator": {
         "name": "Centurion (TrinityCore 3.3.5 fork with its own playerbots)",
@@ -1708,7 +1713,7 @@
             "repo": "thomasjteachey/TrinityCore112",
             "branch": "CENTURION",
             "dest": "src/centurion",
-            "rev": "e91044dae91b427c0fadbf753c2294af77656c58"
+            "rev": "0846c691f15d00f9de4ef6aac63b95f4ee28548d"
           }
         ]
       },
@@ -2614,7 +2619,8 @@
         "T554: the multi-class server. Own folder, containers, images, volumes, databases and ports, so it runs beside WoW WotLK.",
         "T824 (2026-10-28): core 8a4e76ea -> 3f2969dd and mod-playerbots d750b4b3 -> e88cc409, the newest at 2026-10-28, not live-tested.",
         "T860 (2026-11-02): core 3f2969dd -> 93333d6a and mod-playerbots e88cc409 -> 05a1f6fc, the newest at 2026-11-02, not live-tested.",
-        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested."
+        "PINS (2026-11-09): core 93333d6a -> e7e2e288 and mod-playerbots 05a1f6fc -> 405f8119, the newest at 2026-11-09, not live-tested.",
+        "PINS (2026-11-20): core e7e2e288 -> 32fd3472 and mod-playerbots 405f8119 -> ecc4a537, the newest at 2026-11-20, not live-tested."
       ],
       "emulator": {
         "name": "AzerothCore (mod-playerbots fork) + mod-playerbots + mod-ale + Wrath Unbound",
@@ -2624,13 +2630,13 @@
             "branch": "Playerbot",
             "depth": null,
             "dest": ".",
-            "rev": "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2"
+            "rev": "32fd3472aa74961c91cb9bc942ee3e0a44b36779"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
             "dest": "modules/mod-playerbots",
-            "rev": "405f81196161017eebae3ee7a612d786a3ed2a9d"
+            "rev": "ecc4a537a3b43056e412fae63fb4a4271849b472"
           },
           {
             "repo": "azerothcore/mod-ale",
@@ -3476,10 +3482,11 @@
         "description": "Mists of Pandaria 5.4.8 (Legends of Azeroth Pandaria) with 500 playerbots that quest, travel, group and level from 1 to 90, Pandaria included. Yu'lon builds the server from LoA Pandaria's own source and makes your English 5.4.8 client ready to play it. Bring the Recall WoW client.",
         "notes": [
             "T850: 1LineAtaTime/LoA-Pandaria-Playerbots, branch `playerbot` @ efe7f29107e15a98e0bc4b3ebf61f54696e0827f (PINS, 2026-11-09, the newest; it moved from tag v1.0.4, e135742e1891d3e653d27966da2dc70e793f203e, 2026-10-26, \"Fix the Linux build\", and the 11 commits between touch only CI workflows and README.md, no source or SQL): a TrinityCore/SkyFire-lineage 5.4.8 fork (Legends of Azeroth Pandaria) with mod_playerbots ported from AzerothCore. The lab's handoff of 2026-10-28 logged in, created a character and ran 500 bots on e135742e on Docker Desktop; the catalog ENTRY is not live-tested (GAP §2 and §4).",
-            "The four databases come from the release asset LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip (142,501,177 B, sha256 db8dd845e3a5da4bc3a6f28afa68ed839aceb222101db949ae74840a5a2365a0): four .sql files at the ZIP'S ROOT, no folder (GAP §0). Source pin, asset and zip layout read at GAP §0; NOT from the checkout, whose sql/base holds no world.",
+            "The four databases come from the release asset LoA-Pandaria-Playerbots-v1.1.1-database.zip (145,865,764 B, sha256 cb28319536c4f007856381def8bfe8e3904cecf75fba1c2d442f6519c17bb77d): four .sql files at the ZIP'S ROOT, no folder (GAP §0; the v1.1.1 ZIP's members read 2026-11-20). It replaces v1.0.4's asset (142,501,177 B, sha256 db8dd845e3a5da4bc3a6f28afa68ed839aceb222101db949ae74840a5a2365a0) because the f5fc970d source prepares statements against `playerbots_account_type`, a table that dump does not create. Source pin, asset and zip layout read from the release; NOT from the checkout, whose sql/base holds no world.",
             "Client data is MPQ, not CASC: 5.4.8 predates CASC, and the extractors open fixed names (upstream src/tools/map_extractor/System.cpp:104-117,1275-1400 and vmap4_extractor/vmapexport.cpp:68-79,130-165). Target build is 18273 -- `18414 but Blizz didnt rename the MPQ files` (System.cpp:101) -- so the 18 wow-update MPQ names carry 16016..18273, never 18414.",
             "GAP §2's \"Characters tab\" row: NOTHING has been run against a live LoA Pandaria server, so every Characters verb is withheld with the \"each is offered once it has been checked against a live server\" sentence, Revive included; fill them in after the first live check.",
-            "T850-F: the Bots tab's marker is `RNDBOT`, the stored form of `AiPlayerbot.RandomBotAccountPrefix`'s default `rndbot` (playerbots.conf.dist:621): the core upper-cases every account name in AccountMgr::normalizeString (AccountMgr.cpp:48-50,327-343). No registry table is named (`registry: null`) because this core's module creates none: the only playerbots table it touches is `playerbots_random_bots` (PlayerbotAIConfig.cpp:418), which it deletes from, and GAP §2 lists no account-type table for MoP -- so bots are found by the prefix arm alone until a live install shows a registry."
+            "T850-F: the Bots tab's marker is `RNDBOT`, the stored form of `AiPlayerbot.RandomBotAccountPrefix`'s default `rndbot` (playerbots.conf.dist:621): the core upper-cases every account name in AccountMgr::normalizeString (AccountMgr.cpp:48-50,327-343). No registry table is named (`registry: null`) on purpose. Since f5fc970d (PINS, 2026-11-20) the module creates `playerbots`.`playerbots_account_type` (types 1 = RNDbot, 2 = AddClass) and a fresh install's v1.1.1 database has it, but MoP servers installed from v1.0.4 keep that database (`update_to_latest` is false) and have no such table, so a registry clause would break their Bots queries. Name it once Yu'lon can tell per install whether the table exists.",
+        "PINS (2026-11-20): 1LineAtaTime/LoA-Pandaria-Playerbots efe7f291 -> f5fc970d (+315), the newest at 2026-11-20, not live-tested. The database asset moves with the source: LoA-Pandaria-Playerbots-v1.1.1-database.zip (145,865,764 B, sha256 cb28319536c4f007856381def8bfe8e3904cecf75fba1c2d442f6519c17bb77d) holds auth.sql, characters.sql, playerbots.sql and world.sql at its ROOT, and its playerbots.sql creates `playerbots_account_type` (0 = unassigned, 1 = RNDbot, 2 = AddClass) and still `playerbot_farming_zone`, `playerbot_farming_spot`, `playerbot_item_store` and `playerbot_city`. The v1.0.4 ZIP has no `playerbots_account_type` (grep of its playerbots.sql: zero matches), while this source prepares statements against it at startup and the entry imports no module SQL (`Updates.EnableDatabases = 0`), so v1.1.1 is the dump that matches f5fc970d -- which is tag v1.1.1 (2f9aebde) plus 20 commits touching only .github/ and README.md. Every table the f5fc970d source prepares statements against in the world, characters, auth and playerbots databases exists in that ZIP (26, 115, 18 and 22 distinct tables, checked 2026-11-20; none missing). Existing MoP installs are not moved: `update_to_latest` is false for wow-mop, so nothing re-fetches the asset; a fresh install gets v1.1.1. The extractor's target build is still 18273 and its MPQ list is unchanged (`src/tools/map_extractor/System.cpp:109-121`, `src/tools/vmap4_extractor/vmapexport.cpp:65-79`), `-i`/`-o` are still its input/output flags, the cmake options (`-DCMAKE_BUILD_TYPE=RelWithDebInfo -DTOOLS=1 -DELUNA=0`) and every tool the plan names (`mapextractor`, `vmap4extractor`, `vmap4assembler`, `mmaps_generator`) are still in the tree, every conf key the entry writes still exists (`PlayerbotsDatabaseInfo` in `worldserver.conf.dist`, the rest in `playerbots.conf.dist`, as before), and the ready line and fatal line are still printed. The new source's own module SQL (`modules/mod_playerbots/data/sql/playerbots/base/updates.sql` and the 2026_10_24..2026_10_28 updates) is NOT imported: this entry installs the database asset and sets `Updates.EnableDatabases = 0`, as before -- which is why the account table has to come from the asset, and why the asset has to be v1.1.1."
         ],
         "emulator": {
             "name": "Legends of Azeroth Pandaria (TrinityCore 5.4.8 fork) + mod_playerbots",
@@ -3488,7 +3495,7 @@
                     "repo": "1LineAtaTime/LoA-Pandaria-Playerbots",
                     "branch": "playerbot",
                     "dest": "src/mop",
-                    "rev": "efe7f29107e15a98e0bc4b3ebf61f54696e0827f"
+                    "rev": "f5fc970d22ae29ced5f0e1752a33ec7468c55853"
                 }
             ]
         },
@@ -3729,28 +3736,28 @@
                                 "name": "auth",
                                 "into": "mop_auth",
                                 "files": [
-                                    "release/v1.0.4/db/auth.sql"
+                                    "release/v1.1.1/db/auth.sql"
                                 ]
                             },
                             {
                                 "name": "characters",
                                 "into": "mop_characters",
                                 "files": [
-                                    "release/v1.0.4/db/characters.sql"
+                                    "release/v1.1.1/db/characters.sql"
                                 ]
                             },
                             {
                                 "name": "world",
                                 "into": "mop_world",
                                 "files": [
-                                    "release/v1.0.4/db/world.sql"
+                                    "release/v1.1.1/db/world.sql"
                                 ]
                             },
                             {
                                 "name": "playerbots",
                                 "into": "mop_playerbots",
                                 "files": [
-                                    "release/v1.0.4/db/playerbots.sql"
+                                    "release/v1.1.1/db/playerbots.sql"
                                 ]
                             }
                         ],
@@ -3800,10 +3807,10 @@
                     "world_data_gb": 8,
                     "release_assets": [
                         {
-                            "url": "https://github.com/1LineAtaTime/LoA-Pandaria-Playerbots/releases/download/v1.0.4/LoA-Pandaria-Playerbots-v1.0.4-win64-database.zip",
-                            "sha256": "db8dd845e3a5da4bc3a6f28afa68ed839aceb222101db949ae74840a5a2365a0",
-                            "size": 142501177,
-                            "dest": "release/v1.0.4/db",
+                            "url": "https://github.com/1LineAtaTime/LoA-Pandaria-Playerbots/releases/download/v1.1.1/LoA-Pandaria-Playerbots-v1.1.1-database.zip",
+                            "sha256": "cb28319536c4f007856381def8bfe8e3904cecf75fba1c2d442f6519c17bb77d",
+                            "size": 145865764,
+                            "dest": "release/v1.1.1/db",
                             "members": [
                                 "auth.sql",
                                 "characters.sql",
@@ -4207,6 +4214,427 @@
           "label": "115US DFO server",
           "url": "https://gitgud.io/fuckworld/115",
           "purpose": "The server's source and its own notes: content that is missing or wrong in the game."
+        },
+        {
+          "label": "Yu'lon",
+          "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+          "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+        }
+      ]
+    },
+    {
+      "id": "ffxi",
+      "name": "FFXI",
+      "status": "beta",
+      "description": "Final Fantasy XI, Square Enix's MMO, on the LandSandBoat server. Play with your own FINAL FANTASY XI client (Square Enix's installer, updated once in PlayOnline); Name your account in the tab: Yu'lon makes it on the server the first time and signs you in through xiloader.",
+      "notes": [
+        "Runs LandSandBoat's published images, pinned by digest: the server image's org.opencontainers.image.revision is LandSandBoat/server 1858bbf (merged 2026-10-16), and its settings/default/login.lua says CLIENT_VER 30261006_0 with VER_LOCK 2 (that version or newer) and ACCOUNT_CREATION true.",
+        "Measured on Windows 11 + Docker Desktop, 2026-10-16/17, with the same images in a hand-made compose project: the first start imports the database in about 40 s and the map server reports ready 11 to 17 s after its start; an account made through the auth port exactly as xiloader makes one, a character made in the real client and a zone-in to Port San d'Oria (map log 'logging in to zone <232>') all worked, and the character was saved when the client went away.",
+        "xiloader v2.2.0 (GPL-3.0) stands in for PlayOnline. A client under Program Files writes USER, SYS and TEMP at play, which only administrators may: without them the game stops with FFXI-3117 'Failed to carry out user file operations' (measured). The first Play grants the player those three folders, behind one administrator prompt.",
+        "Play makes the account itself, on the auth port with xiloader's own request (command 0x20; result 3 made, 4 taken), with a 24-character password Yu'lon keeps in its config folder, and hands xiloader the name and password in a --json file with hide true, so xiloader logs in without its menu and hides its window once the game starts (xiloader v2.2.0 main.cpp). Measured through the tab on 2026-10-18, with the account made at xiloader's own prompt: the one-time grant, a character, a zone-in to Northern San d'Oria and a clean /shutdown.",
+        "Every port is published on 127.0.0.1 only, so this computer plays. Another computer would need the zone address the map server hands out changed in the database, which is not done yet."
+      ],
+      "emulator": {
+        "name": "LandSandBoat",
+        "sources": [
+          {
+            "repo": "LandSandBoat/server",
+            "branch": "base",
+            "dest": "src",
+            "rev": "1858bbf6cfc6fce29e9e766e3121dba8830a1320"
+          }
+        ]
+      },
+      "install": {
+        "default_server_dir": "yulon-ffxi",
+        "platforms": [
+          "linux",
+          "windows"
+        ],
+        "stack": {
+          "family": "landsandboat",
+          "templates": "ffxi/stack",
+          "source": "src",
+          "images": [
+            {
+              "role": "server",
+              "ref": "ghcr.io/landsandboat/server@sha256:15ba39df92b0ec7777e708558c1e2ee863f1c197fcee6e0e8001170e2d84f9e7",
+              "label": "LandSandBoat server (1858bbf)"
+            },
+            {
+              "role": "database",
+              "ref": "mariadb@sha256:2bdff1534a7e569fecaf4b10b66ad0d410806e382d9db29ba305448addda97c4",
+              "label": "MariaDB 12.3"
+            },
+            {
+              "role": "meshes",
+              "ref": "ghcr.io/landsandboat/ximeshes@sha256:71d7804f8b4b60ef16d08927b6e0b18b315df936bbc1f9543901e14cbd7a7d93",
+              "label": "LandSandBoat navigation meshes"
+            }
+          ],
+          "services": [
+            {
+              "service": "database",
+              "container": "ffxi-database",
+              "image": "database"
+            },
+            {
+              "service": "database-update",
+              "container": "ffxi-database-update",
+              "image": "server",
+              "once": true
+            },
+            {
+              "service": "connect",
+              "container": "ffxi-connect",
+              "image": "server",
+              "ready": [
+                "The connect-server is ready to work"
+              ]
+            },
+            {
+              "service": "search",
+              "container": "ffxi-search",
+              "image": "server",
+              "ready": [
+                "The search-server is ready to work"
+              ]
+            },
+            {
+              "service": "profile",
+              "container": "ffxi-profile",
+              "image": "server",
+              "ready": [
+                "The profile-server is ready to work"
+              ]
+            },
+            {
+              "service": "world",
+              "container": "ffxi-world",
+              "image": "server",
+              "ready": [
+                "The world-server is ready to work"
+              ]
+            },
+            {
+              "service": "map",
+              "container": "ffxi-map",
+              "image": "server",
+              "ready": [
+                "The map-server is ready to work"
+              ]
+            }
+          ],
+          "seed": {
+            "service": "meshes",
+            "image": "meshes",
+            "what": "the navigation meshes (about 770 MB)"
+          },
+          "secrets": [
+            "MARIADB_ROOT_PASSWORD",
+            "MARIADB_PASSWORD"
+          ],
+          "ready_seconds": 600
+        }
+      },
+      "ports": [
+        {
+          "role": "view",
+          "port": 54001,
+          "label": "Lobby server"
+        },
+        {
+          "role": "data",
+          "port": 54230,
+          "label": "Lobby data (TCP) and map server (UDP)"
+        },
+        {
+          "role": "auth",
+          "port": 54231,
+          "label": "Login server"
+        },
+        {
+          "role": "search",
+          "port": 54002,
+          "label": "Search server"
+        },
+        {
+          "role": "profile",
+          "port": 51220,
+          "label": "Profile server"
+        },
+        {
+          "role": "irc",
+          "port": 51240,
+          "label": "Profile chat"
+        }
+      ],
+      "play": {
+        "exe": "FFXiMain.dll",
+        "client": "FINAL FANTASY XI from Square Enix's installer, updated once in PlayOnline",
+        "loader": {
+          "name": "xiloader",
+          "file": {
+            "url": "https://github.com/LandSandBoat/xiloader/releases/download/v2.2.0/xiloader.exe",
+            "sha256": "aec6c0686cf3b2fe65247b818fe44f89fb18fc175e8ebd3ba3b7cf099988f504",
+            "size": 1302016
+          },
+          "dest": "xiloader/xiloader.exe",
+          "args": [
+            "--server",
+            "{{HOST}}",
+            "--lang",
+            "{{CLIENT_LANG}}"
+          ],
+          "login": {
+            "protocol": "landsandboat-auth",
+            "port": "auth",
+            "loader_version": [
+              2,
+              2,
+              0
+            ],
+            "name_min": 3,
+            "name_max": 15,
+            "password_length": 24,
+            "file": {
+              "username": "{{ACCOUNT}}",
+              "password": "{{PASSWORD}}",
+              "hide": true
+            },
+            "args": [
+              "--json",
+              "{{LOGIN_FILE}}"
+            ]
+          }
+        },
+        "registry": {
+          "regions": [
+            {
+              "key": "SOFTWARE\\PlayOnlineUS",
+              "lang": "1",
+              "label": "US"
+            },
+            {
+              "key": "SOFTWARE\\PlayOnlineEU",
+              "lang": "2",
+              "label": "EU"
+            },
+            {
+              "key": "SOFTWARE\\PlayOnline",
+              "lang": "0",
+              "label": "JP"
+            }
+          ],
+          "subkey": "InstallFolder",
+          "value": "0001"
+        },
+        "writable": [
+          "USER",
+          "SYS",
+          "TEMP"
+        ],
+        "version": {
+          "minimum": "30261006_0",
+          "file": "patch2.cfg"
+        }
+      },
+      "help_places": [
+        {
+          "label": "LandSandBoat server",
+          "url": "https://github.com/LandSandBoat/server/issues",
+          "purpose": "Bugs in the game server: quests, combat, items and anything the world does wrong."
+        },
+        {
+          "label": "xiloader",
+          "url": "https://github.com/LandSandBoat/xiloader/issues",
+          "purpose": "The loader that logs you in and starts the game: account creation and login problems."
+        },
+        {
+          "label": "Yu'lon",
+          "url": "https://github.com/DadsMmoLab/dads-mmo-lab/issues",
+          "purpose": "Problems with Yu'lon itself: installing, starting, and this app."
+        }
+      ]
+    },
+    {
+      "id": "wow-forever",
+      "name": "WoW Forever",
+      "status": "beta",
+      "description": "WoW Forever (Classic 1.60.1) on ForeverCore with Karrz's bots: party, dungeon, raid and battleground bots, roaming world bots and an auction house bot. Install asks for your WoW Forever client (build 70707, or a Battle.net copy up to 70938) and makes the server's maps from it; Play trusts this server's login certificate, makes your account and starts the game, on Windows or under GE-Proton on a Steam Deck.",
+      "notes": [
+        "Server: Karrz's release 0.1.36 (Karrz1/TrinityCore branch forever @ 5c8b18a, the source of wow-forever-source-0.1.36.zip: advocaite's Forever core with Karrz's PlayerbotV2 bots, GPL-2), built into one image with Yu'lon's realm scripts; MySQL 8.0 beside it. 0.1.36 adds The Drowned City and Krol'dok Stronghold with their bosses.",
+        "The world database is Karrz's release TDB_full_forever_2026_10_14 (147 MB), fetched from GitHub and checked by sha256; the first start imports it, about 15 minutes.",
+        "Map data is never downloaded: Install makes the maps, vmaps and the bots' pathfinding meshes from your own client, read-only, in about 15 to 40 minutes. Battle.net must never manage that folder: it would update it past the builds this server accepts (70707 to 70938).",
+        "Login is Battle.net style: the game trusts this install's own CA (limited to actual.battle.net) and the hosts file maps trinity.actual.battle.net to 127.0.0.1. On Windows Play sets both once, behind one administrator prompt. On Linux the CA goes into the game's own Proton prefix only, and the hosts line needs root once: Play adds it with sudo when it can, else names the one command to run.",
+        "The client keeps the login keys it accepts in memory and makes them when Login is pressed, so Play writes this server's public key there while the game runs (after Karrz's Play-WoWForever.ps1; from Linux beside the game on a Steam Deck). If a login fails, press Login again without closing the game.",
+        "Play like official Forever: mob health and kill XP follow the curves Karrz fit to sniffed official Forever data (Classic.ForeverCreatureHealth, Classic.ForeverKillXp)."
+      ],
+      "emulator": {
+        "name": "ForeverCore + PlayerbotV2 (Karrz)",
+        "sources": [
+          {
+            "repo": "Karrz1/TrinityCore",
+            "branch": "forever",
+            "dest": "src",
+            "rev": "5c8b18ac0712fd7dee1bee2f4cd7ac7e511f122f"
+          }
+        ]
+      },
+      "install": {
+        "default_server_dir": "yulon-wow-forever",
+        "platforms": [
+          "linux",
+          "windows"
+        ],
+        "stack": {
+          "family": "forevercore",
+          "templates": "wow-forever/stack",
+          "source": "src",
+          "images": [
+            {
+              "role": "server",
+              "ref": "ghcr.io/dadsmmolab/forever-bots@sha256:ebef1a2ef9dd6123420ddfb4d4be152d0d8846801266391e9d45a254dc7ac5e2",
+              "label": "ForeverCore with Karrz's bots, release 0.1.36"
+            },
+            {
+              "role": "database",
+              "ref": "mysql@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b",
+              "label": "MySQL 8.0"
+            }
+          ],
+          "services": [
+            {
+              "service": "database",
+              "container": "wowforever-database",
+              "image": "database"
+            },
+            {
+              "service": "prepare",
+              "container": "wowforever-prepare",
+              "image": "server",
+              "once": true
+            },
+            {
+              "service": "world",
+              "container": "wowforever-world",
+              "image": "server",
+              "ready": [
+                "(worldserver-daemon) ready"
+              ]
+            },
+            {
+              "service": "bnet",
+              "container": "wowforever-bnet",
+              "image": "server",
+              "ready": [
+                "Added realm \""
+              ]
+            }
+          ],
+          "downloads": [
+            {
+              "what": "the world database release TDB_full_forever_2026_10_14",
+              "file": {
+                "url": "https://github.com/Karrz1/TrinityCore/releases/download/forever-tdb-2026-10-14/TDB_full_forever_2026_10_14.7z",
+                "sha256": "373cdca7963927d4d67933032b4b858a811eae0af960d4de4ff19833a88d4f41",
+                "size": 146573540
+              },
+              "dest": "downloads/TDB_full_forever_2026_10_14.7z"
+            }
+          ],
+          "client_extract": {
+            "service": "extract",
+            "image": "server",
+            "what": "the maps, vmaps and the bots' pathfinding meshes",
+            "client": "your WoW Forever 1.60.1 client (build 70707, or a copy of your Battle.net one at 70888 or 70938): the folder that holds _forever_",
+            "exe": "_forever_/Wow.exe",
+            "builds": [
+              {
+                "build": "70707",
+                "exe_size": 85829840
+              },
+              {
+                "build": "70888",
+                "exe_size": 80627920
+              },
+              {
+                "build": "70938"
+              },
+              {
+                "build": "70862"
+              },
+              {
+                "build": "70840"
+              },
+              {
+                "build": "70790"
+              },
+              {
+                "build": "70755"
+              }
+            ]
+          },
+          "secrets": [
+            "MYSQL_ROOT_PASSWORD",
+            "DB_PASSWORD"
+          ],
+          "ready_seconds": 3600
+        }
+      },
+      "ports": [
+        {
+          "role": "bnet",
+          "port": 1119,
+          "label": "Battle.net login"
+        },
+        {
+          "role": "login",
+          "port": 8082,
+          "label": "Login web service (TLS)"
+        },
+        {
+          "role": "world",
+          "port": 8085,
+          "label": "World server"
+        }
+      ],
+      "play": {
+        "exe": "_forever_/Wow.exe",
+        "args": [
+          "-config",
+          "ForeverLauncher.wtf"
+        ],
+        "client": "your WoW Forever 1.60.1 client (build 70707, or a copy of your Battle.net one at 70888 or 70938): the folder that holds _forever_",
+        "account": false,
+        "gaming_mode": {
+          "title": "WoW Forever Offline",
+          "templates": "wow-forever/gaming-mode",
+          "launcher": "wowforever-launcher",
+          "client": "wowforever-client",
+          "stop": "wowforever-stop"
+        },
+        "forever": {
+          "config": "ForeverLauncher.wtf",
+          "portal": "trinity.actual.battle.net",
+          "public_key": "02596F0D0C061A8B30745988FD72C59E29EC367FB0F341F28E0F08D037BAFC69",
+          "region_group": 8,
+          "ca": "certs/ca.pem",
+          "account_domain": "local",
+          "account_name": "mmodad",
+          "account_password": "pass"
+        }
+      },
+      "help_places": [
+        {
+          "label": "WoW Forever Bots",
+          "url": "https://github.com/Karrz1/Karrz-playerbots-wow-forever/issues",
+          "purpose": "Bugs in the bots and their ForeverBots window."
+        },
+        {
+          "label": "ForeverCore",
+          "url": "https://github.com/Karrz1/TrinityCore/issues",
+          "purpose": "Bugs in the Forever server itself: quests, creatures, spells."
         },
         {
           "label": "Yu'lon",

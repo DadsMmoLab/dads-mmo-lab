@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 from yulon import docker, module_moves, platform, server_build_presses, table_repair, wsl
+from yulon import engine as engine_seam
 from yulon.after_stop import TrueAfterStop, stop_took_effect
 from yulon.catalog import script_built, upstream
 
@@ -498,13 +499,20 @@ def single_installer_for_app(
     No import gate and no database snapshot to wire: a server of this kind has no
     database container, no import and no update route. One factory nonetheless, so
     the Catalog tile and this harness build the engine the same way: the container
-    engine for a `native` install, the host-program one for a `process` install.
+    engine for a `native` install, the host-program one for a `process` install, and
+    the published-images one for a `stack` install.
     """
     if entry.install.process is not None:
         from yulon.catalog.process_install import ProcessInstaller, ProcessSeams
 
         return ProcessInstaller(
             entry, installers_root=installers_root, seams=ProcessSeams(platform_id=platform_id)
+        )
+    if entry.install.stack is not None:
+        from yulon.catalog.stack_install import StackInstaller, StackSeams
+
+        return StackInstaller(
+            entry, installers_root=installers_root, seams=StackSeams(platform_id=platform_id)
         )
     from yulon.catalog.single_install import SingleInstaller, SingleSeams
 
@@ -1498,6 +1506,7 @@ def main(argv: list[str] | None = None) -> int:
     # written 2026-09-05 after a review pointed out that moving this call up
     # three lines as a tidy would have broken it in silence.
     configure(config_dir=platform.config_dir(), stderr_level=logging.WARNING)
+    engine_seam.apply_docker_host()
     logger.info(
         "install harness: game=%s server_dir=%s client_dir=%s",
         args.game,

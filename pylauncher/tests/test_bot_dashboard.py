@@ -684,6 +684,11 @@ def test_the_tortoise_tab_holds_the_switch_and_the_wrapped_update_route(
     monkeypatch.setattr(
         tortoise_controller.TortoiseController, "start", lambda _self: lifecycle.append("start")
     )
+    # T883: the factory-built controller's `before_servers` chain now starts the
+    # database (the address and name keepers, as WotLK's own chain long did).
+    # Answer it the way the start-step tests do; `status: []` alone still reaches
+    # `compose up`.
+    monkeypatch.setattr(docker, "start_database", lambda *a, **k: True)
     services = ControllerServices.for_entry(TORTOISE, server_dir)
     seam = services.bot_dashboard
     assert isinstance(seam, botdash.Dashboard)
@@ -1242,6 +1247,8 @@ def test_a_rebuild_that_fails_after_the_update_moved_the_module_stops_the_dashbo
     monkeypatch.setattr(
         tortoise_controller.TortoiseController, "start", lambda _self: lifecycle.append("start")
     )
+    # T883: as above -- the restart the update path owes asks the same chain.
+    monkeypatch.setattr(docker, "start_database", lambda *a, **k: True)
     services = ControllerServices.for_entry(TORTOISE, server_dir)
     seam = services.bot_dashboard
     assert isinstance(seam, botdash.Dashboard)

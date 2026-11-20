@@ -11,13 +11,15 @@ from __future__ import annotations
 import json
 import os
 import platform as host_platform
+import re
 import sys
 import time
 from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
-from yulon import __version__, channel_setup, dbsecret, docker, log, platform
+from yulon import __version__, channel_setup, dbsecret, docker, log, networking, platform
 from yulon.catalog import composegen
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.state import KnownInstall
@@ -638,6 +640,100 @@ def _ask_version(
     return answer or "not reachable"
 
 
+REALM_LOG_LINES = 400
+"""How much of an install's authserver log `system-info.txt` reads for its realm address.
+
+A bounded tail, like `LIVE_TAIL_LINES`: the `Added realm ... at <addr>` line is printed at
+every start, so the last one in the tail is what the realm advertises now (T881 E).
+"""
+
+_ADDED_REALM = re.compile(r"Added realm .*? at ([^\s,;]+)")
+"""The authserver's line for the address it hands clients: `Added realm "Name" at ip:port`."""
+
+
+def _address_line(listing: platform.LocalListing | None, lan_ip: str | None) -> list[str]:
+    """This computer's IPv4 addresses, VPN adapters flagged, and the detected LAN one (T881 E).
+
+    The listing is the one `networking.holds_here()` and the Networking tab's choice list
+    read, so the support file answers the same question those do. VPN adapters are marked
+    because an address a friend cannot reach on the LAN is worth telling apart (T800).
+    """
+    detected = f"detected LAN address: {lan_ip or 'not found'}"
+    if listing is None:
+        return [f"This computer's IPv4 addresses could not be read; {detected}"]
+    if listing.listing_unreadable and not listing.addresses:
+        return [f"This computer's IPv4 addresses could not be read; {detected}"]
+    offered = (
+        ", ".join(
+            f"{found.address} ({found.interface}{', VPN' if found.vpn else ''})"
+            for found in listing.addresses
+        )
+        or "none found"
+    )
+    where = "" if not listing.listing_unreadable else " (the Windows list could not be read)"
+    return [f"This computer's IPv4 addresses{where}: {offered}; {detected}"]
+
+
+def _network_record(server_dir: Path) -> str:
+    """The `.yulon-network.json` choice for one install, or "none saved" (T881 E)."""
+    intent = networking.read_network_intent(server_dir)
+    if intent is None:
+        return "none saved"
+    when = (
+        datetime.fromtimestamp(intent.recorded_unix, UTC).strftime("%Y-%m-%d")
+        if intent.recorded_unix
+        else "date not recorded"
+    )
+    address = intent.address or "the detected address"
+    return f"mode {intent.mode}, {address}, written {when}"
+
+
+def _advertised_address(log_text: str | None, listing: platform.LocalListing | None) -> str:
+    """The addr the authserver last said it advertises, and whether this PC holds it (T881 E).
+
+    The LAST `Added realm ... at <addr>` in the tail, because the line is printed at every
+    start. Held is `yes` when the listing names it, `unknown` when the listing could not be
+    read, and `no` otherwise -- the report's realm advertised an address the PC no longer
+    had, and nothing in the support file showed it.
+    """
+    if not log_text:
+        return "not named in its authserver log"
+    found = _ADDED_REALM.findall(log_text)
+    if not found:
+        return "not named in its authserver log"
+    latest = found[-1].rstrip(".,;")
+    host, sep, port = latest.rpartition(":")
+    address = host if sep and port.isdigit() and host else latest
+    if listing is not None and any(held.address == address for held in listing.addresses):
+        held = "yes"
+    elif listing is None or listing.listing_unreadable:
+        held = "unknown"
+    else:
+        held = "no"
+    return f"{address} (from its authserver log), held by this PC: {held}"
+
+
+def realm_log_of(install: InstallFacts, silent: Collection[str | None] = ()) -> str | None:
+    """One install's authserver log tail, through the reader every container log uses (T881 E).
+
+    `None` for an install this catalog does not know (no container to ask), for a docker
+    that already ran into a bound while the bundle read its containers (`silent`), and
+    for a log docker would not read: the line that needs it says so rather than inventing
+    an address.
+    """
+    if install.entry is None or install.wsl_distro in silent:
+        return None
+    try:
+        return docker.last_lines(
+            install.entry.container_spec().auth,
+            REALM_LOG_LINES,
+            wsl_distro=install.wsl_distro,
+            timeout=LIVE_TIMEOUT_S,
+        )
+    except Exception:  # boundary: system-info.txt is always written
+        return None
+
+
 def system_info(
     sources: Sources,
     docker_version: Callable[[str | None], str | None],
@@ -645,19 +741,39 @@ def system_info(
     silent_targets: Collection[str | None] = frozenset(),
     machine: Callable[[], list[str]] | None = None,
     engine: Callable[[str | None], tuple[int, int] | None] | None = None,
+    listing: Callable[[], platform.LocalListing] | None = None,
+    lan_ip: Callable[[], str | None] | None = None,
+    realm_log: Callable[[InstallFacts, Collection[str | None]], str | None] | None = None,
 ) -> str:
     """`system-info.txt`: versions, Docker, and every install in place of `state.json`.
 
     A docker in `silent_targets` -- one that already ran into a bound while the
     bundle read its containers (`collect_live_logs`) -- is not asked again: its
     line says `SKIPPED` instead of costing another `LIVE_TIMEOUT_S`.
+
+    `listing`, `lan_ip` and `realm_log` are the T881 E facts: this computer's own
+    addresses, the address its detector would advertise, and one bounded tail of
+    each install's authserver log. Seams so a test states them instead of reading
+    the test box's network. `realm_log` is handed `silent_targets` too, so a
+    wedged docker is not asked for a log it already failed to give.
     """
     machine = machine or machine_lines
     engine = engine or docker_size
+    listing = listing or (lambda: platform.local_ipv4_listing())
+    lan_ip = lan_ip or platform.detect_lan_ip
+    realm_log = realm_log or realm_log_of
     try:
         machine_part = machine()
     except Exception:  # boundary: system-info.txt is always written
         machine_part = ["Machine size: could not read"]
+    try:
+        addresses = listing()
+    except Exception:  # boundary: system-info.txt is always written
+        addresses = None
+    try:
+        detected = lan_ip()
+    except Exception:
+        detected = None
     silent = set(silent_targets)
 
     def ask(distro: str | None) -> tuple[str, str]:
@@ -674,6 +790,7 @@ def system_info(
         f"Python: {sys.version.split()[0]}",
         f"Qt: {sources.qt_version or 'not reported'}",
         *machine_part,
+        *_address_line(addresses, detected),
         f"Docker on this machine: {here}",
         f"Docker on this machine sees: {here_size}",
     ]
@@ -689,6 +806,14 @@ def system_info(
         unknown += " (an install that failed)" if install.failed else ""
         folder = f"folder {install.server_dir}{where}{unknown}"
         lines.append(f"  {install.game}, id {install.install_id}, {folder}")
+        lines.append(
+            f"    Network record ({networking.INTENT_FILE}): {_network_record(install.server_dir)}"
+        )
+        try:
+            log = realm_log(install, silent)
+        except Exception:  # boundary: system-info.txt is always written
+            log = None
+        lines.append(f"    Realm advertises: {_advertised_address(log, addresses)}")
     return "\n".join(lines) + "\n"
 
 

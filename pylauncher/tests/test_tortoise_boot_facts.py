@@ -379,7 +379,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "file's measurements was re-taken. Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
-    assert module.rev == "a90d0407251f6e8471bd79b2fba7f6b20370d281", (
+    assert module.rev == "d5e903d3c99f6342502736fcd56af3190fc6d255", (
         f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
         "core's: the module is what decides the folder names its SQL is installed under, "
         "which conf keys exist, and what the world prints when it loads. It was fd7ec9ec "
@@ -452,7 +452,13 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "conf/tortoise_bots.conf.dist and ai/playerbot/aiplayerbot.conf.dist.in (their defaults "
         "changed: AiPlayerbot.Enabled and Observability now 1, which the install's keys "
         "override), the data/sql/world and data/sql/character folders are still there, and "
-        "TortoiseBots.cmake only gained sources"
+        "TortoiseBots.cmake only gained sources; and 2026-11-20 moved it to d5e903d3, the "
+        "commit tag v1.29.2 names (802 commits, main's tip, not live-tested): every conf key "
+        "the entry writes still exists in conf/tortoise_bots.conf.dist and "
+        "ai/playerbot/aiplayerbot.conf.dist.in, the data/sql/world and data/sql/character "
+        "folders and their install rules are unchanged, tools/observability (the dashboard "
+        "this entry adds) is still there, and TortoiseBots.cmake only gained 73 lines, all of "
+        "the dashboard download and its install"
     )
     for source in sources:
         assert re.fullmatch(

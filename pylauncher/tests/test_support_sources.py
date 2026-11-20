@@ -379,7 +379,13 @@ def test_system_info_names_the_versions_and_every_install_and_survives_a_raising
             raise RuntimeError("no distro")
         return "27.0.1"
 
-    text = system_info(sources, version)
+    text = system_info(
+        sources,
+        version,
+        realm_log=lambda install, silent: None,
+        listing=lambda: platform.LocalListing(addresses=()),
+        lan_ip=lambda: None,
+    )
     assert "Qt: 6.11.2" in text
     assert "Docker on this machine: 27.0.1" in text
     assert "Docker in WSL distro Ubuntu: not reachable (RuntimeError)" in text
@@ -397,7 +403,14 @@ def test_system_info_does_not_ask_a_docker_that_already_went_silent(tmp_path: Pa
         asked.append(distro)
         return "27.0.1"
 
-    text = system_info(sources, version, silent_targets={None})
+    text = system_info(
+        sources,
+        version,
+        silent_targets={None},
+        realm_log=lambda install, silent: None,
+        listing=lambda: platform.LocalListing(addresses=()),
+        lan_ip=lambda: None,
+    )
     assert asked == ["Ubuntu"]
     assert f"Docker on this machine: {SKIPPED}" in text
     assert "Docker in WSL distro Ubuntu: 27.0.1" in text

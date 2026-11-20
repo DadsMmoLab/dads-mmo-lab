@@ -356,3 +356,16 @@ def test_a_filter_on_a_server_the_marker_found_nothing_on_still_blames_the_marke
 
     assert "no character matched the bot marker" in page.warning, page.warning
     assert "900" in page.warning
+
+
+def test_mop_names_no_registry_so_v104_installs_keep_their_bots_page() -> None:
+    """MoP servers installed from the v1.0.4 database have no `playerbots_account_type`.
+
+    `update_to_latest` is false for wow-mop, so those servers keep that database even
+    after the source pin moved to f5fc970d, whose fresh installs do get the table. A
+    registry clause would name a table they lack and break their Bots queries, so the
+    entry keeps the account prefix as its only signal.
+    """
+    mop = load_catalog().get("wow-mop")
+
+    assert botlist.has_registry(mop) is False

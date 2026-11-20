@@ -277,11 +277,18 @@ class RealmNames:
         self.sql = sql
 
     def _row_name(self) -> str | None:
-        """The name the realm row holds, or None when it could not be read."""
+        """The name the realm row holds, or None when it could not be read.
+
+        The exception CLASS and nothing else (T881 C): the client's message can carry
+        the password it was given (`ERROR 1045 ... using password: YES`) or an argv
+        echo, and this line is read on a support file. The class is enough to tell
+        "the database is down" from "the schema is wrong" when the tab's note is
+        paired with `system-info.txt`.
+        """
         try:
             answer = self.sql.query("auth", name_query(self.entry))
         except Exception as exc:  # noqa: BLE001 - a database that is down is an answer here
-            logger.debug(f"the realm name could not be read: {exc}")
+            logger.info(f"the realm name could not be read: {type(exc).__name__}")
             return None
         return name_from_answer(answer)
 
@@ -295,9 +302,15 @@ class RealmNames:
             return NameState(
                 saved,
                 False,
-                "The database did not answer, so this is the name saved for this server.",
+                "The database did not answer when this was read, so this is the name "
+                "saved for this server.",
             )
-        return NameState("", False, "The database did not answer and no name is saved yet.")
+        return NameState(
+            "",
+            False,
+            "The database did not answer when this was read. "
+            "The name is read again once the server is up.",
+        )
 
     def save(self, name: str) -> SaveResult:
         """Check, apply (if the database is up) and remember `name`.

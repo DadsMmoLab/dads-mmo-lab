@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import threading
+import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +25,19 @@ from tests.support_fake_docker import end_fake_containers, lay_fake_docker
 from tests.test_controller_view import _Ps
 from tests.test_more_writes_hold import CATALOG_WOTLK, HELD, _Hold, _Nothing
 from yulon import bot_population as botpop
-from yulon import docker, networking, platform, purge, reset_defaults, server_time_zone
+from yulon import docker, forgetting, networking, platform, purge, reset_defaults, server_time_zone
 from yulon.catalog.catalog import load_catalog
 from yulon.ui import controller_view as controller_view_module
+
+_LAN_PLAN = networking.plan(
+    CATALOG_WOTLK,
+    "lan",
+    lan_ip="192.168.1.25",
+    firewall="none",
+    steamos=False,
+    wsl=False,
+)
+"""A plan WITH a realm step, so Apply takes the database path (T885)."""
 
 
 @pytest.fixture
@@ -96,7 +109,7 @@ def test_networking_apply_while_another_yulon_holds_the_server_applies_nothing(
     theirs = _held_by_another_yulon(fake_docker, server)
     try:
         with pytest.raises(docker.ServerReserved) as refused:
-            services.network_apply(object())  # type: ignore[arg-type]
+            services.network_apply(replace(_LAN_PLAN, realmlist_sql=None))  # type: ignore[arg-type]
         assert HOLDER_PRESS in str(refused.value)
         assert "Apply the network plan" in str(refused.value)
     finally:
@@ -109,9 +122,631 @@ def test_networking_apply_runs_when_nobody_holds_the_server(
 ) -> None:
     applied: list[object] = []
     monkeypatch.setattr(networking, "apply", lambda plan, **_kw: applied.append(plan) or "report")
-    plan = object()
+    plan = replace(_LAN_PLAN, realmlist_sql=None)
     assert _assembled(server).network_apply(plan) == "report"  # type: ignore[arg-type]
     assert applied == [plan]
+
+
+class _Alone:
+    """A DatabaseAlone double that records bring_up/take_down (T885)."""
+
+    def __init__(self, *, start: bool | BaseException = True) -> None:
+        self.order: list[str] = []
+        self._start = start
+
+    def bring_up(self, because: str) -> bool:
+        self.order.append("bring_up")
+        assert because == "the realm address was not changed", because
+        if isinstance(self._start, BaseException):
+            raise self._start
+        assert isinstance(self._start, bool)
+        return self._start
+
+    def take_down(self) -> None:
+        self.order.append("take_down")
+
+
+def _held_calls(order: list[str], *args: object, **kwargs: object) -> object:
+    """The `hold_the_server` seam, recording its take (T885)."""
+
+    class _Hold:
+        def __enter__(self) -> None:
+            order.append("hold")
+            return None
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    order.append("hold-taken")
+    reason = kwargs.get("reason", args[1] if len(args) > 1 else None)
+    assert kwargs.get("press") == "Apply the network plan", kwargs
+    assert reason == forgetting.NETWORK_APPLY_HOLDS_THE_SERVER, (args, kwargs)
+    return _Hold()
+
+
+def _recording_apply(
+    monkeypatch: pytest.MonkeyPatch, applied: list[tuple[str, str | None]]
+) -> None:
+    """`networking.apply` recording its realm_refusal and answering applied (T885)."""
+    from yulon.networking import NetworkPlan, NetworkReport
+
+    def recording(plan: NetworkPlan, **kw: object) -> NetworkReport:
+        refusal = kw.get("realm_refusal")
+        assert isinstance(refusal, str | None)
+        applied.append((plan.realmlist_sql or "", refusal))
+        if refusal is not None:
+            skipped = f"realmlist not updated: {refusal}"
+            return NetworkReport(plan, skipped=(skipped,), realm_unchanged=skipped)
+        return NetworkReport(plan, done=("realmlist \u2192 1.2.3.4",), restart_required=True)
+
+    monkeypatch.setattr(networking, "apply", recording)
+
+
+def test_network_apply_on_a_stopped_server_starts_the_database_alone_and_stops_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: stopped server — bring_up, apply, take_down; flagged on the report."""
+    from yulon.ui import controller_view as view
+
+    alone = _Alone(start=True)
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=alone.take_down)
+    event_order: list[str] = []
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+    monkeypatch.setattr(
+        view.docker, "hold_the_server", lambda *a, **k: _held_calls(event_order, *a, **k)
+    )
+    server_dir = tmp_path / "server"
+
+    report = view._network_apply_with_the_database(
+        _LAN_PLAN,
+        sql=_Nothing(),  # type: ignore[arg-type]
+        server_dir=server_dir,
+        spec=CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+        alone=doubles,
+    )
+    assert event_order[:2] == ["hold-taken", "hold"], event_order
+    assert alone.order == ["bring_up", "take_down"], alone.order
+    assert applied == [(_LAN_PLAN.realmlist_sql or "", None)], applied
+    assert report.applied_while_stopped is True
+    assert report.database_note == ""
+    assert report.restart_required is True
+
+
+def test_network_apply_on_a_running_database_stops_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: bring_up False — take_down never called, no stopped flag."""
+    from yulon.ui import controller_view as view
+
+    alone = _Alone(start=False)
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=alone.take_down)
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+
+    report = view._network_apply_with_the_database(
+        _LAN_PLAN,
+        sql=_Nothing(),  # type: ignore[arg-type]
+        server_dir=tmp_path / "server",
+        spec=CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+        alone=doubles,
+    )
+    assert alone.order == ["bring_up"], alone.order
+    assert applied == [(_LAN_PLAN.realmlist_sql or "", None)], applied
+    assert report.applied_while_stopped is False
+
+
+def test_network_apply_whose_database_will_not_start_records_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: bring_up raises — apply gets realm_refusal, no intent file."""
+    from yulon.ui import controller_view as view
+
+    boom = docker.DockerCommandError("the database would not start")
+    alone = _Alone(start=boom)
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=alone.take_down)
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+
+    report = view._network_apply_with_the_database(
+        _LAN_PLAN,
+        sql=_Nothing(),  # type: ignore[arg-type]
+        server_dir=server_dir,
+        spec=CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+        alone=doubles,
+    )
+    assert alone.order == ["bring_up"], alone.order
+    assert applied == [(_LAN_PLAN.realmlist_sql or "", "the database would not start")], applied
+    assert report.realm_unchanged == "realmlist not updated: the database would not start"
+    assert not list(server_dir.iterdir()), "a refused start recorded an intent"
+    assert report.applied_while_stopped is False
+
+
+def test_network_apply_during_a_start_in_motion_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: a Start in flight — ServerHeldError; bring_up not called."""
+    from yulon.ui import controller_view as view
+
+    alone = _Alone(start=True)
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=alone.take_down)
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    key = docker._server_key(server_dir)
+    docker._IN_FLIGHT[key] = docker._IN_FLIGHT.get(key, 0) + 1
+    try:
+        with pytest.raises(docker.ServerHeldError):
+            view._network_apply_with_the_database(
+                _LAN_PLAN,
+                sql=_Nothing(),  # type: ignore[arg-type]
+                server_dir=server_dir,
+                spec=CATALOG_WOTLK.container_spec(),
+                wsl_distro=None,
+                alone=doubles,
+            )
+    finally:
+        left = docker._IN_FLIGHT[key] - 1
+        if left:
+            docker._IN_FLIGHT[key] = left
+        else:
+            del docker._IN_FLIGHT[key]
+    assert alone.order == [], alone.order
+    assert applied == [], applied
+
+
+def test_network_apply_without_a_realm_row_starts_no_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: realmlist_sql None — bring_up not called, plain apply."""
+    from yulon.ui import controller_view as view
+
+    alone = _Alone(start=True)
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=alone.take_down)
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+    no_realm = replace(_LAN_PLAN, realmlist_sql=None)
+    monkeypatch.setattr(
+        networking,
+        "apply",
+        lambda plan, **_kw: applied.append(("realm" if plan.realmlist_sql else "none", None))
+        or networking.NetworkReport(plan),
+    )
+
+    report = view._network_apply_with_the_database(
+        no_realm,
+        sql=None,  # type: ignore[arg-type]
+        server_dir=tmp_path / "server",
+        spec=CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+        alone=doubles,
+    )
+    assert alone.order == [], alone.order
+    assert applied == [("none", None)], applied
+    assert report.applied_while_stopped is False
+
+
+def test_a_sql_writer_while_network_apply_holds_the_database_alone_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885 R2: with Apply inside `hold_the_server(alone=...)`, another writer is refused first."""
+    from yulon.ui import controller_view as view
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_apply(plan: networking.NetworkPlan, **kw: object) -> networking.NetworkReport:
+        entered.set()
+        assert release.wait(timeout=30), "the rival writer never got its chance"
+        return networking.NetworkReport(plan, done=("realmlist → 1.2.3.4",), restart_required=True)
+
+    monkeypatch.setattr(networking, "apply", slow_apply)
+    errors: list[BaseException] = []
+
+    def rival() -> None:
+        try:
+            entered.wait(timeout=30)
+            with docker.server_hold(
+                tmp_path / "server",
+                "Create an account",
+                spec=CATALOG_WOTLK.container_spec(),
+                wsl_distro=None,
+            ):
+                raise AssertionError("a writer ran beside Apply, which writes the database alone")
+        except BaseException as exc:  # noqa: BLE001 - the refusal is the assertion
+            errors.append(exc)
+
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    alone = view.DatabaseAlone(bring_up=lambda _b: True, take_down=lambda: None)
+    worker = threading.Thread(
+        target=lambda: view._network_apply_with_the_database(
+            _LAN_PLAN,
+            sql=_Nothing(),  # type: ignore[arg-type]
+            server_dir=server_dir,
+            spec=CATALOG_WOTLK.container_spec(),
+            wsl_distro=None,
+            alone=alone,
+        )
+    )
+    other = threading.Thread(target=rival)
+    worker.start()
+    other.start()
+    try:
+        assert entered.wait(timeout=30), "Apply never reached its UPDATE"
+        got_hold: list[bool] = []
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with docker._HOLD_LOCK:
+                held = docker._HELD.get(docker._server_key(server_dir), [])
+                if held and held[-1].press == "Apply the network plan":
+                    got_hold.append(True)
+                    break
+            time.sleep(0.01)
+        assert got_hold, "Apply never took the hold"
+        other.join(timeout=30)
+    finally:
+        release.set()
+        worker.join(timeout=30)
+    assert not worker.is_alive() and not other.is_alive(), "a thread hung"
+    assert len(errors) == 1 and isinstance(errors[0], docker.ServerHeldError), errors
+    assert str(errors[0]) == forgetting.NETWORK_APPLY_WRITES_ALONE, str(errors[0])
+
+
+def test_a_backup_while_network_apply_holds_the_database_alone_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885 R2/R3: a Backup pressed during Apply is refused, with the Apply's own sentence.
+
+    R3: the refusal is the lease's (`MaintenanceLeaseTaken`), taken before the hold and before
+    the Backup touches the database -- mutation: drop the lease, and this is the hold's
+    `ServerHeldError` from the alone key instead.
+    """
+    from yulon.ui import controller_view as view
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_apply(plan: networking.NetworkPlan, **kw: object) -> networking.NetworkReport:
+        entered.set()
+        assert release.wait(timeout=30), "the Backup never got its chance"
+        return networking.NetworkReport(plan, done=("realmlist → 1.2.3.4",), restart_required=True)
+
+    monkeypatch.setattr(networking, "apply", slow_apply)
+    stops: list[str] = []
+    monkeypatch.setattr(
+        view.docker,
+        "stop_containers",
+        lambda names, wsl_distro=None: stops.append(",".join(names)),
+    )
+    before = dict(docker._LEASED)
+    errors: list[BaseException] = []
+
+    def rival() -> None:
+        try:
+            entered.wait(timeout=30)
+            with docker.maintenance_lease(
+                tmp_path / "server",
+                forgetting.BACKUP_HOLDS_THE_DATABASES,
+                press=forgetting.PRESS_BACKUP,
+                spec=CATALOG_WOTLK.container_spec(),
+            ):
+                stops.append("backup-ran")
+        except BaseException as exc:  # noqa: BLE001 - the refusal is the assertion
+            errors.append(exc)
+
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    alone = view.DatabaseAlone(
+        bring_up=lambda _b: True,
+        take_down=lambda: stops.append("take_down"),
+    )
+    worker = threading.Thread(
+        target=lambda: view._network_apply_with_the_database(
+            _LAN_PLAN,
+            sql=_Nothing(),  # type: ignore[arg-type]
+            server_dir=server_dir,
+            spec=CATALOG_WOTLK.container_spec(),
+            wsl_distro=None,
+            alone=alone,
+        )
+    )
+    other = threading.Thread(target=rival)
+    worker.start()
+    other.start()
+    try:
+        assert entered.wait(timeout=30), "Apply never reached its UPDATE"
+        got_hold: list[bool] = []
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with docker._HOLD_LOCK:
+                held = docker._HELD.get(docker._server_key(server_dir), [])
+                if held and held[-1].press == "Apply the network plan":
+                    got_hold.append(True)
+                    break
+            time.sleep(0.01)
+        assert got_hold, "Apply never took the hold"
+        other.join(timeout=30)
+    finally:
+        release.set()
+        worker.join(timeout=30)
+    assert not worker.is_alive() and not other.is_alive(), "a thread hung"
+    assert len(errors) == 1 and isinstance(errors[0], docker.MaintenanceLeaseTaken), errors
+    assert str(errors[0]) == forgetting.NETWORK_APPLY_HOLDS_THE_DATABASES, str(errors[0])
+    assert "backup-ran" not in stops, stops
+    assert "take_down" in stops, stops
+    assert dict(docker._LEASED) == before, "the refused Backup left the lease taken"
+
+
+def test_the_assembled_apply_shares_the_services_database_seam(
+    server: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885 R2: the Apply route and `services.database_alone` are the same object."""
+    from yulon.ui import controller_view as view
+
+    seen: list[object] = []
+    real = view._network_apply_with_the_database
+    monkeypatch.setattr(
+        view,
+        "_network_apply_with_the_database",
+        lambda *a, **kw: (seen.append(kw["alone"]) or real(*a, **kw)),
+    )
+    _services_holder: list[object] = []
+    real_factory = view._database_alone
+    monkeypatch.setattr(
+        view,
+        "_database_alone",
+        lambda *a, **k: (_services_holder.append(real_factory(*a, **k)) or _services_holder[-1]),
+    )
+    services = _assembled(server)
+    assert services.database_alone is not None
+    assert len(_services_holder) == 1, _services_holder
+    services.network_apply(replace(_LAN_PLAN, realmlist_sql=None))  # type: ignore[arg-type]
+    assert seen == [services.database_alone], (seen, services.database_alone)
+
+
+def test_the_assembled_apply_records_the_intent_under_both_holds_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885 R2: a real assembled Apply with a realm row: hold, up, UPDATE, intent, down, release."""
+    from yulon import networking as networking_module
+    from yulon.ui import controller_view as view
+
+    order: list[str] = []
+
+    class _Sql:
+        def run_statement(self, db: str, statement: str) -> None:
+            order.append("UPDATE")
+
+    real_under = view._under_the_hold
+    real_hold = view.docker.hold_the_server
+
+    factory_calls: list[object] = []
+
+    def recording_factory(spec: object, server_dir: Path, *, wsl_distro: object = None) -> object:
+        factory_calls.append((spec, server_dir, wsl_distro))
+
+        def bring_up(because: str) -> bool:
+            order.append("bring_up")
+            assert because == "the realm address was not changed", because
+            return True
+
+        def take_down() -> None:
+            order.append("take_down")
+
+        return view.DatabaseAlone(bring_up=bring_up, take_down=take_down)
+
+    monkeypatch.setattr(view, "_database_alone", recording_factory)
+
+    def recording_under(hold: object, press: str, call: object) -> object:
+        route = real_under(hold, press, call)  # type: ignore[arg-type]
+
+        def held(*args: object, **kwargs: object) -> object:
+            order.append("outer-hold")
+            try:
+                return route(*args, **kwargs)
+            finally:
+                order.append("outer-released")
+
+        return held
+
+    monkeypatch.setattr(view, "_under_the_hold", recording_under)
+
+    def recording_hold(*args: object, **kwargs: object) -> object:
+        hold = real_hold(*args, **kwargs)
+
+        class _Record:
+            def __enter__(self) -> None:
+                order.append("hold")
+                hold.__enter__()
+
+            def __exit__(self, *exc: object) -> bool | None:
+                order.append("release")
+                return hold.__exit__(*exc)
+
+        order.append("hold-taken")
+        return _Record()
+
+    monkeypatch.setattr(view.docker, "hold_the_server", recording_hold)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    services = view._assemble(
+        CATALOG_WOTLK,
+        server_dir,
+        client_dir=None,
+        wsl_distro=None,
+        controller=_Nothing(),  # type: ignore[arg-type]
+        sql=_Sql(),  # type: ignore[arg-type]
+        send_console=lambda _c: None,  # type: ignore[arg-type,return-value]
+        create_account=lambda name, pw, level: None,  # type: ignore[arg-type,return-value]
+        store=None,
+        applier=None,
+        backup=lambda: None,  # type: ignore[arg-type,return-value]
+        plan_restore=lambda *_a: None,  # type: ignore[arg-type,return-value]
+        restore=lambda _p: None,  # type: ignore[arg-type,return-value]
+    )
+
+    real_record = networking_module.record_network_intent
+
+    def recording_record(server: Path, mode: object, address: object = None) -> str:
+        order.append("intent recorded")
+        return real_record(server, mode, address)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(networking_module, "record_network_intent", recording_record)
+    report = services.network_apply(_LAN_PLAN)
+    assert report.restart_required is True
+    assert report.applied_while_stopped is True
+    take = order.index("take_down")
+    assert order[: order.index("UPDATE")] == [
+        "outer-hold",
+        "hold-taken",
+        "hold",
+        "bring_up",
+    ], order
+    assert order[order.index("UPDATE") + 1 : take] == ["intent recorded"], order
+    assert order[take:] == ["take_down", "release", "outer-released"], order
+    assert factory_calls == [(CATALOG_WOTLK.container_spec(), server_dir, None)], factory_calls
+
+
+def test_an_apply_while_another_press_holds_the_server_is_refused_before_it_starts_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885 R2: Apply pressed while another press works is refused before `bring_up` runs."""
+    from yulon.ui import controller_view as view
+
+    order: list[str] = []
+    alone = view.DatabaseAlone(
+        bring_up=lambda _b: (order.append("bring_up") or True),
+        take_down=lambda: order.append("take_down"),
+    )
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    with docker.server_hold(
+        server_dir,
+        "Create an account",
+        spec=CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+    ):
+        with pytest.raises(docker.ServerHeldError) as refused:
+            view._network_apply_with_the_database(
+                _LAN_PLAN,
+                sql=_Nothing(),  # type: ignore[arg-type]
+                server_dir=server_dir,
+                spec=CATALOG_WOTLK.container_spec(),
+                wsl_distro=None,
+                alone=alone,
+            )
+    assert "Create an account" in str(refused.value), str(refused.value)
+    assert order == [] and applied == [], (order, applied)
+
+
+def test_two_applies_on_a_stopped_server_run_one_sequence_and_the_second_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885 R3: a second Apply in the same tab is refused while the first holds the databases.
+
+    Mutation: drop `docker.maintenance_lease()` from `_network_apply_with_the_database`.
+    Then both threads pass the hold's `alone` (which is keyed on the press), the second
+    `bring_up` runs beside the first, the first's `take_down` stops the database under the
+    second's UPDATE and its release deletes `_ALONE` under the second's (`KeyError`).
+    """
+    from yulon.ui import controller_view as view
+
+    started = threading.Event()
+    release = threading.Event()
+    sequence: list[str] = []
+
+    def bring_up(because: str) -> bool:
+        sequence.append("bring_up")
+        assert because == "the realm address was not changed", because
+        started.set()
+        assert release.wait(timeout=30), "the first Apply never finished its start"
+        return True
+
+    alone = view.DatabaseAlone(bring_up=bring_up, take_down=lambda: sequence.append("take_down"))
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    spec = CATALOG_WOTLK.container_spec()
+    refused: list[BaseException] = []
+
+    def run(collect: list[BaseException] | None) -> None:
+        try:
+            view._network_apply_with_the_database(
+                _LAN_PLAN,
+                sql=_Nothing(),  # type: ignore[arg-type]
+                server_dir=server_dir,
+                spec=spec,
+                wsl_distro=None,
+                alone=alone,
+            )
+        except BaseException as exc:  # noqa: BLE001 - the refusal is the assertion
+            if collect is not None:
+                collect.append(exc)
+            else:
+                raise
+
+    first = threading.Thread(target=run, args=(None,))
+    second = threading.Thread(target=run, args=(refused,))
+    first.start()
+    try:
+        assert started.wait(timeout=30), "the first Apply never reached its start"
+        second.start()
+        second.join(timeout=30)
+    finally:
+        release.set()
+        first.join(timeout=30)
+    assert not first.is_alive() and not second.is_alive(), "a thread hung"
+
+    assert len(refused) == 1, refused
+    assert isinstance(refused[0], docker.MaintenanceLeaseTaken), refused
+    assert not isinstance(refused[0], KeyError), refused
+    assert str(refused[0]) == forgetting.NETWORK_APPLY_HOLDS_THE_DATABASES, str(refused[0])
+    assert sequence == ["bring_up", "take_down"], sequence
+    assert applied == [(_LAN_PLAN.realmlist_sql or "", None)], applied
+    key = docker._server_key(server_dir)
+    assert key not in docker._ALONE, docker._ALONE
+    assert key not in docker._LEASED, docker._LEASED
+
+
+def test_network_apply_whose_database_will_not_stop_keeps_the_applied_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T885: take_down raises — the realm step stands, database_note set."""
+    from yulon.ui import controller_view as view
+
+    alone = _Alone(start=True)
+
+    def failing_take_down() -> None:
+        alone.order.append("take_down")
+        raise docker.DockerCommandError("cannot stop ac-database")
+
+    doubles = view.DatabaseAlone(bring_up=alone.bring_up, take_down=failing_take_down)
+    applied: list[tuple[str, str | None]] = []
+    _recording_apply(monkeypatch, applied)
+
+    report = view._network_apply_with_the_database(
+        _LAN_PLAN,
+        sql=_Nothing(),  # type: ignore[arg-type]
+        server_dir=tmp_path / "server",
+        spec=CATALOG_WOTLK.container_spec(),
+        wsl_distro=None,
+        alone=doubles,
+    )
+    assert alone.order == ["bring_up", "take_down"], alone.order
+    assert applied == [(_LAN_PLAN.realmlist_sql or "", None)], applied
+    assert "realmlist → 1.2.3.4" in report.done, report
+    assert report.applied_while_stopped is True
+    assert "could not be stopped again" in report.database_note, report.database_note
 
 
 def test_the_time_zone_write_while_another_yulon_holds_the_server_writes_nothing(

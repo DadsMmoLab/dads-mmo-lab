@@ -238,18 +238,18 @@ def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> N
 
 GATE_PINS = {
     "wow-wotlk": {
-        "mod-playerbots/azerothcore-wotlk": "e7e2e288e7d9ec30e2dfe6f417178a95986fcbb2",
-        "mod-playerbots/mod-playerbots": "405f81196161017eebae3ee7a612d786a3ed2a9d",
+        "mod-playerbots/azerothcore-wotlk": "32fd3472aa74961c91cb9bc942ee3e0a44b36779",
+        "mod-playerbots/mod-playerbots": "ecc4a537a3b43056e412fae63fb4a4271849b472",
     },
     "wow-tbc": {
-        "cmangos/mangos-tbc": "ec0d40c3d1462cf1b1a9e66184a07da7af7dc993",
-        "cmangos/playerbots": "8d102f91c882bd0d75ff6fd73665631d1e76e85c",
-        "cmangos/tbc-db": "a4c6a8c8bbc83d920fb75ebca3f4b8fc30aafed1",
+        "cmangos/mangos-tbc": "147c0b63fbb5d22b70b23819cc1d3e883e8bf3e4",
+        "cmangos/playerbots": "87624d0a1d2772551dd4be6947b5a362ceacec80",
+        "cmangos/tbc-db": "5dc223d3ab1e4a72121b7330533879805cba93c9",
     },
     "wow-vanilla": {
-        "cmangos/mangos-classic": "6d8821c78b4f947d4cd40570657c88aefa804a24",
-        "cmangos/playerbots": "8d102f91c882bd0d75ff6fd73665631d1e76e85c",
-        "cmangos/classic-db": "c33f90b8eeb3f8bacb53d5cbfee45075c80b416c",
+        "cmangos/mangos-classic": "28a26c388a3c817f34cdb4737847a345841b6a08",
+        "cmangos/playerbots": "87624d0a1d2772551dd4be6947b5a362ceacec80",
+        "cmangos/classic-db": "e4825cf48176edff313d78de66b0beb14371c8eb",
     },
 }
 """The commit each shipped source is pinned to, and the gate that ran on it.
@@ -258,6 +258,28 @@ Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
 `dest`), never off a branch tip. Pinned 2026-09-05; `wow-wotlk` moved 2026-09-26, 2026-10-08,
 2026-10-10 and 2026-10-17:
 
+* PINS (2026-11-20) moved every source this round covers to the newest heads of that day WITHOUT a
+  live gate: `wow-wotlk` (and `wow-unbound`) core `e7e2e288` -> `32fd3472` (43 commits) and module
+  `405f8119` -> `ecc4a537` (16 commits); `wow-tbc` mangos-tbc `ec0d40c3` -> `147c0b63` (116),
+  playerbots `8d102f91` -> `87624d0a` (28), tbc-db `a4c6a8c8` -> `5dc223d3` (23); `wow-vanilla`
+  mangos-classic `6d8821c7` -> `28a26c38` (116), playerbots `8d102f91` -> `87624d0a` (28),
+  classic-db `c33f90b8` -> `e4825cf4` (2); `wow-tortoise` TortoiseBots `a90d0407` -> `d5e903d3`
+  (release v1.29.2, 802 commits; the core stays `48cb227f`); `wow-centurion` `e91044da` ->
+  `0846c691` (78); `wow-mop` `efe7f291` -> `f5fc970d` (315). Read from the new trees: the WotLK
+  core's base SQL is unchanged and its 13 new `db_world` updates hold no DDL; the three Docker
+  recipe files are byte for byte the same; `AccountMgr.h`, `Player.h::SetSkill` and
+  `WorldSession::IsHeadless()` are unchanged; the module's 894 conf keys and its `GetOption`
+  literals are the same set (only comments changed); Unbound's five core patches apply in order;
+  the vmap-extractor patch applies to both CMaNGOS cores (their `contrib/` trees are unchanged)
+  and every SQL glob and conf key those entries name still exists; the TortoiseBots module keeps
+  `conf/tortoise_bots.conf.dist`, `ai/playerbot/aiplayerbot.conf.dist.in`, `data/sql/world` and
+  `data/sql/character` and every conf key the entry writes; the two DB repos'
+  `utilities/cmangos_custom.sql` is byte for byte the same; Centurion's `cs_misc.cpp` revive fix
+  and the paths its entry names are unchanged; MoP's database asset moved from v1.0.4's ZIP to
+  v1.1.1's (145,865,764 B, sha256 `cb283195...`) because f5fc970d prepares statements against
+  `playerbots_account_type`, which v1.0.4's dump does not create, and every table those
+  statements name in the four databases exists in v1.1.1. Tortoise, Centurion and MoP are pinned
+  and checked in their own entries.
 * PINS (2026-11-09) moved `wow-wotlk` (and `wow-unbound`) to the newest heads of that day WITHOUT a
   live gate: core `93333d6a` -> `e7e2e288` (90 commits) and module `05a1f6f` -> `405f8119` (18
   commits); `wow-centurion` `0f7e3f59` -> `e91044da` (one commit, `spell_priest.cpp` only) and

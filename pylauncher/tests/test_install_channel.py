@@ -830,6 +830,28 @@ def test_a_labelled_override_with_the_channel_on_is_still_rolled_back(
     _rolled_all_the_way_back(channel, installed)
 
 
+def test_a_successful_enable_press_clears_the_files_switch_off_note(tmp_path: Path) -> None:
+    """T881 review: the Server tab said the channel was off right after it was switched on.
+
+    `channel_is_off` is written by the worker-side checks, and a successful press is the
+    one event that makes the note false. Left set, `_channel_sentence()` kept naming the
+    switch the press had just thrown.
+    """
+    from yulon.ui import controller_view
+
+    channel = _channel(tmp_path, answering=_Answering("yes"))
+    channel.channel_is_off = True
+    pending = setup.Pending(account="YULON_AB", password="pw")
+
+    channel.enable(world_running=False)
+
+    assert channel.channel_is_off is False
+    assert (
+        controller_view._channel_sentence(pending, channel_is_off=channel.channel_is_off)
+        != setup.CHANNEL_OFF_IN_FILES
+    )
+
+
 def test_a_press_made_before_the_label_was_kept_is_still_rolled_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

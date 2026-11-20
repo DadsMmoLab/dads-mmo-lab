@@ -567,14 +567,51 @@ def elevated_batch(
         return None
     if (windows_is_admin() if is_admin is None else is_admin) or detect() != "windows":
         return None
-    handle, name = tempfile.mkstemp(prefix="yulon-netsh-", suffix=".json")
+    return _elevated_script(commands, "yulon-netsh-")
+
+
+ADMIN_BATCH_PROGRAMS: tuple[str, ...] = ("icacls", "cmd", "certutil")
+"""The programs `elevated_admin_batch()` will run behind its one prompt, and no others.
+
+`icacls` grants a folder to the player; `cmd` is there for `cmd /c mkdir`, which makes
+a folder under Program Files the grant then applies to, and for WoW Forever's hosts line;
+`certutil -addstore Root` trusts a WoW Forever install's own name-constrained CA
+(`forever_trust.py`). A short list on purpose: an elevated batch is a place where a
+wrong argv does the most harm.
+"""
+
+
+def elevated_admin_batch(
+    cmds: Iterable[Iterable[str]], *, is_admin: bool | None = None
+) -> tuple[list[str], Path] | None:
+    """`elevated_batch()` for commands other than netsh: one UAC prompt, every verdict read back.
+
+    The same script and the same `read_batch_results()` contract, for the folder
+    grant a client under Program Files needs (`single_client.grant_commands()`). None
+    when nothing needs wrapping (not Windows, already admin, or no commands), and
+    refused (`ValueError`) for a program outside `ADMIN_BATCH_PROGRAMS`.
+    """
+    commands = [list(c) for c in cmds]
+    for cmd in commands:
+        if cmd[:1] not in ([p] for p in ADMIN_BATCH_PROGRAMS):
+            raise ValueError(f"an elevated batch runs only {ADMIN_BATCH_PROGRAMS}, got {cmd[:1]}")
+    if not commands:
+        return None
+    if (windows_is_admin() if is_admin is None else is_admin) or detect() != "windows":
+        return None
+    return _elevated_script(commands, "yulon-admin-")
+
+
+def _elevated_script(commands: list[list[str]], prefix: str) -> tuple[list[str], Path]:
+    """The PowerShell argv and results path of `elevated_batch()` and `elevated_admin_batch()`."""
+    handle, name = tempfile.mkstemp(prefix=prefix, suffix=".json")
     os.close(handle)
     results = Path(name)
     lines = ["$ErrorActionPreference = 'Continue'", "$r = @()"]
     for cmd in commands:
         args = ",".join(_ps_quote(a) for a in cmd[1:])
         lines += [
-            f"$o = (& netsh @({args}) 2>&1 | Out-String).Trim()",
+            f"$o = (& {cmd[0]} @({args}) 2>&1 | Out-String).Trim()",
             "$r += [pscustomobject]@{ rc = $LASTEXITCODE; out = $o }",
         ]
     lines.append(
@@ -1643,13 +1680,24 @@ def docker_programs() -> tuple[str, ...]:
     Both cost microseconds next to the process spawn they precede.
 
     Nothing is cached. The value is meant to change underneath us — that is the
-    entire point — so `_wait_docker_ready()`'s poll re-asks every few seconds
-    and picks up the PATH entry the installer writes mid-wait.
+    entire point — so `_wait_docker_ready()`'s poll re-asks every few seconds and
+    picks up the PATH entry the installer writes mid-wait.
+
+    Under Podman (T887, developer switch only) the downloaded client in
+    `engine.client_dir()` comes first when it is there, because a Podman host
+    has no system `docker` and the CLI Yu'lon fetched is the one that must be
+    found. PATH's own `docker` stays behind it as the fallback.
     """
     here = detect()
     if here == "macos":
         return ("docker", *_macos_docker_programs())
     if here != "windows":
+        from yulon import engine as engine_seam
+
+        if engine_seam.is_podman():
+            client = engine_seam.client_dir() / "docker"
+            if client.is_file():
+                return (str(client), "docker")
         return ("docker",)
     return ("docker", *_windows_docker_programs())
 
@@ -3064,6 +3112,13 @@ DOCKER_START_COMMANDS: list[list[str]] = [["systemctl", "start", "docker"]]
 DOCKER_SNAP_START_COMMANDS: list[list[str]] = [["snap", "start", "docker"]]
 DOCKER_DESKTOP_START_COMMAND = ["systemctl", "--user", "start", "docker-desktop"]
 DOCKER_ROOTLESS_START_COMMAND = ["systemctl", "--user", "start", "docker"]
+PODMAN_SOCKET_START_COMMAND = ["systemctl", "--user", "start", "podman.socket"]
+"""Waking rootless Podman's API socket: per-user, no root, installs nothing (T887)."""
+PODMAN_NOT_READY_SENTENCE = (
+    "Podman is not answering on this computer. Yu'lon tried to start it and could not. "
+    "Details says why."
+)
+"""The player line when the socket start leaves no answering daemon (T887)."""
 
 
 def _packages_in(commands: list[list[str]]) -> list[str]:
@@ -3325,7 +3380,15 @@ def container_user_args(*, platform_id: Callable[[], PlatformId] = detect) -> li
     Note for callers: `platform_id`'s default is bound at import, so a test that
     replaces `platform.detect` is NOT seen here. Pass the seam through
     explicitly if you need one — `git.ContainerGit._user_args()` does.
+
+    Under Podman (T887, developer switch only) this is `[]`: the image runs as
+    root there and `--user uid:gid` would map the bind writer into a subuid the
+    player cannot delete, the same trap `composegen.container_user()` avoids.
     """
+    from yulon import engine as engine_seam
+
+    if engine_seam.is_podman():
+        return []
     if platform_id() != "linux":
         return []
     getuid = getattr(os, "getuid", None)
@@ -4204,6 +4267,10 @@ def ensure_docker(
     if docker_ready(do):
         logger.info("ensure_docker(): daemon already reachable")
         return ProvisionReport(current, done=("docker already running",), docker_ready=True)
+    from yulon import engine as engine_seam
+
+    if current == "linux" and engine_seam.is_podman():
+        return _ensure_podman(do, wait_seconds, cancel)
     if current == "linux":
         return _ensure_docker_linux(
             do, which, dry_run, _linux_user(user), wait_seconds, cancel, ask, run_input
@@ -4270,6 +4337,29 @@ def _linux_user(explicit: str | None) -> str:
     # `deck` last: it is the SteamOS default this project targets, and a wrong
     # guess here is a name in a question rather than an action.
     return os.environ.get("USER") or os.environ.get("USERNAME") or "deck"
+
+
+def _ensure_podman(
+    do: RunCmd,
+    wait_seconds: float,
+    cancel: threading.Event | None = None,
+) -> ProvisionReport:
+    """Wake rootless Podman's socket and wait for the daemon, installing nothing (T887).
+
+    Only under the `YULON_ENGINE=podman` switch: `ensure_docker()` answers
+    early when a daemon is already reachable, and this is what a Linux run
+    reaches otherwise. It never installs a package, joins a group, or runs
+    anything as root — waking the per-user socket is the whole of it — so a
+    box without Podman is refused in words rather than given Docker beside it.
+    """
+    from yulon import docker as docker_seam
+
+    started = do(list(PODMAN_SOCKET_START_COMMAND))
+    ready = _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0, cancel)
+    if ready:
+        return ProvisionReport("linux", done=("podman socket started",), docker_ready=True)
+    detail = (started.stdout.strip() + "\n" + started.stderr.strip()).strip()
+    raise docker_seam.DockerRefusal(PODMAN_NOT_READY_SENTENCE, detail=detail)
 
 
 def _ensure_docker_linux(
@@ -6027,7 +6117,14 @@ def docker_containerd_root(run: RunCmd | None = None) -> Path | None:
     directory — every one of those keeps today's answer, which is the data
     root's free space. It never falls back to `DockerRootDir` with a *number*
     for containerd: a path that cannot be read is not a zero.
+
+    Under Podman (T887, developer switch only) this is None: Podman has no
+    containerd store, so T884's check must not fire.
     """
+    from yulon import engine as engine_seam
+
+    if engine_seam.is_podman():
+        return None
     info = docker_info(run)
     if info is None:
         return None

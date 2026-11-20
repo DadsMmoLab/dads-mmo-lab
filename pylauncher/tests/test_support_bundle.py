@@ -36,6 +36,10 @@ def _seams(**overrides: object) -> bundle.Seams:
         "live_logs": lambda install, silent: [LiveLog("tbc-mangosd", "world up\n")],
         "docker_version": lambda distro: "27.0.1",
         "now": lambda: datetime(2026, 9, 22, 10, 0, tzinfo=UTC),
+        # T881 E: stated, not read from this box's network or its docker.
+        "listing": lambda: platform.LocalListing(addresses=()),
+        "lan_ip": lambda: None,
+        "realm_log": lambda install, silent: None,
     }
     base.update(overrides)
     return bundle.Seams(**base)  # type: ignore[arg-type]
@@ -271,7 +275,7 @@ def test_a_wedged_docker_is_asked_once_per_bundle_not_once_per_install(
     # Every `None` now took the whole bound: the first ask marks this docker silent.
     monkeypatch.setattr(docker, "COMPOSE_PS_TIMEOUT", 0.0)
     installs = (_install(tmp_path, "0badc0de"), _install(tmp_path, "0badf00d"))
-    seams = bundle.Seams(docker_version=version)
+    seams = _seams(docker_version=version, live_logs=bundle._collect_live_logs)
     bundle.build(
         tmp_path / "s.zip",
         Sources(platform.config_dir(), None, installs),

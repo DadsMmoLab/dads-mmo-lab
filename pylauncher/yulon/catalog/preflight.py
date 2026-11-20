@@ -406,10 +406,17 @@ def gather(
     # does not move it. Asked only where there is a data root to compare with
     # (Linux, daemon answered): with no data root the row is already unchecked,
     # and a containerd reading alone would be a different answer, not today's.
+    from yulon import engine as engine_seam
+
     ask_containerd = (
         containerd_root if containerd_root is not None else platform.docker_containerd_root
     )
-    ctr_root = ask_containerd() if ready and here == "linux" and root is not None else None
+    # T887: Podman has no containerd image store; T884's check must not fire.
+    ctr_root = (
+        ask_containerd()
+        if ready and here == "linux" and root is not None and not engine_seam.is_podman()
+        else None
+    )
     ctr_free = free(ctr_root) if ctr_root is not None else None
     dir_free = free(server_dir)
     probe = bind_mount_ok if bind_mount_ok is not None else _default_bind_probe

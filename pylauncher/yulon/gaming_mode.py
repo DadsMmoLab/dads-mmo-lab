@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from yulon import platform, play_launch, resources, single_play, steam
+from yulon import forever_proton, platform, play_launch, resources, single_play, steam
 from yulon.catalog.catalog import SingleEntry, SingleGamingMode
 from yulon.log import get_logger
 
@@ -93,6 +93,11 @@ NO_CLIENT_EXE = (
 NO_SERVER = (
     "{folder} is not there any more, so there is no server for these shortcuts to "
     "start. Nothing was written."
+)
+FOREVER_FIRST_PLAY = (
+    "Press Play on {name}'s tab once first, on the desktop: it sets up GE-Proton, the "
+    "game's own Proton prefix and your account, which the Gaming Mode tiles use. Nothing "
+    "was written."
 )
 NO_PROTON = (
     "The Gaming Mode client starts {name} with the Proton that made Yu'lon's {name} "
@@ -324,11 +329,17 @@ class GamingMode:
             raise steam.SteamRefusal(
                 NO_CLIENT_EXE.format(exe=play.exe, folder=client_dir, client=play.client)
             )
-        problem = single_play.check_account(account)
-        if problem is not None:
-            raise steam.SteamRefusal(f"{problem} Nothing was written.")
+        # Only a game whose Play asks for the account checks one: WoW Forever's tab has no
+        # account box (Play makes the account), so it hands an empty one (Deck #2, 11-14).
+        if play.account:
+            problem = single_play.check_account(account)
+            if problem is not None:
+                raise steam.SteamRefusal(f"{problem} Nothing was written.")
         if not self.server_dir.is_dir():
             raise steam.SteamRefusal(NO_SERVER.format(folder=self.server_dir))
+        prefix = self.server_dir / forever_proton.PREFIX_NAME / "pfx" / "drive_c" / "windows"
+        if play.forever is not None and not prefix.is_dir():
+            raise steam.SteamRefusal(FOREVER_FIRST_PLAY.format(name=self.entry.name))
         if self.is_running():
             raise steam.SteamRefusal(_for_this_button(steam.RUNNING))
         try:

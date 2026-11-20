@@ -325,6 +325,35 @@ def test_main_hands_the_engine_a_prompter_so_a_sudo_box_is_not_a_hang(
     assert asks[-1] is install_wiring._terminal_prompter
 
 
+def test_main_points_the_cli_at_the_podman_socket(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Item 5: `main` calls `engine.apply_docker_host()` before the engine runs."""
+    from yulon import engine as engine_seam
+
+    calls: list[None] = []
+    real = engine_seam.apply_docker_host
+
+    def record() -> None:
+        calls.append(None)
+        real()
+
+    class _FakeEngine:
+        def run(
+            self,
+            options: InstallOptions | None = None,
+            *,
+            cancel: object = None,
+            ask: object = None,
+        ) -> Iterator[str]:
+            yield "done"
+
+    monkeypatch.setattr(engine_seam, "apply_docker_host", record)
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **_k: _FakeEngine())
+    assert install_wiring.main(["wow-wotlk", "--server-dir", str(tmp_path)]) == 0
+    assert calls == [None]
+
+
 def test_main_hands_the_engine_a_cancel_event_of_its_own(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

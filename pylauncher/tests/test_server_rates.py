@@ -228,8 +228,8 @@ def test_a_rate_the_file_spells_oddly_is_shown_as_written_and_can_still_be_edite
 
 WOTLK_RATES = (
     # mod-playerbots/azerothcore-wotlk @7f12e89e (the file is unchanged at f19a1879, 2a2211cd,
-    # 8a4e76ea, 3f2969dd, 93333d6a and e7e2e288; at e7e2e288 only two comment blocks after the
-    # rate lines, :3015 and :3072, were reworded),
+    # 8a4e76ea, 3f2969dd, 93333d6a, e7e2e288 and 32fd3472; at e7e2e288 only two comment blocks
+    # after the rate lines, :3015 and :3072, were reworded),
     # worldserver.conf.dist:2444,2504-2508,2578,2855-2863
     "Rate.Reputation.Gain = 11\n"
     "Rate.XP.Kill      = 2\n"
@@ -247,8 +247,8 @@ WOTLK_RATES = (
     "Rate.Drop.Money                 = 5\n"
 )
 TBC_RATES = (
-    # cmangos/mangos-tbc @ec0d40c3, mangosd.conf.dist.in:1566-1600 (an excerpt; values
-    # unchanged from 15b6ddb4, 37767e95 and af6b4885)
+    # cmangos/mangos-tbc @147c0b63, mangosd.conf.dist.in:1566-1600 (an excerpt; values
+    # unchanged from 15b6ddb4, 37767e95, af6b4885 and ec0d40c3)
     "Rate.Drop.Item.Poor = 6\n"
     "Rate.Drop.Item.Normal = 7\n"
     "Rate.Drop.Item.Uncommon = 8\n"
@@ -273,7 +273,8 @@ TBC_RATES = (
     "Rate.Reputation.LowLevel.Kill    = 0.25\n"
 )
 VANILLA_RATES = (
-    # cmangos/mangos-classic @6d8821c7, mangosd.conf.dist.in:1511-1537 (an excerpt)
+    # cmangos/mangos-classic @28a26c38, mangosd.conf.dist.in:1511-1537 (an excerpt; unchanged
+    # from 6d8821c7)
     "Rate.Drop.Item.Poor = 6\n"
     "Rate.Drop.Item.Normal = 7\n"
     "Rate.Drop.Item.Uncommon = 8\n"
@@ -309,8 +310,8 @@ TORTOISE_RATES = (
     "Rate.Reputation.Gain = 11\n"
 )
 CENTURION_RATES = (
-    # thomasjteachey/TrinityCore112 @0f7e3f59 (same at e91044da: one commit, spell_priest.cpp),
-    # worldserver.conf.dist:2539-2547,2565-2567,2632,2653
+    # thomasjteachey/TrinityCore112 @0846c691, worldserver.conf.dist:2539-2547,2565-2567,2632,2653
+    # (unchanged at e91044da and 0f7e3f59)
     "Rate.Drop.Item.Poor             = 6\n"
     "Rate.Drop.Item.Normal           = 7\n"
     "Rate.Drop.Item.Uncommon         = 8\n"

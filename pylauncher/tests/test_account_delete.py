@@ -18,11 +18,12 @@ The command is the same on every family, read from each pinned tree:
 * WotLK, AzerothCore `7f12e89e`: `src/server/scripts/Commands/cs_account.cpp:93`
   registers `delete` under `account` with `Console::Yes`; the handler is at :330.
 * Centurion, TrinityCore112 `faac5fc9`: the same file, :77, handler :294.
-* TBC, mangos-tbc `75f9ae68`: `src/game/Chat/Chat.cpp:83`, `SEC_CONSOLE`, console
-  allowed; handler `Chat.cpp:3800`. SOAP runs every command at `SEC_CONSOLE`
-  (`src/mangosd/MaNGOSsoap.cpp:113`).
-* Vanilla, mangos-classic `6d8821c7` (2026-11-09): `Chat.cpp:83`, handler `Chat.cpp:3715`,
-  `MaNGOSsoap.cpp:125` (at `ff13624a`, T860, and `57312491`: handler `:3714`, SOAP `:115`).
+* TBC, mangos-tbc `147c0b63` (2026-11-20): `src/game/Chat/Chat.cpp:83`, `SEC_CONSOLE`, console
+  allowed; handler `Chat.cpp:3796` (at `ec0d40c3`: `:3795`). SOAP runs every command at
+  `SEC_CONSOLE` (`src/mangosd/MaNGOSsoap.cpp:113`).
+* Vanilla, mangos-classic `28a26c38` (2026-11-20): `Chat.cpp:83`, handler `Chat.cpp:3716`,
+  `MaNGOSsoap.cpp:125` (at `6d8821c7`: handler `:3715`; at `ff13624a`, T860, and `57312491`:
+  handler `:3714`, SOAP `:115`).
 * Tortoise, tortoise-wow `187af788`: `src/game/Chat/Chat.cpp:71`, handler
   `src/mangosd/CliRunnable.cpp:74`; SOAP at `SEC_CONSOLE` in
   `src/mangosd/MaNGOSsoap.cpp:196`.
@@ -424,6 +425,17 @@ def asked(monkeypatch: pytest.MonkeyPatch) -> _Asked:
 def _tab(server: _Server, tmp_path: Path) -> tuple[ControllerView, list[str]]:
     services = ControllerServices.for_entry(server.entry, tmp_path / server.entry.id)
     services.accounts = server.admin
+    # T881 D: the real services above answer `db_refusal` for this folder (no
+    # `.db_password` here), but the tab is handed the stub `server.admin` and no real
+    # SQL seam at all. `_grey_set_password()` now keeps T785's refusal in force, so
+    # leaving it set greys the press these tests make against the stub. The refusal is
+    # about a seam this harness replaced, so it is cleared with it.
+    services.db_refusal = None
+    # T881 B: the real channel has no credential in this harness, and Set password is
+    # greyed while that is so. These tests press the SEAM (a stub), not the channel, so
+    # the tab is handed no channel setup at all -- which is also what a harness had
+    # before the greying existed.
+    services.channel_setup = None
     view = ControllerView(server.entry, services, status_poll_ms=0, job_runner=run_inline)
     failed: list[str] = []
     view.action_failed.connect(failed.append)

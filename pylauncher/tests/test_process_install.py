@@ -252,6 +252,9 @@ def test_a_fresh_install_runs_every_stage_in_order_and_records_them(
     assert [line[4:] for line in said if line.startswith("--- ")] == list(STAGE_NAMES)
     state = native.read_state(server, valid=STAGE_NAMES)
     assert state is not None and state.completed == STAGE_NAMES and state.family == "go"
+    assert (
+        state.engine == ""
+    ), "item 4 (r3): process installs touch no Docker, so the fresh record is engine-less"
     checkout = server / "src"
     assert (checkout / TARGET).read_text() == 'package catalog\n\nconst sha = "new"\n'
     assert json.loads((checkout / UNPACKED).read_text())["sha256"] == _sha(SOURCE_ZIP)
@@ -260,6 +263,24 @@ def test_a_fresh_install_runs_every_stage_in_order_and_records_them(
     assert "Applied fix.patch: applies fix.patch" in said
     assert said[-1].startswith("DFO is built in")
     assert "choose your DFO client folder" in said[-1]
+
+
+def test_a_fresh_process_install_records_no_engine_even_under_the_switch(
+    tmp_path: Path, installers: Path, fakes: Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 4 (r3): the process fresh record stays engine-less under the switch too."""
+    from yulon import engine
+
+    monkeypatch.setenv("YULON_ENGINE", "podman")
+    monkeypatch.setattr(engine, "_on_supported_platform", lambda *_a, **_k: True)
+    engine._reset_for_tests()
+    try:
+        server = tmp_path / "yulon-dfo"
+        _run(_engine(_entry(), installers, fakes), server)
+        state = native.read_state(server, valid=STAGE_NAMES)
+        assert state is not None and state.engine == ""
+    finally:
+        engine._reset_for_tests()
 
 
 def test_the_build_uses_the_installs_own_go_and_nothing_of_the_players(
@@ -524,3 +545,38 @@ def test_go_env_hands_go_the_cleaned_environment_a_frozen_build_gives_its_childr
     process = load_catalog().get_single("dfo").install.process
     assert process is not None
     assert "LD_LIBRARY_PATH" not in go_env(tmp_path, process)
+
+
+def test_a_podman_record_under_the_docker_switch_refuses_before_any_download(
+    tmp_path: Path, installers: Path, fakes: Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 3: the process path's run()/install entry refuses the other engine's record."""
+    from yulon import engine as engine_seam
+    from yulon import forgetting
+
+    server = tmp_path / "s"
+    entry = _entry()
+    engine = _engine(entry, installers, fakes)
+    native.write_state(
+        server,
+        native.InstallState(
+            game_id="dfo",
+            install_id=engine.install_id(server),
+            family="go",
+            engine="podman",
+            completed=STAGE_NAMES,
+        ),
+    )
+    before = (server / native.STATE_FILE).read_bytes()
+    monkeypatch.delenv("YULON_ENGINE", raising=False)
+    engine_seam._reset_for_tests()
+    try:
+        with pytest.raises(
+            InstallerError, match="set up with Podman.*Switch back to Podman"
+        ) as caught:
+            _run(engine, server)
+        assert str(caught.value) == forgetting.engine_mismatch_refusal("Podman", "Docker")
+    finally:
+        engine_seam._reset_for_tests()
+    assert fakes.downloads == [] and fakes.builds == []
+    assert (server / native.STATE_FILE).read_bytes() == before

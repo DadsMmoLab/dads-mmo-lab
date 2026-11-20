@@ -505,6 +505,12 @@ def test_the_verdict_on_its_worker_does_not_start_a_distro_stopped_since_the_las
     (`wsl -t`, `--shutdown`) must not be started again by its `docker inspect`. With the
     view's REAL worker thread, so the order is the app's."""
     monkeypatch.setattr(controller_view_module, "threaded_job_runner", _THREADED)
+    # T886: the tab also reads the realm name once the distro answers running, a job this
+    # test never waits for. Under CI load it was still in flight when the distro is stopped
+    # below, and touched it or was left unpumped. This test is about the verdict only.
+    monkeypatch.setattr(
+        controller_view_module.ControllerView, "refresh_realm_name", lambda self: None
+    )
     disk.stopped = False
     view = _open_the_tab(_entry("wow-wotlk"), Path(disk.root))
     try:

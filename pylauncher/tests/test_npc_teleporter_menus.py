@@ -52,6 +52,7 @@ PINS_MEASURED = (
     "3f2969ddb",
     "93333d6a",
     "e7e2e288e",
+    "32fd3472",
 )
 USED_AT_BOTH_PINS = (
     (50000, 50008),
@@ -93,7 +94,11 @@ gossip_menu or gossip_menu_option row and no type 14 or 15 condition with an id 
 SQL changed except the deletion of `spell_proc_event.sql`, and its 23 db_world updates hold no
 event-62 smart_scripts row with a parameter in the range (62 rows read), no gossip_menu_id, no
 gossip_menu_option row and no type 14 or 15 condition in it (the one gossip_menu row, and the
-one type-14 condition, are for menu 8532). 58000..60999 and
+one type-14 condition, are for menu 8532). PINS (2026-11-20) read 32fd3472 from a
+checkout: no base SQL changed since e7e2e288, and its 13 new db_world updates hold no
+event-62 smart_scripts row (none at all), no gossip_menu or gossip_menu_option row and no
+`gossip_menu_id`; their only type 15 conditions name menus 9286 and 9742, and the type-14 rows
+they rewrite are for menu 8713. 58000..60999 and
 62000..89999 are unused.
 """
 

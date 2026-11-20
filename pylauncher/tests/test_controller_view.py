@@ -125,6 +125,7 @@ from yulon.ui.controller_view import (
     ControllerView,
     DatabaseAlone,
     UpdateChoice,
+    _format_network_report,
     ask_update_choice,
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
@@ -4330,11 +4331,14 @@ def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
         and n.func.attr == "apply"
         and ast.unparse(n.func.value) == "networking"
     ]
-    assert len(lines) == 1, f"expected exactly one networking.apply call, found {lines}"
+    # T885: Apply on a stopped server calls it on each of its paths (running, refused,
+    # held, put back), so every such call must stay exempt, not just one.
+    assert lines, "no networking.apply call found"
 
     accepts, missing = _scan_for_seams_without_a_distro(view.parent.parent, view)
     assert "apply" in accepts, "the scan no longer knows `apply` can take a distro"
-    assert f"apply() at controller_view.py:{lines[0]}" not in missing, missing
+    for line in lines:
+        assert f"apply() at controller_view.py:{line}" not in missing, missing
 
 
 def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
@@ -6186,6 +6190,129 @@ def test_neither_change_is_offered_until_an_account_is_chosen(
 
     assert view.set_password_button.isEnabled() is True
     assert view.set_gm_button.isEnabled() is True
+
+
+def test_set_password_is_greyed_with_the_channel_button_named_when_the_channel_is_off(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T881 B: owner answer 7 means no password row outside the channel.
+
+    The report's install had the channel switched off in its own files, so the pending
+    credential was never proved; Set password stayed live and every press answered with
+    a sentence that named no control. It is greyed now, with the button's own name in
+    the reason, and the reason is the same sentence the seam would have refused with.
+    """
+    from yulon.ui.widgets.reasons import reason_of
+
+    services = _with_accounts(ps, tmp_path, _StubAccounts())
+    services.channel_setup = _StubSetup(
+        state=channel_setup.Pending(account="YULON_ABC12345", password="x")
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    view.refresh_accounts()
+    view.account_list.setCurrentRow(0)
+
+    assert not view.set_password_button.isEnabled()
+    reason = reason_of(view.set_password_button)
+    assert reason == useraccounts.NO_CHANNEL
+    assert "Turn on the command channel" in reason
+    assert "Server tab" in reason
+
+
+def test_a_database_refusal_keeps_its_reason_on_set_password_when_the_channel_changes(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T785's refusal outranks the channel's note and "choose an account" (T881 review).
+
+    `_show_channel()` runs after every channel look and used to replace Set password's
+    reason with `NO_CHANNEL`, so the tooltip told the reader to turn on a channel while
+    the real reason was the unknown database password.
+    """
+    from yulon.ui.widgets.reasons import reason_of
+
+    refusal = "This server's .db_password is missing, so Yu'lon cannot know it and tried none."
+    services = _with_channel(
+        ps, tmp_path, _StubSetup(state=channel_setup.Pending(account="YULON_AB", password="pw"))
+    )
+    services.db_refusal = refusal
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_channel()
+
+    assert not view.set_password_button.isEnabled()
+    assert reason_of(view.set_password_button) == refusal
+
+
+def test_the_accounts_tab_names_an_account_with_a_recent_wrong_password_login(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T881 B: the authserver's own words, through a listing this test builds by hand.
+
+    The note is part of `InstallAccounts.listing()` -- parsed by
+    `useraccounts.wrong_password_note` against the names the listing holds, which is
+    what keeps a bot's failed login (and the app's own) out of it. This does not go
+    through the factory; the `auth_server_log=` wiring on the `_for_wotlk` site is
+    proved by test_the_wotlk_accounts_factory_hands_the_authserver_log_to_the_listing.
+    """
+
+    class _Rows:
+        def query(self, db: object, statement: str) -> str:
+            return "7\tALICE\t0\n9\tBOB\t3\n"
+
+    log = (
+        "2026-11-09 20:00:00 [Info] account ALICE tried to login with invalid password\n"
+        "2026-11-09 20:01:00 [Info] account BOTONE tried to login with invalid password\n"
+        "2026-11-09 20:02:00 [Info] account BOB tried to login with invalid password\n"
+    )
+    services = _services(ps, tmp_path, [])
+    services.accounts = useraccounts.InstallAccounts(
+        WOTLK,
+        tmp_path,
+        sql=_Rows(),
+        channel_for_saved=lambda: None,
+        app_account="YULON_ABC12345",
+        auth_server_log=lambda: log,
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_accounts()
+
+    said = view.account_login_notes.text()
+    assert "A recent login as ALICE used a wrong password." in said
+    assert "BOB" in said
+    assert "BOTONE" not in said, "a bot's failed login was reported as a player's"
+    assert not view.account_login_notes.isHidden()
+
+
+def test_the_wotlk_accounts_factory_hands_the_authserver_log_to_the_listing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T881 review: the `_for_wotlk` site itself passes the authserver log through.
+
+    The tab test above builds its listing by hand, so it cannot see a factory that
+    forgot `auth_server_log=`. This builds the accounts object through the real
+    factory path, with the container-log reader faked to the authserver's own
+    sentence, and asks the listing it built: a factory that drops that keyword
+    leaves the note empty and fails here.
+    """
+    monkeypatch.setattr(
+        DockerSql,
+        "query",
+        lambda self, db, statement: "7\tHORDETEST\t0\n",
+    )
+    monkeypatch.setattr(
+        docker,
+        "last_lines",
+        lambda container, lines, *, wsl_distro=None, timeout=20.0, max_bytes=None: (
+            "2026-11-09 20:00:00 [Info] account HORDETEST tried to login with invalid password\n"
+        ),
+    )
+
+    services = ControllerServices.for_wotlk(WOTLK, tmp_path, None)
+
+    assert services.accounts is not None
+    listing = cast(useraccounts.Listing, services.accounts.listing())
+    assert "HORDETEST" in listing.wrong_password
 
 
 def test_setting_a_password_names_the_chosen_account_and_clears_the_field(
@@ -30475,6 +30602,164 @@ def test_a_plan_or_apply_that_fails_says_so_in_a_sentence(
     assert view.network_details.collapsed and not view.network_details.isHidden()
 
 
+def test_apply_on_a_stopped_server_says_next_start_not_restart(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885: Apply that started the database alone says the next Start picks the address up."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    plan = _netsh_plan("lan")
+    outcome = NetworkReport(
+        plan,
+        done=("realmlist → 192.168.1.25",),
+        restart_required=True,
+        applied_while_stopped=True,
+    )
+    services.network_apply = lambda p: outcome
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    view.apply_network_plan()
+    shown = view.network_text.toPlainText()
+    assert "The realm list now gives players 192.168.1.25." in shown, shown
+    assert "The server was stopped, so the new address is used from its next Start." in shown, shown
+    assert "Restart the server" not in shown, shown
+
+
+def test_a_plan_shown_during_an_apply_leaves_apply_disabled(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R3: "Show plan" during an Apply must not hand Apply back.
+
+    Mutation: `_plan_ready` enables Apply on a ready plan without checking
+    `_network_applying`, which is the press that overlapped the running one. Apply is
+    handed back when the job ends, which is what the second assertion pins.
+    """
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    during: list[bool] = []
+
+    def shows_the_plan_mid_apply(plan: NetworkPlan) -> NetworkReport:
+        view.show_network_plan()
+        during.append(view.apply_button.isEnabled())
+        return NetworkReport(plan, done=("realmlist → 192.168.1.25",), restart_required=True)
+
+    services.network_apply = shows_the_plan_mid_apply
+    view.show_network_plan()
+    assert view.apply_button.isEnabled()
+    view.apply_network_plan()
+    assert during == [False], during
+    assert view.apply_button.isEnabled(), "Apply was not handed back when the job ended"
+
+
+def test_an_apply_refused_by_the_database_lease_says_the_holders_sentence(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R4: a lease refusal read "Apply did not finish" and folded the one sentence.
+
+    Mutation: drop `MaintenanceLeaseTaken` from `_apply_failed`'s `isinstance`.
+    """
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+
+    view._apply_failed(docker.MaintenanceLeaseTaken("X"))
+
+    shown = view.network_text.toPlainText()
+    assert "X" in shown, shown
+    assert controller_view_module.APPLY_DID_NOT_FINISH not in shown, shown
+    assert view.apply_button.isEnabled(), "a ready plan was left unpressable"
+
+
+def test_an_apply_that_ends_over_a_not_ready_plan_leaves_apply_disabled(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R4: both endings handed Apply back whatever the plan now in hand said.
+
+    Mutation: `_rearm_apply`'s body replaced by `self.apply_button.setEnabled(True)`.
+    """
+    not_ready = replace(_netsh_plan("lan"), lan_ip=None)
+    assert not not_ready.ready
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    applied: list[str] = []
+
+    def ends_well(plan: NetworkPlan) -> NetworkReport:
+        applied.append("done")
+        view._plan_ready(not_ready)
+        return NetworkReport(plan, done=("realmlist → 192.168.1.25",), restart_required=True)
+
+    services.network_apply = ends_well
+    view.show_network_plan()
+    view.apply_network_plan()
+    assert applied == ["done"], applied
+    assert not view.apply_button.isEnabled(), "_apply_done left a not-ready plan's Apply live"
+    view.apply_network_plan()
+    assert applied == ["done"], "a plan that is not ready was applied anyway"
+
+    services2 = _services(ps, tmp_path, [])
+    services2.network_plan = _netsh_plan
+    view2 = ControllerView(WOTLK, services2, status_poll_ms=0)
+    broke: list[str] = []
+
+    def ends_badly(plan: NetworkPlan) -> NetworkReport:
+        broke.append("boom")
+        view2._plan_ready(not_ready)
+        raise RuntimeError("the UPDATE failed")
+
+    services2.network_apply = ends_badly
+    view2.show_network_plan()
+    view2.apply_network_plan()
+    assert broke == ["boom"], broke
+    assert not view2.apply_button.isEnabled(), "_apply_failed left a not-ready plan's Apply live"
+
+
+def test_apply_that_could_not_reach_the_database_says_the_choice_was_not_saved(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885: an unreached database says the choice was not saved, and offers the retry."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    plan = _netsh_plan("lan")
+    why = "realmlist not updated: the database would not start"
+    outcome = NetworkReport(plan, skipped=(why,), realm_unchanged=why)
+    services.network_apply = lambda p: outcome
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    view.apply_network_plan()
+    shown = view.network_text.toPlainText()
+    assert "The realm address was not changed" in shown, shown
+    assert "so this choice was not saved" in shown, shown
+    assert "Details says why" in shown, shown
+    assert "database would not start" not in shown, shown
+    assert "The realm list now gives players" not in shown, shown
+
+
+def test_a_realm_unchanged_keeps_dockers_words_off_the_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T885 R2: a realm step that did not go through shows a fixed sentence, not the reason."""
+    services = _services(ps, tmp_path, [])
+    services.network_plan = _netsh_plan
+    plan = _netsh_plan("lan")
+    outcome = NetworkReport(plan, skipped=(RAW_DOCKERISH,), realm_unchanged=RAW_DOCKERISH)
+    services.network_apply = lambda p: outcome
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.show_network_plan()
+    view.apply_network_plan()
+    shown = view.network_text.toPlainText()
+    assert RAW_DOCKERISH not in shown, shown
+    assert (
+        "The realm address was not changed, so this choice was not saved. Details says why."
+        in shown
+    ), shown
+    assert RAW_DOCKERISH in view.network_details.text()
+    assert _format_network_report(outcome).count("The realm address was not changed") == 1
+
+
 def test_an_apply_that_breaks_in_docker_keeps_dockers_words_off_the_screen(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -32574,6 +32859,36 @@ def test_the_realm_name_field_is_filled_from_the_server_but_never_over_what_is_t
     assert view.realm_name_edit.text() == "Mine"
 
 
+def test_the_realm_name_is_read_again_when_the_server_comes_up(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T881 C: read once at tab build, so a database that was down left a stale note.
+
+    The report's Networking tab said "The database did not answer and no name is saved
+    yet" for the rest of the run, because nothing asked again after the server start
+    brought the database up. The poll's transition from not-running to running is what
+    asks now -- once, not on every tick of a world that stays up.
+    """
+    from yulon.controller import InstallStatus
+
+    reads: list[str] = []
+    services = _services(ps, tmp_path, [])
+    services.realm_name_current = lambda: (
+        reads.append("read") or realm_name.NameState("Seeded Realm", True)
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    reads.clear()
+
+    view._status_ready(InstallStatus(db=False, auth=False, world=False))
+    assert reads == [], "a stopped server read the realm name again"
+    view._status_ready(InstallStatus(db=True, auth=True, world=False))
+    assert reads == [], "a database with no world read the realm name again"
+    view._status_ready(InstallStatus(db=True, auth=True, world=True))
+    assert reads == ["read"], "the world came up and the realm name was not read again"
+    view._status_ready(InstallStatus(db=True, auth=True, world=True))
+    assert reads == ["read"], "a second poll of a running world read the name again"
+
+
 def test_pressing_save_name_sends_the_trimmed_name_to_the_seam_and_shows_its_sentence(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -32636,7 +32951,8 @@ def test_with_no_known_database_password_save_name_is_grey_and_says_the_real_rea
     services.realm_name_current = lambda: realm_name.NameState(
         "Kept Realm",
         False,
-        "The database did not answer, so this is the name saved for this server.",
+        "The database did not answer when this was read, so this is the name saved "
+        "for this server.",
     )
     view = ControllerView(WOTLK, services, status_poll_ms=0)
 
@@ -32775,7 +33091,9 @@ def test_the_start_step_wired_for_a_game_applies_a_saved_name(
     reason = services.controller.before_servers()
 
     assert reason is None
-    assert started == ["database"]
+    # T883: the address keeper and the saved-name step each start the database alone
+    # (WotLK's chain already did the same); `start_database()` is idempotent.
+    assert started == ["database", "database"]
     assert written == [realm_name.name_sql(entry, "Saved Realm")]
 
 

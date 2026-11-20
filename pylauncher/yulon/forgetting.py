@@ -92,8 +92,46 @@ BACKUP_HOLDS_THE_SERVER = (
     "on its own for it, and the database is stopped again when the backup ends. Wait for "
     "the backup to finish, then try again. Nothing was started or stopped."
 )
-# What a Backup or Restore refused by `docker.maintenance_lease()` is told: the running job's
-# own sentence, to which the refused one adds what it did not do (T216 review round 3).
+NETWORK_APPLY_HOLDS_THE_SERVER = (
+    "Yu'lon started this server's database to change who can connect, and stops "
+    "it again in a moment."
+)
+# T885 round 2: what every other press of this Yu'lon is told while Apply holds the
+# database alone (`docker.hold_the_server(alone=...)`): a Modules job's SQL, an
+# account. Nothing it would have written was written.
+NETWORK_APPLY_WRITES_ALONE = (
+    "A network change is being applied on this server's Networking tab, and "
+    "nothing else may write to its databases until it has finished. Wait for the "
+    "apply to finish, then try again. Nothing was changed."
+)
+
+
+def engine_mismatch_refusal(was: str, now: str) -> str:
+    """Why an install made under one container engine is refused under the other (T887).
+
+    `was` and `now` are `"Docker"` or `"Podman"`: the engine the record names
+    and the engine this process resolves. No commands, only the switch-back.
+    """
+    return (
+        f"This server was set up with {was}, and Yu'lon is now using {now}. Switch back "
+        f"to {was} to use it."
+    )
+
+
+def engine_unknown_refusal() -> str:
+    """Why a server whose install record cannot be read is refused under Podman (T887).
+
+    The record says which engine made the server; unread, Yu'lon cannot tell whether
+    Podman holds its containers, so it refuses rather than guess. No commands.
+    """
+    return (
+        "Yu'lon could not read how this server was set up, so it cannot tell whether it "
+        "belongs to Podman. Switch back to Docker to use it."
+    )
+
+
+# What a Backup, Restore or Apply refused by `docker.maintenance_lease()` is told: the running
+# job's own sentence, to which the refused one adds what it did not do (T216 review round 3).
 BACKUP_HOLDS_THE_DATABASES = (
     f"A backup of this server is running on its {MAINTENANCE_TAB} tab. Wait for it to "
     "finish, then try again."
@@ -101,6 +139,10 @@ BACKUP_HOLDS_THE_DATABASES = (
 RESTORE_HOLDS_THE_DATABASES = (
     f"A restore is writing into this server's databases on its {MAINTENANCE_TAB} tab. Wait "
     "for it to finish, then try again."
+)
+NETWORK_APPLY_HOLDS_THE_DATABASES = (
+    f"A network change is being applied on this server's {MAINTENANCE_TAB} tab. Wait for it "
+    "to finish, then try again."
 )
 # T681: what every other press of this Yu'lon that would write to the server is told while a
 # Restore loads (`docker.hold_the_server(alone=...)`): a Modules job's SQL, an account, a network
