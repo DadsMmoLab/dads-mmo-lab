@@ -2342,6 +2342,25 @@ def _listing_sites(root: Path) -> set[tuple[str, str]]:
 
 
 _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("catalog/stack_install.py", "_place_stack_files"): (
+        "Stack installs (WoW Forever's hotfixes update). Lists the entry's own `stack/files/` "
+        "folder in the app's bundled installers -- never the player's -- to copy each file to "
+        "the same path in the install folder this install owns, rewriting only a file whose "
+        "content differs. A short listing leaves a file out, which the compose file's mount then "
+        "names as missing when the server starts; no other folder is written"
+    ),
+    ("forever_keywatch.py", "_find_game"): (
+        "WoW Forever on Linux. Lists `/proc` to find the player's own Wine process whose argv[0] "
+        "is `...\\_forever_\\Wow.exe`, so the key watch can open its memory. It writes nothing on "
+        "disk and decides no write anywhere: a short listing only means the game is looked for "
+        "again a quarter of a second later, and a game never found writes no key, which the "
+        "player sees as a failed login"
+    ),
+    ("forever_proton.py", "library_folders"): (
+        "WoW Forever on Linux. Globs `/run/media` for Steam libraries on an SD card or drive, "
+        "to find Steam Linux Runtime 4.0's `_v2-entry-point`. Read only: a short listing means "
+        "the runtime is not found and Play says how to install it, before anything is written"
+    ),
     ("catalog/families/azerothcore.py", "_move_clone_into"): (
         "T830 fix round 1 (H1), round 2 (R2). Lists ONLY the sibling staging folder this "
         "press's own `clone-core` just cloned into -- `<server folder>.yulon-clone-<8 hex>`, "

@@ -499,13 +499,20 @@ def single_installer_for_app(
     No import gate and no database snapshot to wire: a server of this kind has no
     database container, no import and no update route. One factory nonetheless, so
     the Catalog tile and this harness build the engine the same way: the container
-    engine for a `native` install, the host-program one for a `process` install.
+    engine for a `native` install, the host-program one for a `process` install, and
+    the published-images one for a `stack` install.
     """
     if entry.install.process is not None:
         from yulon.catalog.process_install import ProcessInstaller, ProcessSeams
 
         return ProcessInstaller(
             entry, installers_root=installers_root, seams=ProcessSeams(platform_id=platform_id)
+        )
+    if entry.install.stack is not None:
+        from yulon.catalog.stack_install import StackInstaller, StackSeams
+
+        return StackInstaller(
+            entry, installers_root=installers_root, seams=StackSeams(platform_id=platform_id)
         )
     from yulon.catalog.single_install import SingleInstaller, SingleSeams
 

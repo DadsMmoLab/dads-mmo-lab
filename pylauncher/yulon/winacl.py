@@ -368,6 +368,15 @@ def _wide_string(address: int | None) -> str:  # pragma: no cover - Windows only
     return ctypes.wstring_at(address)
 
 
+def user_sid() -> str:  # pragma: no cover - Windows only
+    """The SID of the account this process runs as, for a caller outside this module.
+
+    `single_client.grant_commands()` names the player to `icacls` by SID, which is
+    the same in every locale and cannot be mistaken for another account's name.
+    """
+    return _user_sid()
+
+
 def _user_sid() -> str:  # pragma: no cover - Windows only
     """The SID of the account this process runs as, `S-1-5-21-...`, from its own token."""
     import ctypes

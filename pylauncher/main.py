@@ -602,6 +602,7 @@ def build_window() -> object:
         start_helper,
     )
     from yulon.single_controller import SingleController, SingleServer
+    from yulon.stack_controller import StackController
     from yulon.state import KnownInstall, load_state
     from yulon.ui.answers import said_yes
     from yulon.ui.catalog_view import CatalogView
@@ -1618,12 +1619,15 @@ def build_window() -> object:
             ui_settings.remember_launcher(game, server_dir, account=name)
 
         # One controller per runtime (`single_controller.SingleServer`): the container's,
-        # or the host programs' for a `process` install (DFO).
-        controller: SingleServer = (
-            ProcessController(entry, server_dir)
-            if entry.install.process is not None
-            else SingleController(entry, server_dir)
-        )
+        # the host programs' for a `process` install (DFO), or the compose project's for
+        # a `stack` install (FFXI).
+        controller: SingleServer
+        if entry.install.process is not None:
+            controller = ProcessController(entry, server_dir)
+        elif entry.install.stack is not None:
+            controller = StackController(entry, server_dir)
+        else:
+            controller = SingleController(entry, server_dir)
         view = SingleServerView(
             entry,
             controller,

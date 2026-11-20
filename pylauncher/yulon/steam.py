@@ -293,12 +293,21 @@ STEAMID64_BASE = 76561197960265728
 
 
 def most_recent_account(userdata: Path) -> str | None:
-    """The account id Steam's `config/loginusers.vdf` (beside `userdata`) marks MostRecent.
+    """The account that signed in to Steam last, from `config/loginusers.vdf` (beside `userdata`).
 
-    None when the file is missing or unreadable, or marks no account or more than one.
     Steam sets `MostRecent` on the account that signed in last; a stale profile left by
     another account does not have it (Joshua's main Deck: account 341514174's folder is
     newer than the real one's, so a folder's date is not the answer).
+
+    1. Exactly one account marked `MostRecent "1"`: that account. This is checked first.
+    2. Two or more marked: None.
+    3. None marked (a newer Steam writes no `MostRecent` at all, only a `timestamp` per
+       account, the time of its last sign-in): the account with the newest `timestamp`,
+       but only when EVERY account has one and the newest is strictly newer than the
+       next. A tie, or an account with no timestamp, is None.
+
+    None also when the file is missing or unreadable, or lists no account. The caller
+    treats None as "Steam does not say" and refuses rather than guessing.
     """
     try:
         text = (userdata.parent / "config" / "loginusers.vdf").read_text(
@@ -306,14 +315,22 @@ def most_recent_account(userdata: Path) -> str | None:
         )
     except OSError:
         return None
+    blocks = re.findall(r'"(\d{17})"\s*\{([^{}]*)\}', text)
     recent = [
-        match.group(1)
-        for match in re.finditer(r'"(\d{17})"\s*\{([^{}]*)\}', text)
-        if re.search(r'"mostrecent"\s*"1"', match.group(2), re.IGNORECASE)
+        steamid for steamid, body in blocks if re.search(r'"mostrecent"\s*"1"', body, re.IGNORECASE)
     ]
-    if len(recent) != 1:
+    if recent:
+        return str(int(recent[0]) - STEAMID64_BASE) if len(recent) == 1 else None
+    stamped: list[tuple[int, str]] = []
+    for steamid, body in blocks:
+        stamp = re.search(r'"timestamp"\s*"(\d+)"', body, re.IGNORECASE)
+        if stamp is None:
+            return None
+        stamped.append((int(stamp.group(1)), steamid))
+    stamped.sort(reverse=True)
+    if not stamped or (len(stamped) > 1 and stamped[0][0] == stamped[1][0]):
         return None
-    return str(int(recent[0]) - STEAMID64_BASE)
+    return str(int(stamped[0][1]) - STEAMID64_BASE)
 
 
 def find_profile(home: Path) -> Path:
@@ -323,7 +340,9 @@ def find_profile(home: Path) -> Path:
     was read from, two of the three roots are the same directory through a
     symlink and a naive count answers "two profiles" for one account. With more
     than one account, the one Steam marks as signed in last is the answer
-    (`most_recent_account()`); with none marked, it refuses, as before.
+    (`most_recent_account()`: the one marked `MostRecent`, else the one with the strictly
+    newest login `timestamp`); when Steam does not say, or the account it names has no
+    profile here, it refuses, as before.
     """
     found: dict[Path, Path] = {}
     for root in steam_roots(home):

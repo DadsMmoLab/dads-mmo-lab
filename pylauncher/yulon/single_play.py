@@ -12,15 +12,16 @@ The client is the player's own (README §3a); this module only ever reads its fo
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from yulon import platform, play_launch
+from yulon import loader_account, platform, play_launch, single_client
 from yulon.catalog import composegen
-from yulon.catalog.catalog import SingleEntry
+from yulon.catalog.catalog import LoaderLogin, SingleEntry
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -85,7 +86,8 @@ def launch_spec(
             f"There is no {entry.play.exe} in {client_dir}, so nothing was started. Choose "
             f"{entry.play.client}."
         )
-    problem = check_account(account)
+    # A WoW client asks for the account at its own login screen (`SinglePlay.account`).
+    problem = check_account(account) if entry.play.account else None
     if problem is not None:
         raise PlayRefusal(problem)
     name = entry.name
@@ -103,6 +105,149 @@ def launch_spec(
         )
     except play_launch.LaunchRefusal as exc:
         raise PlayRefusal(str(exc)) from exc
+
+
+LOADER_ON_WINDOWS_ONLY = (
+    "Play starts {loader} on Windows only, for now. On Linux, start {loader} through Proton "
+    "yourself, pointed at 127.0.0.1; a Steam Deck Play button for {name} comes next."
+)
+
+
+def loader_spec(
+    entry: SingleEntry,
+    server_dir: Path,
+    *,
+    host: str,
+    os_name: str | None = None,
+    find: Callable[[SingleEntry], single_client.FoundClient | None] | None = None,
+) -> tuple[play_launch.LaunchSpec, Path]:
+    """What Play starts for an entry whose client a loader starts (FFXI), and the client folder.
+
+    The loader is the install's (`stack_install._fetch_loader()`), the client is the
+    one the registry names (`single_client.find_client()`), and a client older than
+    the pinned server accepts is refused here rather than at its login screen.
+    """
+    play = entry.play
+    if play is None or play.loader is None:
+        raise PlayRefusal(f"{entry.name} has no loader Yu'lon knows how to start.")
+    loader = play.loader
+    here = os_name if os_name is not None else platform.detect()
+    if here != "windows":
+        raise PlayRefusal(LOADER_ON_WINDOWS_ONLY.format(loader=loader.name, name=entry.name))
+    found = (find or (lambda e: single_client.find_client(e, os_name=here)))(entry)
+    if found is None:
+        raise PlayRefusal(single_client.NOT_FOUND.format(name=entry.name))
+    if not (found.folder / play.exe).is_file():
+        raise PlayRefusal(
+            f"The registry names {found.folder} as your {entry.name} client, and there is no "
+            f"{play.exe} in it. Reinstall it with Square Enix's installer, then press Play again."
+        )
+    problem = single_client.version_problem(entry, found.folder)
+    if problem is not None:
+        raise PlayRefusal(problem)
+    exe = server_dir / loader.dest
+    if not exe.is_file():
+        raise PlayRefusal(
+            f"{loader.name} is missing from {exe.parent}. Press Install on the Catalog tab and "
+            "choose this server's folder: it fetches it again and changes nothing else."
+        )
+    tokens = {**entry.port_tokens(), "HOST": host, "CLIENT_LANG": found.lang}
+    args = tuple(composegen.fill(arg, tokens) for arg in loader.args)
+    return play_launch.LaunchSpec(argv=(str(exe), *args), env={}, cwd=exe.parent), found.folder
+
+
+def check_loader_account(entry: SingleEntry, account: str) -> str | None:
+    """Why `account` cannot be signed in through the loader, or None. Empty is allowed.
+
+    An empty name is the loader's own prompt: an account made there, whose password
+    Yu'lon never had (`loader_account`), is still played through Play.
+    """
+    login = _login_of(entry)
+    if not account or login is None:
+        return None
+    return loader_account.check_name(login, account)
+
+
+def sign_in(
+    entry: SingleEntry,
+    host: str,
+    account: str,
+    *,
+    config_dir: Path | None = None,
+    ensure: Callable[..., str] = loader_account.ensure,
+) -> Path:
+    """Make sure `account` is on the server, and write the loader's login file; its path.
+
+    Worker thread: one request to the server's auth port (`loader_account.ensure`).
+    """
+    login = _login_of(entry)
+    if login is None:
+        raise PlayRefusal(f"{entry.name} has no sign-in Yu'lon knows how to do.")
+    problem = loader_account.check_name(login, account)
+    if problem is not None:
+        raise PlayRefusal(problem)
+    assert entry.play is not None and entry.play.loader is not None
+    try:
+        password = ensure(
+            entry.id,
+            login,
+            host=host,
+            port=entry.port(login.port),
+            name=account,
+            loader=entry.play.loader.name,
+            config_dir=config_dir,
+        )
+        return loader_account.write_login_file(
+            entry.id, login, name=account, password=password, config_dir=config_dir
+        )
+    except loader_account.AccountRefusal as exc:
+        raise PlayRefusal(str(exc)) from exc
+    except OSError as exc:
+        raise PlayRefusal(
+            f"Yu'lon could not write {entry.play.loader.name}'s login file: {exc.strerror or exc}"
+        ) from exc
+
+
+def with_login(
+    entry: SingleEntry, spec: play_launch.LaunchSpec, login_file: Path
+) -> play_launch.LaunchSpec:
+    """`spec` with the arguments that tell the loader to sign in from `login_file`."""
+    login = _login_of(entry)
+    if login is None:
+        return spec
+    args = tuple(composegen.fill(arg, {"LOGIN_FILE": str(login_file)}) for arg in login.args)
+    return dataclasses.replace(spec, argv=(*spec.argv, *args))
+
+
+def _login_of(entry: SingleEntry) -> LoaderLogin | None:
+    play = entry.play
+    if play is None or play.loader is None:
+        return None
+    return play.loader.login
+
+
+def start_loader(
+    entry: SingleEntry,
+    spec: play_launch.LaunchSpec,
+    client: Path,
+    *,
+    grant: Callable[[SingleEntry, Path], single_client.GrantReport] = single_client.grant,
+    launch: Callable[[play_launch.LaunchSpec], None] = play_launch.launch_console,
+) -> bool:
+    """Make the game's settings folders the player's (once), then start the loader. Worker thread.
+
+    True when Windows asked the player for administrator rights on the way: the first
+    Play of a client under Program Files. A declined or failed grant starts nothing,
+    because the game would only stop at FFXI-3117 after the player logged in.
+    """
+    report = grant(entry, client)
+    if not report.ok:
+        raise PlayRefusal("\n\n".join(report.problems))
+    try:
+        launch(spec)
+    except OSError as exc:
+        raise PlayRefusal(f"{spec.argv[0]} could not be started: {exc.strerror or exc}") from exc
+    return bool(report.granted)
 
 
 StartElevated = Callable[[play_launch.LaunchSpec], None]

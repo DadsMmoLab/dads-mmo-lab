@@ -3362,12 +3362,15 @@ def test_a_dfo_install_is_remembered_by_its_record_and_never_pinned_as_compose(
 
 
 def test_group_catalog_entries_groups_wow_and_single_franchises_by_acronym() -> None:
-    """Phase K2.1: `Catalog.games` and `Catalog.single` group into WoW, DDON, and DFO."""
+    """Phase K2.1: `Catalog.games` and `Catalog.single` group into WoW, DDON, and DFO.
+
+    WoW Forever, a single server that is a WoW realm, is listed on the WoW card.
+    """
     groups = catalog_view.group_catalog_entries(CATALOG, include_single=True)
-    assert [g.id for g in groups] == ["wow", "ddon", "dfo"]
-    assert [g.title for g in groups] == ["WoW", "DDON", "DFO"]
-    assert len(groups[0].entries) == len(CATALOG.games)
-    assert groups[0].subtitle == f"{len(CATALOG.games)} Server Cores"
+    assert [g.id for g in groups] == ["wow", "ddon", "dfo", "ffxi"]
+    assert [g.title for g in groups] == ["WoW", "DDON", "DFO", "FFXI"]
+    assert groups[0].entries == (*CATALOG.games, CATALOG.get_single("wow-forever"))
+    assert groups[0].subtitle == f"{len(CATALOG.games) + 1} Server Cores"
     assert groups[1].entries == (CATALOG.get_single("ddon"),)
     assert groups[2].entries == (CATALOG.get_single("dfo"),)
     assert "Beta" in groups[2].subtitle
@@ -3431,7 +3434,7 @@ def test_two_stage_catalog_drill_down_and_upper_left_back_button(
         assert view.active_group_id is None
         assert view.back_button.isVisibleTo(view) is False
         assert view.back_button.property(catalog_view.BACK_ACTION_PROPERTY) is True
-        assert [g.id for g in view.game_groups] == ["wow", "ddon", "dfo"]
+        assert [g.id for g in view.game_groups] == ["wow", "ddon", "dfo", "ffxi"]
 
         wow_card = view.boxart_card_for("wow")
         ddon_card = view.boxart_card_for("ddon")
@@ -3450,7 +3453,8 @@ def test_two_stage_catalog_drill_down_and_upper_left_back_button(
             assert tile is not None and tile.isVisibleTo(view) is True
         for single in CATALOG.single:
             tile = view.findChild(QWidget, f"catalog-tile-{single.id}")
-            assert tile is not None and tile.isVisibleTo(view) is False
+            on_the_wow_card = single.id == "wow-forever"  # a WoW realm (`group_catalog_entries`)
+            assert tile is not None and tile.isVisibleTo(view) is on_the_wow_card
 
         # Return to Stage 0 via upper-left Back button
         view.back_button.click()

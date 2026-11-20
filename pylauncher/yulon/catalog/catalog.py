@@ -721,7 +721,7 @@ class AzerothCoreData(_Strict):
     realm_types: tuple[AcRealmType, ...] = Field(
         default=(),
         description=(
-            "The realm types this entry may switch between (T812). Empty: one realm, as " "before."
+            "The realm types this entry may switch between (T812). Empty: one realm, as before."
         ),
     )
     default_realm_type: str | None = Field(
@@ -772,7 +772,7 @@ class AzerothCoreData(_Strict):
     def _a_default_realm_type_is_a_listed_one(self) -> AzerothCoreData:
         if self.realm_types and self.default_realm_type is None:
             raise ValueError(
-                "an entry with realm types names its default realm type " "(default_realm_type)"
+                "an entry with realm types names its default realm type (default_realm_type)"
             )
         if self.default_realm_type is not None:
             if not self.realm_types:
@@ -1599,7 +1599,7 @@ class RerunnableModule(_Strict):
         ):
             raise ValueError(f"reason names no command, got {value!r}")
         if "\n" in value or not value.endswith("."):
-            raise ValueError("reason must be one sentence ending in a full stop, " f"got {value!r}")
+            raise ValueError(f"reason must be one sentence ending in a full stop, got {value!r}")
         return value
 
 
@@ -3430,13 +3430,11 @@ class PackSource(_Strict):
             or self.version_url is not None
         ):
             raise ValueError(
-                "a github_release source names a repo and an asset, "
-                "and no path, url or version_url"
+                "a github_release source names a repo and an asset, and no path, url or version_url"
             )
         if self.kind != "github_release" and (self.repo is not None or self.asset is not None):
             raise ValueError(
-                f"a {self.kind} source names no repo or asset: those are a "
-                "github_release source's"
+                f"a {self.kind} source names no repo or asset: those are a github_release source's"
             )
         if self.kind == "url" and (self.url is None or self.path is not None):
             raise ValueError("a url source names a url, and no path")
@@ -4098,7 +4096,7 @@ class Client(_Strict):
         default=None,
         pattern=r"^[A-Za-z0-9_.,;=-]+$",
         description=(
-            "The `WINEDLLOVERRIDES` value Play runs the client with (T812). " "None: no overrides."
+            "The `WINEDLLOVERRIDES` value Play runs the client with (T812). None: no overrides."
         ),
     )
     notes: tuple[str, ...] = ()
@@ -4484,7 +4482,7 @@ class Operations(_Strict):
         keys = self.enable_env or (self.enable_conf.keys if self.enable_conf else {})
         if self.channel == "soap" and not any("SOAP" in key.upper() for key in keys):
             raise ValueError(
-                "a soap channel must name the key that turns SOAP on; " f"these are {sorted(keys)}"
+                f"a soap channel must name the key that turns SOAP on; these are {sorted(keys)}"
             )
         return self
 
@@ -5246,28 +5244,299 @@ class SingleProcess(_Strict):
         return self.toolchain
 
 
-SingleRuntime = SingleNative | SingleProcess
+PINNED_IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$")
+"""An image reference pinned by digest: `ghcr.io/landsandboat/server@sha256:<64 hex>`.
+
+A tag is a name the publisher may move to other bytes at any time (LandSandBoat's
+`latest` is rebuilt on every merge to `base`); a digest is the bytes themselves. So a
+stack server's images are named by digest alone, and what was measured is what runs.
+"""
+
+
+class PinnedImage(_Strict):
+    """One published image a stack server runs, pinned by digest, and what it is for."""
+
+    role: Slug = Field(description="What the image is for, as a slug: `server`, `database`.")
+    ref: str = Field(description="The image, pinned by digest (`PINNED_IMAGE`).")
+    label: str = Field(min_length=1, description="What the install log calls it.")
+
+    @field_validator("ref")
+    @classmethod
+    def _ref_is_pinned_by_digest(cls, value: str) -> str:
+        if not PINNED_IMAGE.match(value):
+            raise ValueError(
+                f"stack.images ref must be pinned by digest (<name>@sha256:<64 hex>), got {value!r}"
+            )
+        return value
+
+
+class StackService(_Strict):
+    """One compose service of a stack server: its container, its image and its ready lines."""
+
+    service: Slug = Field(description="The compose service, as the templates name it.")
+    container: Slug = Field(description="Its container's name, global to the Docker daemon.")
+    image: Slug = Field(description="The `role` of the `stack.images` entry it runs.")
+    ready: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Lines that must ALL appear in this container's current run before the server "
+            "counts as up. Empty for a service that is not a listener."
+        ),
+    )
+    once: bool = Field(
+        default=False,
+        description=(
+            "The service runs to completion at each start and exits 0 (LandSandBoat's "
+            "`dbtool.py update`), so `exited` is how it reads when all is well."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_one_shot_has_no_ready_lines(self) -> StackService:
+        if self.once and self.ready:
+            raise ValueError(
+                f"stack service {self.service} runs once and exits, so it has no ready lines"
+            )
+        return self
+
+
+class VolumeSeed(_Strict):
+    """Data a published image carries for the stack's volumes, copied in once at install.
+
+    LandSandBoat ships its navigation meshes as a separate image whose only command
+    copies them into two volumes (upstream's docker README: `docker run --rm -v
+    navmeshes:/navmeshes -v ximeshes:/ximeshes ghcr.io/landsandboat/ximeshes`). The
+    templates declare that run as a compose service under a profile `up` never starts,
+    so the volumes it fills are this install's project volumes, and the engine runs it
+    as `compose run --rm` once.
+    """
+
+    service: Slug = Field(description="The compose service that copies the data.")
+    image: Slug = Field(description="The `role` of the `stack.images` entry it runs.")
+    what: str = Field(min_length=1, description="What the install log says it is copying.")
+
+
+class StackDownload(_Strict):
+    """A file the install fetches into the install folder at a pinned size and sha256.
+
+    WoW Forever's world database is a release archive of its own (Karrz's
+    `TDB_full_forever_*.7z`, 147 MB), not part of the server image; a one-shot
+    service unpacks it from `downloads/` at the first start. Fetched from where its
+    makers publish it, never re-hosted.
+    """
+
+    what: str = Field(min_length=1, description="What the install log calls it.")
+    file: VerifiedFile
+    dest: str = Field(min_length=1, description="Where it lands, relative to the server dir.")
+
+    @field_validator("dest")
+    @classmethod
+    def _dest_stays_inside(cls, value: str) -> str:
+        return _inside(value, "stack.downloads.dest", names_a_file=True)
+
+
+CLIENT_MOUNT = "/client"
+"""Where `ClientExtract`'s service sees the player's client folder, read-only."""
+
+
+class ClientExtract(_Strict):
+    """Game data the install extracts from the player's own client, with the server image.
+
+    WoW Forever's server needs maps, vmaps and pathfinding meshes made from the client
+    the player plays (README §3a: the client is the player's, and its data is never
+    downloaded). The templates declare the extractor as a compose service under the
+    seed profile; the engine runs it once as `compose run --rm` with the client folder
+    mounted read-only at `CLIENT_MOUNT`, so what it writes lands in this project's
+    volumes. The install asks for the client folder because of this block, and checks
+    it is the build the server accepts before anything runs.
+    """
+
+    service: Slug = Field(description="The compose service that extracts the data.")
+    image: Slug = Field(description="The `role` of the `stack.images` entry it runs.")
+    what: str = Field(min_length=1, description="What the install log says it is making.")
+    client: str = Field(
+        min_length=1, description="The client the folder picker asks for, in a player's words."
+    )
+    exe: str = Field(
+        min_length=1,
+        description="A file that marks the folder as that client's, relative to it.",
+    )
+    builds: tuple[ClientBuild, ...] = Field(
+        default=(),
+        description=(
+            "The client builds the server accepts, the realm's own first. Empty: any client "
+            "with `exe` is taken."
+        ),
+    )
+
+    @field_validator("exe")
+    @classmethod
+    def _exe_stays_inside_the_client(cls, value: str) -> str:
+        return _inside(value, "stack.client_extract.exe", names_a_file=True)
+
+    @field_validator("builds")
+    @classmethod
+    def _each_build_once(cls, value: tuple[ClientBuild, ...]) -> tuple[ClientBuild, ...]:
+        numbers = [b.build for b in value]
+        if len(set(numbers)) != len(numbers):
+            raise ValueError("stack.client_extract.builds names one build twice")
+        return value
+
+
+class ClientBuild(_Strict):
+    """One client build a stack server accepts, and the size of its marker file when known.
+
+    WoW Forever's realm runs build 70707 and lets later builds of the same game data in
+    (`Realm.AlsoAcceptBuilds`, with a row each in `auth.build_info`), so a player's
+    Battle.net client of a listed build plays as well as the pinned 70707 copy.
+    """
+
+    build: str = Field(pattern=r"^[0-9]+$", description="The build `.build.info` names.")
+    exe_size: int | None = Field(
+        default=None, gt=0, description="`exe`'s size in bytes in that build, where measured."
+    )
+
+
+class SingleStack(_Strict):
+    """What the stack engine reads: published images run as several compose services.
+
+    The third runtime of the catalog's second kind. LandSandBoat's FFXI server is five
+    programs (connect, search, profile, world and map) beside a MariaDB, and its
+    project publishes an image of every build; so nothing is cloned or built here. The
+    images are pulled at the digests below, the stack's secrets are generated once,
+    the compose files are rendered from `templates`, the seed is copied into the
+    volumes, and `compose up` starts the lot in the order the templates' `depends_on`
+    gives it.
+    """
+
+    family: Literal["landsandboat", "forevercore"] = Field(
+        description=(
+            "The emulator lineage: LandSandBoat's published server image with its database "
+            "in MariaDB, or ForeverCore (WoW Forever: worldserver and bnetserver from one "
+            "image, MySQL beside them)."
+        )
+    )
+    templates: str = Field(
+        min_length=1,
+        description="The folder under catalog/installers/ holding the two compose templates.",
+    )
+    source: str = Field(
+        min_length=1,
+        description=(
+            "The `dest` of the emulator source the pinned server image was built from. "
+            "Never cloned: it names the code the image is, for the people who read the entry."
+        ),
+    )
+    images: tuple[PinnedImage, ...] = Field(min_length=1)
+    services: tuple[StackService, ...] = Field(min_length=1)
+    seed: VolumeSeed | None = None
+    downloads: tuple[StackDownload, ...] = Field(
+        default=(), description="Files fetched into the install folder before the first start."
+    )
+    client_extract: ClientExtract | None = Field(
+        default=None,
+        description="Game data made from the player's own client at install; asks for its folder.",
+    )
+    secrets: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Variables of the stack's .env the engine generates once, at random, and never "
+            "rewrites: the database passwords."
+        ),
+    )
+    ready_seconds: int = Field(
+        default=600, gt=0, description="How long a start may take to print every ready line."
+    )
+
+    @field_validator("templates")
+    @classmethod
+    def _templates_stay_inside_the_installers(cls, value: str) -> str:
+        return _inside(value, "stack.templates", names_a_file=True)
+
+    @field_validator("secrets")
+    @classmethod
+    def _secrets_are_variable_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for name in value:
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+                raise ValueError(f"stack.secrets names a variable as {name!r}; use A-Z, 0-9, _")
+        if len(set(value)) != len(value):
+            raise ValueError("stack.secrets names one variable twice")
+        return value
+
+    @model_validator(mode="after")
+    def _every_name_once_and_every_image_known(self) -> SingleStack:
+        roles = [image.role for image in self.images]
+        if len(set(roles)) != len(roles):
+            raise ValueError("stack.images names one role twice")
+        extract = self.client_extract
+        services = [s.service for s in self.services]
+        services += [self.seed.service] if self.seed is not None else []
+        services += [extract.service] if extract is not None else []
+        if len(set(services)) != len(services):
+            raise ValueError(
+                "stack services (and the seed and the client extract) name one service twice"
+            )
+        containers = [s.container for s in self.services]
+        if len(set(containers)) != len(containers):
+            raise ValueError("stack services name one container twice")
+        dests = [d.dest for d in self.downloads]
+        if len(set(dests)) != len(dests):
+            raise ValueError("stack.downloads land two files at one dest")
+        used = [(s.service, s.image) for s in self.services]
+        used += [(self.seed.service, self.seed.image)] if self.seed is not None else []
+        used += [(extract.service, extract.image)] if extract is not None else []
+        for service, role in used:
+            if role not in roles:
+                raise ValueError(
+                    f"stack service {service} runs image {role!r}, which is not listed"
+                )
+        if not any(s.ready for s in self.services):
+            raise ValueError("a stack names at least one ready line, or no start can finish")
+        return self
+
+    @property
+    def ready(self) -> tuple[str, ...]:
+        """Every service's ready lines, in catalog order (the token checks read these)."""
+        return tuple(line for service in self.services for line in service.ready)
+
+    def image(self, role: str) -> PinnedImage:
+        """The pinned image of `role`; `KeyError` if the stack lists none."""
+        for image in self.images:
+            if image.role == role:
+                return image
+        raise KeyError(role)
+
+    @property
+    def listeners(self) -> tuple[StackService, ...]:
+        """The services that keep running once the stack is up (every one but the one-shots)."""
+        return tuple(s for s in self.services if not s.once)
+
+
+SingleRuntime = SingleNative | SingleProcess | SingleStack
 
 
 class SingleInstall(_Strict):
     """How a single server is installed: where, on which platforms, and in which runtime.
 
-    Exactly one of `native` (one container, DDON) and `process` (host programs,
-    DFO). Two fields rather than one union, so the JSON says which it is in the
-    key a reader looks for and an entry naming both is refused by name.
+    Exactly one of `native` (one container, DDON), `process` (host programs, DFO) and
+    `stack` (published images run as several services, FFXI). Fields rather than one
+    union, so the JSON says which it is in the key a reader looks for and an entry
+    naming two is refused by name.
     """
 
     default_server_dir: str = Field(min_length=1, description="Default dir name under $HOME")
     platforms: tuple[PlatformId, ...] = Field(min_length=1)
     native: SingleNative | None = None
     process: SingleProcess | None = None
+    stack: SingleStack | None = None
 
     @model_validator(mode="after")
     def _exactly_one_runtime(self) -> SingleInstall:
-        if (self.native is None) == (self.process is None):
+        named = [block for block in (self.native, self.process, self.stack) if block is not None]
+        if len(named) != 1:
             raise ValueError(
-                "a single server's install names exactly one of `native` (one container) and "
-                "`process` (host programs)"
+                "a single server's install names exactly one of `native` (one container), "
+                "`process` (host programs) and `stack` (published images, several services)"
             )
         return self
 
@@ -5276,8 +5545,15 @@ class SingleInstall(_Strict):
         """The one runtime block this install has."""
         if self.native is not None:
             return self.native
-        assert self.process is not None  # `_exactly_one_runtime`
-        return self.process
+        if self.process is not None:
+            return self.process
+        assert self.stack is not None  # `_exactly_one_runtime`
+        return self.stack
+
+    @property
+    def client_extract(self) -> ClientExtract | None:
+        """The game data this install makes from the player's client, if it makes any."""
+        return self.stack.client_extract if self.stack is not None else None
 
     def supports(self, platform_id: str) -> bool:
         """True if this entry can be installed on `platform_id` (`platform.detect()`) at all."""
@@ -5390,6 +5666,235 @@ class SingleGamingMode(_Strict):
         return f"{self.stop}.sh"
 
 
+class VerifiedFile(_Strict):
+    """One file fetched over HTTPS and used only at exactly this size and sha256.
+
+    `VerifiedArchive`'s rule for a download that is not a zip: a release asset that is
+    the program itself (xiloader's `xiloader.exe`).
+    """
+
+    url: str = Field(min_length=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size: int = Field(gt=0, description="Bytes; a download of any other size is refused unread.")
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_https(cls, value: str) -> str:
+        return _https_url(value, "file.url")
+
+
+LOADER_TOKENS: tuple[str, ...] = ("HOST", "CLIENT_LANG")
+"""The `{{TOKEN}}`s a `PlayLoader` argument may spell besides each port's `port_token()`.
+
+`HOST` is the address the loader dials, and `CLIENT_LANG` the language number of the
+client install the registry names (`ClientRegistry`), which the loader must be told.
+"""
+
+
+LOGIN_FILE_TOKENS: tuple[str, ...] = ("ACCOUNT", "PASSWORD")
+"""The `{{TOKEN}}`s a `LoaderLogin.file` value may spell: the account Play signs in as."""
+
+LOGIN_ARG_TOKENS: tuple[str, ...] = ("LOGIN_FILE",)
+"""The `{{TOKEN}}`s a `LoaderLogin.args` argument may spell: where the login file is."""
+
+
+class LoaderLogin(_Strict):
+    """How Play signs the player in through the loader, so the player only names an account.
+
+    LandSandBoat's connect server makes accounts on its auth port: TLS, one JSON request
+    a connection, the protocol xiloader 2.2 speaks itself (`loader_account.py`). So Play
+    makes the account there the first time a name is used, with a password Yu'lon makes
+    and keeps, and hands the loader both in a file of its own (`file`, named by `args`),
+    never on a command line another program can read. An empty name skips all of it:
+    the loader then asks at its own prompt, for an account made there.
+    """
+
+    protocol: Literal["landsandboat-auth"]
+    port: str = Field(min_length=1, description="The port role the server makes accounts on.")
+    loader_version: tuple[int, int, int] = Field(
+        description="The loader version the request carries; the server refuses any other."
+    )
+    name_min: int = Field(ge=1, description="The shortest account name the loader accepts.")
+    name_max: int = Field(ge=1, description="The longest account name the loader accepts.")
+    password_length: int = Field(
+        ge=12, le=32, description="The length of the password Yu'lon makes for an account."
+    )
+    file: dict[str, str | bool] = Field(
+        min_length=1,
+        description="The loader's login file: JSON keys, each string taking LOGIN_FILE_TOKENS.",
+    )
+    args: tuple[str, ...] = Field(
+        min_length=1, description="What tells the loader to read the file: LOGIN_ARG_TOKENS."
+    )
+
+    @model_validator(mode="after")
+    def _the_file_carries_the_account_and_the_args_name_it(self) -> LoaderLogin:
+        if self.name_min > self.name_max:
+            raise ValueError("play.loader.login.name_min is longer than name_max")
+        spelled = {
+            token
+            for value in self.file.values()
+            if isinstance(value, str)
+            for token in _TEMPLATE_TOKEN.findall(value)
+        }
+        if not set(LOGIN_FILE_TOKENS) <= spelled:
+            raise ValueError(
+                "play.loader.login.file must spell {{ACCOUNT}} and {{PASSWORD}}, or the "
+                "loader would sign in as nobody"
+            )
+        unknown = spelled - set(LOGIN_FILE_TOKENS)
+        if unknown:
+            raise ValueError(
+                f"play.loader.login.file spells {sorted(unknown)}; it fills only "
+                f"{list(LOGIN_FILE_TOKENS)}"
+            )
+        if not any("{{LOGIN_FILE}}" in arg for arg in self.args):
+            raise ValueError("play.loader.login.args must spell {{LOGIN_FILE}}")
+        for arg in self.args:
+            for token in _TEMPLATE_TOKEN.findall(arg):
+                if token not in LOGIN_ARG_TOKENS:
+                    raise ValueError(
+                        f"play.loader.login argument {arg!r} spells {{{{{token}}}}}; the "
+                        f"login's arguments fill only {list(LOGIN_ARG_TOKENS)}"
+                    )
+        return self
+
+
+class PlayLoader(_Strict):
+    """The program Play starts in place of the client: it logs in, then loads the client.
+
+    FFXI's client is started by PlayOnline, which only knows Square Enix's servers;
+    LandSandBoat's xiloader (GPL-3.0) stands in for PlayOnline, logs the player in to
+    the server named on its command line and loads the client's own modules. It is
+    open source and not the game, so the install fetches it at a pinned sha256, the
+    way the process runtime fetches its Go toolchain; the client stays the player's.
+    """
+
+    name: str = Field(min_length=1, description="The loader's name, as a player reads it.")
+    file: VerifiedFile
+    dest: str = Field(min_length=1, description="Where it lands, relative to the server dir.")
+    args: tuple[str, ...] = Field(
+        default=(), description="Its arguments; each takes LOADER_TOKENS and PORT_<ROLE>."
+    )
+    login: LoaderLogin | None = Field(
+        default=None,
+        description="How Play makes the account and signs in, so the loader asks nothing.",
+    )
+
+    @field_validator("dest")
+    @classmethod
+    def _dest_stays_inside(cls, value: str) -> str:
+        return _inside(value, "play.loader.dest", names_a_file=True)
+
+
+class RegistryRegion(_Strict):
+    """One registry key a client install may live under, and the language it means."""
+
+    key: str = Field(
+        pattern=r"^SOFTWARE\\[A-Za-z0-9_\\]+$",
+        description="Under HKEY_LOCAL_MACHINE, in the 32-bit view: SOFTWARE\\PlayOnlineUS.",
+    )
+    lang: str = Field(pattern=r"^[0-9]+$", description="The loader's language number for it.")
+    label: str = Field(min_length=1, description="What a player calls it: 'US'.")
+
+
+class ClientRegistry(_Strict):
+    """Where Windows' registry says the player's client is, so Play never asks for a folder.
+
+    FFXI's installer records its folder in HKLM (`PlayOnlineUS\\InstallFolder`, value
+    `0001`, in the 32-bit view: `WOW6432Node` on 64-bit Windows), and xiloader reads it
+    from there itself. So the tab reads the same value to show the player which client
+    will start, and refuses Play before xiloader would fail on a missing one.
+    """
+
+    regions: tuple[RegistryRegion, ...] = Field(min_length=1)
+    subkey: str = Field(min_length=1, description="The key under a region that holds the folder.")
+    value: str = Field(min_length=1, description="The value naming the client's folder.")
+
+
+class ClientVersion(_Strict):
+    """The client version the pinned server accepts, and the file that says the client's.
+
+    LandSandBoat refuses a client older than its `CLIENT_VER` (`VER_LOCK` 2: this
+    version or newer). The client's own version is the newest `YYYYMMDD_N` in its
+    patch list after PlayOnline has updated it (`patch2.cfg`: 30261006_0 on
+    2026-10-17, the version the title screen showed).
+    """
+
+    minimum: str = Field(
+        pattern=r"^\d{8}_\d+$", description="The oldest version the server accepts."
+    )
+    file: str = Field(min_length=1, description="The client's patch list, relative to its folder.")
+
+    @field_validator("file")
+    @classmethod
+    def _file_stays_inside_the_client(cls, value: str) -> str:
+        return _inside(value, "play.version.file", names_a_file=True)
+
+
+class ForeverLogin(_Strict):
+    """How a WoW Forever client (build 70707) logs in to this realm instead of Blizzard's.
+
+    The client dials the Battle.net name in its config's `portal`, checks the server's
+    TLS certificate against the computer's trusted roots, and accepts the server's
+    login key only if it is one of the 12 public keys it holds in memory. So Play
+    (`forever_play.py`, after Karrz's Play-WoWForever.ps1, GPL-2): trusts this
+    install's CA once (one administrator prompt, `forever_trust.py`), writes `config`
+    into the client's WTF folder (a copy of Config.wtf with this `portal`; Config.wtf
+    itself is not touched), starts the client with `play.args` naming that file, and
+    writes `public_key` into the in-memory record of `region_group` while the game runs
+    (`forever_key.py`). Nothing on disk in the client is patched.
+    """
+
+    config: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+\.wtf$",
+        description="The config file Play writes into the client's WTF folder and starts with.",
+    )
+    portal: str = Field(
+        pattern=r"^[a-z0-9.-]+$",
+        description="The Battle.net name the client dials (hosts maps it).",
+    )
+    public_key: str = Field(
+        pattern=r"^[0-9A-F]{64}$",
+        description="The server's login public key, 32 bytes in hex (stock TrinityCore's).",
+    )
+    region_group: int = Field(
+        ge=1,
+        le=12,
+        description="The record the server announces (Network.EnterEncryptedModeRegionGroup).",
+    )
+    ca: str = Field(
+        min_length=1,
+        description="The install's CA certificate to trust, relative to the server dir.",
+    )
+    account_domain: str = Field(
+        pattern=r"^[a-z0-9.-]+$",
+        description=(
+            "The domain of the e-mail-style account name Play makes on the realm. bnetserver "
+            "adds `@<LoginREST.DefaultAccountDomain>` (0.1.36: `local`) to a name typed without "
+            "one, so with `local` the player types only `account_name`."
+        ),
+    )
+    account_name: str = Field(
+        default="player",
+        pattern=r"^[a-z0-9_]{3,16}$",
+        description="The account Play makes, before the `@`: what the player types at login.",
+    )
+    account_password: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9]{4,16}$",
+        description=(
+            "A fixed password for that account: the realm listens on 127.0.0.1 only, so a "
+            "simple one costs nothing. None: Play makes a random one and keeps it."
+        ),
+    )
+
+    @field_validator("ca")
+    @classmethod
+    def _ca_stays_inside(cls, value: str) -> str:
+        return _inside(value, "play.forever.ca", names_a_file=True)
+
+
 class SinglePlay(_Strict):
     """How Play starts this game's client: an executable in the player's folder, with arguments.
 
@@ -5397,9 +5902,16 @@ class SinglePlay(_Strict):
     fetches one. DDON's client takes the server's addresses and the account on its
     command line, so the arguments are data here and Play writes nothing into the
     client folder. `launcher`, when there is one, is the exception the player asks for.
+    A `loader` (FFXI's xiloader) is started in place of the client, which it loads.
     """
 
-    exe: str = Field(min_length=1, description="The executable, relative to the client folder.")
+    exe: str = Field(
+        min_length=1,
+        description=(
+            "The executable, relative to the client folder; with a `loader`, the client's "
+            "own module the loader loads, which marks the folder as the client's."
+        ),
+    )
     args: tuple[str, ...] = Field(
         default=(),
         description="Arguments, each taking HOST, ACCOUNT and every port's PORT_<ROLE> token.",
@@ -5415,11 +5927,77 @@ class SinglePlay(_Strict):
         default=None,
         description="The Steam Deck Gaming Mode scripts and shortcuts the server's tab can add.",
     )
+    loader: PlayLoader | None = Field(
+        default=None,
+        description="A program Play starts in place of the client, which loads the client.",
+    )
+    registry: ClientRegistry | None = Field(
+        default=None,
+        description="Where Windows' registry names the client's folder; no folder picker then.",
+    )
+    writable: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Folders in the client folder the game writes at play, which an install under "
+            "Program Files gives only administrators; the first Play grants them once."
+        ),
+    )
+    version: ClientVersion | None = None
+    account: bool = Field(
+        default=True,
+        description=(
+            "Whether Play asks for an account name. False for a client that asks for it at "
+            "its own login screen, as a WoW client does."
+        ),
+    )
+    forever: ForeverLogin | None = Field(
+        default=None,
+        description="WoW Forever's login: the CA to trust, the portal config, the key Play writes.",
+    )
 
     @field_validator("exe")
     @classmethod
     def _exe_stays_inside_the_client(cls, value: str) -> str:
         return _inside(value, "play.exe", names_a_file=True)
+
+    @model_validator(mode="after")
+    def _a_forever_login_starts_with_its_config(self) -> SinglePlay:
+        """The client starts with the config the login writes, and asks its own account."""
+        if self.forever is None:
+            return self
+        if self.loader is not None:
+            raise ValueError("play.forever starts the client itself; it takes no `loader`")
+        if self.account:
+            raise ValueError("play.forever's client asks for the account at its login screen")
+        if tuple(self.args) != ("-config", self.forever.config):
+            raise ValueError(
+                f"play.forever writes {self.forever.config}, so play.args must be "
+                f"['-config', '{self.forever.config}']"
+            )
+        return self
+
+    @field_validator("writable")
+    @classmethod
+    def _writable_folders_stay_inside_the_client(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for folder in value:
+            _inside(folder, "play.writable", names_a_file=True)
+        return value
+
+    @model_validator(mode="after")
+    def _a_loader_starts_with_what_it_is_given(self) -> SinglePlay:
+        """A loader replaces the client's arguments, and its language needs the registry."""
+        if self.loader is None:
+            return self
+        if self.args:
+            raise ValueError(
+                "play.args are the client's; a `loader` takes its own play.loader.args"
+            )
+        spells_lang = any("{{CLIENT_LANG}}" in arg for arg in self.loader.args)
+        if spells_lang and self.registry is None:
+            raise ValueError(
+                "play.loader.args spell {{CLIENT_LANG}}, which only `play.registry` can fill"
+            )
+        return self
 
 
 class SingleEntry(_Strict):
@@ -5484,13 +6062,24 @@ class SingleEntry(_Strict):
             self.container is not None or self.service is not None
         ):
             raise ValueError(f"{self.id}: a `process` install runs no container to name")
+        if self.install.stack is not None and (
+            self.container is not None or self.service is not None
+        ):
+            raise ValueError(
+                f"{self.id}: a `stack` install names its containers in stack.services, not here"
+            )
         return self
 
     @model_validator(mode="after")
     def _the_checkout_is_a_source(self) -> SingleEntry:
-        """The runtime's `checkout` is a `dest` of `emulator.sources`, or the build has no tree."""
+        """The runtime's `checkout` is a `dest` of `emulator.sources`, or the build has no tree.
+
+        A `stack` builds nothing, so its `source` (the code its image was built from)
+        is held to the same rule: a name the entry's sources do not list says nothing.
+        """
         dests = {source.dest for source in self.emulator.sources}
-        checkout = self.install.runtime.checkout
+        runtime = self.install.runtime
+        checkout = runtime.source if isinstance(runtime, SingleStack) else runtime.checkout
         if checkout not in dests:
             raise ValueError(
                 f"{self.id}: the install's checkout is {checkout!r}, which is not a dest of any "
@@ -5546,6 +6135,17 @@ class SingleEntry(_Strict):
         if self.play is not None:
             known = ports | set(SINGLE_PLAY_TOKENS)
             checks += [(f"play argument {arg!r}", arg, known) for arg in self.play.args]
+            if self.play.loader is not None:
+                loaded = ports | set(LOADER_TOKENS)
+                checks += [
+                    (f"loader argument {arg!r}", arg, loaded) for arg in self.play.loader.args
+                ]
+                login = self.play.loader.login
+                if login is not None and login.port not in {p.role for p in self.ports}:
+                    raise ValueError(
+                        f"{self.id}: play.loader.login.port {login.port!r} is not one of "
+                        "this entry's port roles"
+                    )
             if self.play.launcher is not None:
                 dialled = ports | set(SINGLE_LAUNCHER_TOKENS)
                 checks += [
@@ -5579,6 +6179,13 @@ class SingleEntry(_Strict):
     def published_host_ports(self) -> dict[int, str]:
         """Every host port this entry binds, each with what it is for (`Catalog`'s checks)."""
         return {p.port: p.label for p in self.ports}
+
+    def containers(self) -> tuple[str, ...]:
+        """Every container name this entry runs: a `native` one's, or each `stack` service's."""
+        stack = self.install.stack
+        if stack is not None:
+            return tuple(service.container for service in stack.services)
+        return () if self.container is None else (self.container,)
 
 
 class Catalog(_Strict):
@@ -5624,13 +6231,19 @@ class Catalog(_Strict):
             for number in game.published_host_ports():
                 ports.setdefault(number, game.id)
         for entry in self.single:
-            if entry.container is not None:
-                if entry.container in names:
+            for container in entry.containers():
+                if container in names:
                     raise ValueError(
-                        f"{entry.id} names the container {entry.container!r}, which "
-                        f"{names[entry.container]} already names; each needs its own"
+                        f"{entry.id} names the container {container!r}, which "
+                        f"{names[container]} already names; each needs its own"
                     )
-                names[entry.container] = entry.id
+                names[container] = entry.id
+            stack = entry.install.stack
+            if stack is not None and stack.family == "forevercore":
+                # One realm at a time, on purpose: Start refuses while a port is held. WoW
+                # Forever is a WoW realm like the WoW pairs: its client always dials 1119,
+                # and its world port is the realmlist row's 8085.
+                continue
             for number, what in entry.published_host_ports().items():
                 if number in ports:
                     raise ValueError(
