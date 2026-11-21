@@ -16,6 +16,18 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- WoW Forever: Yu'lon makes the login certificate itself, trusted only for the game's login name, with no CA key kept.
+- WoW Forever: an install with the old, broader certificate gets the narrow one on its next **Play**, in the same prompt.
+- WoW Forever: **Play** makes its certificate again when it has to, and a failed attempt keeps the old one.
+- Removing a WoW Forever server takes its certificate and its hosts line off this computer.
+- Removing a WoW Forever server asks for nothing when there is nothing to undo, and keeps a hosts line another one uses.
+- WoW Forever: **Play** starts one game at a time and gives the login only to the game it started.
+- WoW Forever: the login name is added to your hosts file even when its path has a space in it.
+- WoW Forever on a Steam Deck finds the game on any Wine drive, so logging in works again.
+- WoW Forever on a Steam Deck takes a remade certificate into the game's prefix, and drops the old one.
+- **Play** on an FFXI server installed in **Program Files (x86)** can make the game's folders writable.
+- A game folder whose name holds characters like & is refused instead of reaching an administrator command.
+- A server's saved passwords stay readable only by you, even after a restore from a backup.
 
 ### Changed
 
