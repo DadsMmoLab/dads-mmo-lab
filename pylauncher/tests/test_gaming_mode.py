@@ -7,6 +7,7 @@ Deck #2's own values, every script must come out exactly as it was measured ther
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import re
@@ -605,3 +606,81 @@ def test_wow_forever_before_its_first_play_says_press_play_and_writes_nothing(
     with pytest.raises(steam.SteamRefusal, match="Press Play on WoW Forever's tab once first"):
         mode.add(client, "")
     assert not (home / ".local/share/yulon/gaming-mode").exists()
+
+
+# -- WoW Forever tile: the prefix's CA is Play's to import, never the tile's --------------------
+
+_TILE_CA = (
+    "-----BEGIN CERTIFICATE-----\n"
+    + base64.b64encode(b"a certificate body that only needs a thumbprint").decode("ascii")
+    + "\n-----END CERTIFICATE-----\n"
+)
+_TILE_CA_THUMB = (
+    hashlib.sha1(b"a certificate body that only needs a thumbprint").hexdigest().upper()
+)
+
+
+def _tile_ca_block() -> str:
+    """The client script's CA section, from its comment to the login-key section."""
+    text = (resources.installers_dir() / "wow-forever/gaming-mode/wowforever-client.sh").read_text(
+        encoding="utf-8"
+    )
+    start = text.index("# ── The prefix's trust follows the CA (T888)")
+    return text[start : text.index("# ── The login key, from Linux beside")]
+
+
+def _run_tile_ca_block(tmp_path: Path, recorded: str | None) -> subprocess.CompletedProcess[str]:
+    """Run the CA section alone: `fail` and `run_slr` are stubs that record what happened."""
+    server = tmp_path / "server"
+    (server / "certs").mkdir(parents=True)
+    (server / "certs" / "ca.pem").write_text(_TILE_CA, encoding="ascii")
+    prefix = tmp_path / "prefix"
+    prefix.mkdir()
+    if recorded is not None:
+        (prefix / ".yulon-ca-thumbprint").write_text(recorded + "\n", encoding="ascii")
+    script = (
+        'fail() { printf \'FAIL: %s | %s\\n\' "$1" "${2:-}"; exit 1; }\n'
+        "say() { :; }\n"
+        "run_slr() { printf 'RAN: run_slr %s\\n' \"$*\"; }\n"
+        f"SERVER_DIR={server}\nPREFIX={prefix}\nLOGFILE={tmp_path / 'log'}\n"
+        + _tile_ca_block()
+        + "echo LAUNCHED\n"
+    )
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or os.name == "nt", reason="needs POSIX bash")
+@pytest.mark.parametrize("recorded", [None, "0" * 40])
+def test_the_tile_refuses_a_ca_the_prefix_has_not_recorded_and_imports_nothing(
+    tmp_path: Path, recorded: str | None
+) -> None:
+    """Release blocker: the tile used to import an unchecked certs/ca.pem into the prefix.
+
+    Play checks the CA (`forever_trust.verified_ca`) before it imports; the tile has no such
+    check, so a thumbprint that differs from the recorded one now stops the launch and
+    sends the player to Play on the desktop.
+    """
+    result = _run_tile_ca_block(tmp_path, recorded)
+    assert result.returncode == 1
+    assert "FAIL: The server's certificate changed. | Press Play on WoW Forever's tab" in (
+        result.stdout
+    )
+    assert "LAUNCHED" not in result.stdout
+    assert "RAN:" not in result.stdout, "the tile never runs import_ca.py"
+    assert (tmp_path / "prefix" / ".yulon-ca-thumbprint").exists() is (recorded is not None)
+    if recorded is not None:
+        assert (tmp_path / "prefix" / ".yulon-ca-thumbprint").read_text().strip() == recorded
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or os.name == "nt", reason="needs POSIX bash")
+def test_the_tile_launches_when_the_prefix_recorded_this_cas_thumbprint(tmp_path: Path) -> None:
+    result = _run_tile_ca_block(tmp_path, _TILE_CA_THUMB)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "LAUNCHED" in result.stdout and "FAIL" not in result.stdout
+
+
+def test_the_client_script_no_longer_carries_an_import_of_its_own() -> None:
+    text = (resources.installers_dir() / "wow-forever/gaming-mode/wowforever-client.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "import_ca" not in text and "LocalMachine" not in text
