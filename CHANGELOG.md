@@ -16,6 +16,12 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+
+### Changed
+
+## v0.9.34-Public — 2026-11-21
+
+### Fixed
 - WoW Forever: Yu'lon makes the login certificate itself, trusted only for the game's login name, with no CA key kept.
 - WoW Forever: an install with the old, broader certificate gets the narrow one on its next **Play**, in the same prompt.
 - WoW Forever: **Play** makes its certificate again when it has to, and a failed attempt keeps the old one.
@@ -28,8 +34,6 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **Play** on an FFXI server installed in **Program Files (x86)** can make the game's folders writable.
 - A game folder whose name holds characters like & is refused instead of reaching an administrator command.
 - A server's saved passwords stay readable only by you, even after a restore from a backup.
-
-### Changed
 
 ## v0.9.33-Public — 2026-11-20
 
