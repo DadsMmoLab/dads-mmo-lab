@@ -605,8 +605,17 @@ def shell_metacharacter(text: str) -> str | None:
     return None
 
 
-_PS_LITERAL = r"'(?:[^']|'')*'"
-"""`powershell_literal()`'s output: one single-quoted string with inner quotes doubled."""
+POWERSHELL_QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+"""Every character PowerShell's tokenizer reads as a single quote: ASCII and the four curly ones."""
+
+_PS_LITERAL = (
+    r"'(?:[^'\u2018\u2019\u201a\u201b]|''|\u2018\u2018|\u2019\u2019|\u201a\u201a|\u201b\u201b)*'"
+)
+"""`powershell_literal()`'s output: one single-quoted string, each inner quote doubled.
+
+The four curly single quotes (U+2018, U+2019, U+201A, U+201B) count as quotes to
+PowerShell, so a lone one inside the literal ends it and is refused here.
+"""
 
 _PS_NEW_FOLDER = re.compile(
     r"^\[System\.IO\.Directory\]::CreateDirectory\(" + _PS_LITERAL + r"\) \| Out-Null$"
@@ -5397,9 +5406,14 @@ def powershell_literal(value: object) -> str:
 
     A single-quoted PowerShell string holds every character as itself, `&`, `;` and `(`
     included, and `''` spells one `'`. So a path can go into a command whole, where
-    `cmd.exe` would have reparsed it.
+    `cmd.exe` would have reparsed it. PowerShell also reads U+2018, U+2019, U+201A and
+    U+201B as single quotes, so each of those is doubled too (the same character
+    repeated, as PowerShell's own `EscapeSingleQuotedStringContent` does).
     """
-    return SINGLE_QUOTE + str(value).replace(SINGLE_QUOTE, SINGLE_QUOTE * 2) + SINGLE_QUOTE
+    text = str(value)
+    for quote in POWERSHELL_QUOTES:
+        text = text.replace(quote, quote * 2)
+    return SINGLE_QUOTE + text + SINGLE_QUOTE
 
 
 def _ps_quote(value: object) -> str:

@@ -265,6 +265,48 @@ def test_a_folder_with_a_cmd_metacharacter_is_one_literal_argument(tail: str) ->
     assert str(folder).replace("'", "''") in literal
 
 
+@pytest.mark.parametrize("quote", ["\u2018", "\u2019", "\u201a", "\u201b"])
+def test_a_curly_single_quote_in_a_path_is_doubled(quote: str) -> None:
+    """Release blocker: PowerShell's tokenizer reads U+2018/2019/201A/201B as single quotes.
+
+    A lone one inside the literal ends it, so the same character is repeated, as
+    PowerShell's own `EscapeSingleQuotedStringContent` does.
+    """
+    assert platform.powershell_literal(f"C:\\a{quote}b") == f"'C:\\a{quote}{quote}b'"
+
+
+def test_a_path_that_breaks_out_with_curly_quotes_stays_one_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Release blocker: `C:\\x’);calc;(’` used to close the literal and run `calc`."""
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    folder = Path("C:/") / "x\u2019);calc;(\u2019"
+    command = grant_commands([folder], SID)[0]
+    prefix, suffix = "[System.IO.Directory]::CreateDirectory(", ") | Out-Null"
+    literal = command[3][len(prefix) : -len(suffix)]
+    assert literal.count("\u2019") == 4, "every curly quote is doubled"
+    assert "\u2019\u2019);calc;(\u2019\u2019" in literal
+    assert platform._PS_NEW_FOLDER.match(
+        command[3]
+    ), "the allowlist still matches the whole command"
+    argv, results = platform.elevated_admin_batch([command], is_admin=False)
+    results.unlink(missing_ok=True)
+    assert argv[0] == "powershell.exe"
+
+
+def test_the_admin_batch_refuses_a_lone_curly_quote_inside_the_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Release blocker: an undoubled curly quote inside the literal is refused by the allowlist."""
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    for quote in ("\u2018", "\u2019", "\u201a", "\u201b"):
+        lone = f"[System.IO.Directory]::CreateDirectory('C:\\x{quote});calc;({quote}') | Out-Null"
+        with pytest.raises(ValueError, match="exact "):
+            platform.elevated_admin_batch(
+                [["powershell.exe", "-NoProfile", "-Command", lone]], is_admin=False
+            )
+
+
 def test_a_program_files_x86_client_is_granted(tmp_path: Path) -> None:
     """T888 item 1 (Claude #1): the folder is no longer refused before the prompt is built.
 
