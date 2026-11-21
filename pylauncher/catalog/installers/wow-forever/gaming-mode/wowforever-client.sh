@@ -175,10 +175,10 @@ run_slr() { "$SLR" --verb=waitforexitandrun -- "$PROTON_DIR/proton" waitforexita
 # ── The prefix's trust follows the CA (T888) ──────────────────────────────────
 # A desktop Play remakes the server's certificate when it has to, and a remade CA is a
 # root this prefix does not have: the game's TLS check would fail on the first login.
-# The thumbprint the prefix last imported is recorded in it (by Play, or by the import
-# below); a different one on certs/ca.pem means the new CA has to go in before the game
-# starts. The import script deletes every superseded CA of ours from the prefix's own
-# store first, then adds this one.
+# This tile does NOT import it: Play checks the CA first (forever_trust.verified_ca,
+# x509_names) and then imports it into the prefix, recording its thumbprint there, and
+# this script has no such check. So a certs/ca.pem whose thumbprint differs from the
+# recorded one stops the launch and sends the player to Play on the desktop.
 CA_PEM="$SERVER_DIR/certs/ca.pem"
 CA_THUMB=$(python3 -I - "$CA_PEM" <<'PYEOF' 2>/dev/null || true
 import base64, hashlib, re, sys
@@ -191,21 +191,9 @@ if m:
     print(hashlib.sha1(base64.b64decode("".join(m.group(1).split()))).hexdigest().upper())
 PYEOF
 )
-PREFIX_PY="$PREFIX/pfx/drive_c/python313/python.exe"
-winpath() { printf 'Z:%s' "$1" | sed 's|/|\\|g'; }
-if [ -n "$CA_THUMB" ] && [ "$CA_THUMB" != "$(cat "$PREFIX/.yulon-ca-thumbprint" 2>/dev/null || true)" ] \
-    && [ -f "$PREFIX/import_ca.py" ] && [ -f "$PREFIX_PY" ]; then
-    say "The game's prefix is taking the server's certificate..."
-    rm -f "$PREFIX/import_ca-report.txt"
-    ( cd "$PREFIX" && LD_PRELOAD="${DML_STEAM_LD_PRELOAD-}" run_slr \
-        "$PREFIX_PY" -I "$(winpath "$PREFIX/import_ca.py")" \
-        "$(winpath "$CA_PEM")" "$(winpath "$PREFIX/import_ca-report.txt")" ) >>"$LOGFILE" 2>&1
-    if grep -q 'CA in LocalMachine.Root: yes' "$PREFIX/import_ca-report.txt" 2>/dev/null; then
-        printf '%s\n' "$CA_THUMB" > "$PREFIX/.yulon-ca-thumbprint"
-    else
-        fail "The game's prefix did not take the server's certificate." \
-            "Press Play on WoW Forever's tab in Yu'lon once, on the desktop, then launch again."
-    fi
+if [ -n "$CA_THUMB" ] && [ "$CA_THUMB" != "$(cat "$PREFIX/.yulon-ca-thumbprint" 2>/dev/null || true)" ]; then
+    fail "The server's certificate changed." \
+        "Press Play on WoW Forever's tab in Yu'lon once, on the desktop, then launch again."
 fi
 
 # ── The login key, from Linux beside the game (stops with it) ─────────────────
